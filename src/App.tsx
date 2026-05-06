@@ -7,6 +7,9 @@ import { CardEditor } from './CardEditor';
 import { StudyView } from './StudyView';
 import { SuggestionDiscussion } from './SuggestionDiscussion';
 import { NotificationsBell } from './NotificationsBell';
+import { DiscoverView } from './DiscoverView';
+import { AnalyticsDashboard } from './AnalyticsDashboard';
+import { TemplateGallery } from './TemplateGallery';
 
 const PAGE_SIZE = 10;
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
@@ -86,9 +89,11 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [showConnectWizard, setShowConnectWizard] = useState(false);
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'study' | 'activity'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'study' | 'activity' | 'analytics'>('overview');
   const [showStudy, setShowStudy] = useState(false);
   const [reviewTab, setReviewTab] = useState<'changes' | 'discussion'>('changes');
+  const [topView, setTopView] = useState<'workspace' | 'discover' | 'templates'>('workspace');
+  const [deckVisibility, setDeckVisibility] = useState<Record<string, string>>({});
   const activeDeck = state?.decks.find((deck) => deck.id === state.activeDeckId) || state?.decks[0];
 
   useEffect(() => {
@@ -347,6 +352,18 @@ export default function App() {
           <span>DeckBridge</span>
         </div>
 
+        <nav className="sidebar-nav">
+          <button className={`nav-item ${topView === 'workspace' ? 'active' : ''}`} onClick={() => setTopView('workspace')}>
+            <Icon name="cards" /> Workspace
+          </button>
+          <button className={`nav-item ${topView === 'discover' ? 'active' : ''}`} onClick={() => setTopView('discover')}>
+            <Icon name="search" /> Discover
+          </button>
+          <button className={`nav-item ${topView === 'templates' ? 'active' : ''}`} onClick={() => setTopView('templates')}>
+            <Icon name="spark" /> Templates
+          </button>
+        </nav>
+
         <section className="side-section">
           <div className="section-heading">
             <span>Decks</span>
@@ -399,7 +416,31 @@ export default function App() {
         </section>
       </aside>
 
-      <section className="workspace">
+      {topView === 'discover' && (
+        <section className="workspace">
+          <DiscoverView
+            onFork={(deckId, name) => {
+              setTopView('workspace');
+              setNotice(`Forked "${name}" into your workspace`);
+              api.state().then(setState).catch(() => undefined);
+            }}
+          />
+        </section>
+      )}
+
+      {topView === 'templates' && (
+        <section className="workspace">
+          <TemplateGallery
+            onUse={(deckId, name) => {
+              setTopView('workspace');
+              setNotice(`Created "${name}" from template`);
+              api.state().then(setState).catch(() => undefined);
+            }}
+          />
+        </section>
+      )}
+
+      {topView === 'workspace' && <section className="workspace">
         <header className="topbar">
           <div className="topbar-actions">
             <label className="button secondary">
@@ -452,10 +493,21 @@ export default function App() {
               <button className={activeTab === 'study' ? 'active' : ''} onClick={() => { setActiveTab('study'); setShowStudy(true); }}>Study</button>
               <button disabled>Cards</button>
               <button disabled>Stats</button>
+              <button className={activeTab === 'analytics' ? 'active' : ''} onClick={() => setActiveTab('analytics')}>Analytics</button>
               <button className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab('activity')}>Activity</button>
               <button disabled>Settings</button>
               <span className="pending-callout">{pendingSuggestions.length} pending suggestions</span>
             </div>
+
+            {activeTab === 'analytics' && activeDeck ? (
+              <AnalyticsDashboard
+                deckId={activeDeck.id}
+                deckName={activeDeck.name}
+                isOwner={canReview}
+                currentVisibility={deckVisibility[activeDeck.id] ?? 'private'}
+                onSetVisibility={(v) => setDeckVisibility((prev) => ({ ...prev, [activeDeck.id]: v }))}
+              />
+            ) : null}
 
             {state.sync.conflicts.length ? (
               <div className="risk-banner" role="status">
@@ -674,7 +726,7 @@ export default function App() {
             </section>
           </aside>
         </div>
-      </section>
+      </section>}
 
       {notice ? <div className="toast">{notice}</div> : null}
       {busy ? <div className="busy-bar" /> : null}

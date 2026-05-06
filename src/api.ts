@@ -63,6 +63,43 @@ export interface Notification {
   createdAt: string;
 }
 
+export interface PublicDeck {
+  id: string;
+  name: string;
+  description: string;
+  ownerName: string;
+  importedAt: string;
+  downloadCount: number;
+  starCount: number;
+  forkedFrom: string | null;
+}
+
+export interface DeckAnalytics {
+  suggestions: {
+    total: number;
+    accepted: number;
+    rejected: number;
+    pending: number;
+    acceptanceRate: number;
+  };
+  stars: number;
+  leaderboard: { name: string; total: number; accepted: number }[];
+}
+
+export interface Template {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  authorName: string;
+  tags: string[];
+  starCount: number;
+  isFeatured: boolean;
+  fields: { name: string; description: string }[];
+  sampleCards: Record<string, string>[];
+  createdAt: string;
+}
+
 export const api = {
   health: () => jsonRequest<{ ok: boolean; dataDir: string }>('/api/health'),
   addonVersion: () => jsonRequest<{ version: string; minVersion: string }>('/api/addon/version'),
@@ -177,5 +214,34 @@ export const api = {
     const blob = await downloadResponse.blob();
     const filename = payload.download.filename || 'deck.apkg';
     return { blob, filename };
-  }
+  },
+  discover: (params?: { q?: string; sort?: string; page?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.page) qs.set('page', String(params.page));
+    return jsonRequest<{ decks: PublicDeck[] }>(`/api/discover?${qs}`);
+  },
+  setVisibility: (deckId: string, visibility: 'public' | 'private' | 'unlisted') =>
+    jsonRequest<{ visibility: string }>(`/api/decks/${deckId}/visibility`, {
+      method: 'PATCH',
+      body: JSON.stringify({ visibility })
+    }),
+  forkDeck: (deckId: string) =>
+    jsonRequest<{ deckId: string; name: string }>(`/api/decks/${deckId}/fork`, { method: 'POST' }),
+  starDeck: (deckId: string) =>
+    jsonRequest<{ starred: boolean; count: number }>(`/api/decks/${deckId}/star`, { method: 'POST' }),
+  unstarDeck: (deckId: string) =>
+    jsonRequest<{ starred: boolean; count: number }>(`/api/decks/${deckId}/star`, { method: 'DELETE' }),
+  analytics: (deckId: string) =>
+    jsonRequest<{ analytics: DeckAnalytics }>(`/api/decks/${deckId}/analytics`),
+  templates: (category?: string) => {
+    const qs = category && category !== 'all' ? `?category=${encodeURIComponent(category)}` : '';
+    return jsonRequest<{ templates: Template[] }>(`/api/templates${qs}`);
+  },
+  useTemplate: (templateId: string, name?: string) =>
+    jsonRequest<{ deckId: string; name: string }>(`/api/templates/${templateId}/use`, {
+      method: 'POST',
+      body: JSON.stringify({ name })
+    })
 };

@@ -1,5 +1,5 @@
 import cors from 'cors';
-import crypto from 'node:crypto';
+import crypto, { randomUUID } from 'node:crypto';
 import express from 'express';
 import fs from 'node:fs/promises';
 import multer from 'multer';
@@ -373,6 +373,292 @@ export function createApp(options = {}) {
 
   app.post('/api/decks/:deckId/export', auth.requireUser, createExport);
   app.post('/api/decks/export', auth.requireUser, createExport);
+
+  // ─── Phase 4: Discovery, Stars, Profiles, Analytics, Templates ───────────
+
+  // Public deck discovery gallery
+  app.get('/api/discover', async (req, res, next) => {
+    try {
+      if (!auth.supabase) return res.json({ decks: [] });
+      const { q, category, sort = 'stars', page = '1' } = req.query;
+      const limit = 24;
+      const offset = (Math.max(1, Number(page)) - 1) * limit;
+
+      let query = auth.supabase
+        .from('decks')
+        .select(`
+          id, name, description, owner_id, owner_name,
+          imported_at, visibility, download_count, fork_of,
+          deck_stars(count)
+        `)
+        .eq('visibility', 'public')
+        .range(offset, offset + limit - 1);
+
+      if (q) query = query.ilike('name', `%${q}%`);
+      if (sort === 'stars') query = query.order('download_count', { ascending: false });
+      else if (sort === 'newest') query = query.order('imported_at', { ascending: false });
+
+      const { data, error } = await query;
+      if (error) fail(500, 'discover_error', error.message);
+
+      const decks = (data || []).map((d) => ({
+        id: d.id,
+        name: d.name,
+        description: d.description,
+        ownerName: d.owner_name,
+        importedAt: d.imported_at,
+        downloadCount: d.download_count,
+        starCount: d.deck_stars?.[0]?.count ?? 0,
+        forkedFrom: d.fork_of ?? null,
+      }));
+      res.json({ decks });
+    } catch (err) { next(err); }
+  });
+
+  // Make a deck public/private/unlisted
+  app.patch('/api/decks/:deckId/visibility', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) fail(501, 'visibility_unavailable', 'Requires Supabase');
+      const allowed = ['public', 'private', 'unlisted'];
+      if (!allowed.includes(req.body.visibility)) fail(400, 'invalid_visibility', `Must be one of: ${allowed.join(', ')}`);
+      // Only owner can change visibility
+      const { data: member } = await auth.supabase.from('deck_members')
+        .select('role').eq('deck_id', req.params.deckId).eq('user_id', req.user.id).single();
+      if (member?.role !== 'owner') fail(403, 'forbidden', 'Only the deck owner can change visibility');
+      const { error } = await auth.supabase.from('decks')
+        .update({ visibility: req.body.visibility })
+        .eq('id', req.params.deckId);
+      if (error) fail(500, 'visibility_error', error.message);
+      res.json({ visibility: req.body.visibility });
+    } catch (err) { next(err); }
+  });
+
+  // Fork a public deck into the requester's workspace
+  app.post('/api/decks/:deckId/fork', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) fail(501, 'fork_unavailable', 'Requires Supabase');
+      // Load source deck (must be public or member)
+      const { data: source, error: srcErr } = await auth.supabase
+        .from('decks').select('*').eq('id', req.params.deckId).single();
+      if (srcErr || !source) fail(404, 'deck_not_found', 'Deck not found');
+      if (source.visibility !== 'public') {
+        const { data: m } = await auth.supabase.from('deck_members')
+          .select('role').eq('deck_id', req.params.deckId).eq('user_id', req.user.id).single();
+        if (!m) fail(403, 'forbidden', 'Cannot fork a private deck you are not a member of');
+      }
+      // Ensure profile exists
+      await auth.supabase.from('profiles').upsert({
+        id: req.user.id, email: req.user.email, name: req.user.name
+      }, { onConflict: 'id', ignoreDuplicates: true });
+
+      const forkId = randomUUID();
+      const now = new Date().toISOString();
+
+      // Copy deck row
+      await auth.supabase.from('decks').insert({
+        id: forkId,
+        owner_id: req.user.id,
+        owner_name: req.user.name,
+        name: `${source.name} (fork)`,
+        description: source.description,
+        imported_at: now,
+        last_synced_at: null,
+        media: source.media,
+        models: source.models,
+        source: source.source,
+        visibility: 'private',
+        fork_of: req.params.deckId
+      });
+
+      // Copy cards
+      const { data: cards } = await auth.supabase.from('cards')
+        .select('*').eq('deck_id', req.params.deckId);
+      if (cards?.length) {
+        const forkedCards = cards.map((c) => ({
+          ...c,
+          id: randomUUID(),
+          deck_id: forkId,
+          created_at: now,
+          modified_at: now
+        }));
+        await auth.supabase.from('cards').insert(forkedCards);
+      }
+
+      // Add owner membership
+      await auth.supabase.from('deck_members').insert({
+        deck_id: forkId, user_id: req.user.id, role: 'owner', created_at: now
+      });
+
+      // Increment source download count
+      await auth.supabase.from('decks')
+        .update({ download_count: (source.download_count || 0) + 1 })
+        .eq('id', req.params.deckId);
+
+      res.status(201).json({ deckId: forkId, name: `${source.name} (fork)` });
+    } catch (err) { next(err); }
+  });
+
+  // Star / unstar a deck
+  app.post('/api/decks/:deckId/star', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) fail(501, 'stars_unavailable', 'Requires Supabase');
+      await auth.supabase.from('deck_stars').upsert(
+        { deck_id: req.params.deckId, user_id: req.user.id, created_at: new Date().toISOString() },
+        { onConflict: 'deck_id,user_id', ignoreDuplicates: true }
+      );
+      const { count } = await auth.supabase.from('deck_stars')
+        .select('*', { count: 'exact', head: true }).eq('deck_id', req.params.deckId);
+      res.json({ starred: true, count: count ?? 0 });
+    } catch (err) { next(err); }
+  });
+
+  app.delete('/api/decks/:deckId/star', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) return res.status(204).end();
+      await auth.supabase.from('deck_stars')
+        .delete().eq('deck_id', req.params.deckId).eq('user_id', req.user.id);
+      const { count } = await auth.supabase.from('deck_stars')
+        .select('*', { count: 'exact', head: true }).eq('deck_id', req.params.deckId);
+      res.json({ starred: false, count: count ?? 0 });
+    } catch (err) { next(err); }
+  });
+
+  // Public user profile
+  app.get('/api/profiles/:userId', async (req, res, next) => {
+    try {
+      if (!auth.supabase) return res.json({ profile: null, decks: [] });
+      const { data: profile } = await auth.supabase.from('profiles')
+        .select('id, name, email').eq('id', req.params.userId).single();
+      if (!profile) fail(404, 'profile_not_found', 'User not found');
+      const { data: decks } = await auth.supabase.from('decks')
+        .select('id, name, description, imported_at, download_count')
+        .eq('owner_id', req.params.userId)
+        .eq('visibility', 'public')
+        .order('imported_at', { ascending: false });
+      res.json({ profile: { id: profile.id, name: profile.name }, decks: decks || [] });
+    } catch (err) { next(err); }
+  });
+
+  // Deck analytics
+  app.get('/api/decks/:deckId/analytics', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) return res.json({ analytics: null });
+      // Must be owner or editor
+      const { data: member } = await auth.supabase.from('deck_members')
+        .select('role').eq('deck_id', req.params.deckId).eq('user_id', req.user.id).single();
+      if (!member || member.role === 'viewer') fail(403, 'forbidden', 'Analytics require editor or owner role');
+
+      const [suggestionsRes, starsRes] = await Promise.all([
+        auth.supabase.from('suggestions').select('status, author_id, author_name, created_at')
+          .eq('deck_id', req.params.deckId),
+        auth.supabase.from('deck_stars').select('user_id')
+          .eq('deck_id', req.params.deckId)
+      ]);
+
+      const suggestions = suggestionsRes.data || [];
+      const total = suggestions.length;
+      const accepted = suggestions.filter((s) => s.status === 'accepted').length;
+      const rejected = suggestions.filter((s) => s.status === 'rejected').length;
+      const pending = suggestions.filter((s) => s.status === 'pending').length;
+
+      // Contributor leaderboard
+      const byAuthor = {};
+      for (const s of suggestions) {
+        if (!byAuthor[s.author_id]) byAuthor[s.author_id] = { name: s.author_name, total: 0, accepted: 0 };
+        byAuthor[s.author_id].total++;
+        if (s.status === 'accepted') byAuthor[s.author_id].accepted++;
+      }
+      const leaderboard = Object.values(byAuthor)
+        .sort((a, b) => b.accepted - a.accepted)
+        .slice(0, 10);
+
+      res.json({
+        analytics: {
+          suggestions: { total, accepted, rejected, pending, acceptanceRate: total ? Math.round((accepted / total) * 100) : 0 },
+          stars: starsRes.data?.length ?? 0,
+          leaderboard,
+        }
+      });
+    } catch (err) { next(err); }
+  });
+
+  // Templates
+  app.get('/api/templates', async (req, res, next) => {
+    try {
+      if (!auth.supabase) return res.json({ templates: [] });
+      const { category } = req.query;
+      let query = auth.supabase.from('templates')
+        .select('id, name, description, category, author_name, tags, star_count, is_featured, fields, sample_cards, created_at')
+        .order('is_featured', { ascending: false })
+        .order('star_count', { ascending: false });
+      if (category && category !== 'all') query = query.eq('category', category);
+      const { data, error } = await query;
+      if (error) fail(500, 'templates_error', error.message);
+      res.json({ templates: data || [] });
+    } catch (err) { next(err); }
+  });
+
+  // Create deck from template
+  app.post('/api/templates/:templateId/use', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) fail(501, 'templates_unavailable', 'Requires Supabase');
+      const { data: tpl } = await auth.supabase.from('templates')
+        .select('*').eq('id', req.params.templateId).single();
+      if (!tpl) fail(404, 'template_not_found', 'Template not found');
+
+      await auth.supabase.from('profiles').upsert(
+        { id: req.user.id, email: req.user.email, name: req.user.name },
+        { onConflict: 'id', ignoreDuplicates: true }
+      );
+
+      const deckId = randomUUID();
+      const now = new Date().toISOString();
+      const deckName = req.body.name || tpl.name;
+
+      await auth.supabase.from('decks').insert({
+        id: deckId,
+        owner_id: req.user.id,
+        owner_name: req.user.name,
+        name: deckName,
+        description: tpl.description,
+        imported_at: now,
+        last_synced_at: null,
+        media: {},
+        models: [],
+        source: { filename: 'template', format: 'template', templateId: tpl.id },
+        visibility: 'private'
+      });
+
+      // Seed sample cards from template
+      const sampleCards = Array.isArray(tpl.sample_cards) ? tpl.sample_cards : [];
+      if (sampleCards.length) {
+        const cards = sampleCards.map((fields) => ({
+          id: randomUUID(),
+          deck_id: deckId,
+          anki_note_id: null,
+          note_type: 'Basic',
+          model_name: tpl.name,
+          field_order: (tpl.fields || []).map((f) => f.name),
+          fields,
+          tags: tpl.tags || [],
+          due: null,
+          state: 'New',
+          modified_at: now,
+          modified_by: 'Template',
+          suspended: false,
+          media_refs: [],
+          created_at: now
+        }));
+        await auth.supabase.from('cards').insert(cards);
+      }
+
+      await auth.supabase.from('deck_members').insert({
+        deck_id: deckId, user_id: req.user.id, role: 'owner', created_at: now
+      });
+
+      res.status(201).json({ deckId, name: deckName });
+    } catch (err) { next(err); }
+  });
 
   app.post('/api/decks/:deckId/sync/conflicts', auth.requireUser, async (req, res, next) => {
     try {
