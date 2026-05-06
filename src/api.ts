@@ -215,6 +215,24 @@ export const api = {
     const filename = payload.download.filename || 'deck.apkg';
     return { blob, filename };
   },
+  exportDeckCsv: async (deckId: string) => {
+    const response = await fetch(`/api/decks/${deckId}/export/csv`, {
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+    });
+    if (!response.ok) throw new Error(`CSV export failed with ${response.status}`);
+    const blob = await response.blob();
+    const filename = response.headers.get('Content-Disposition')?.match(/filename="(.+?)"/)?.[1] || 'deck.csv';
+    return { blob, filename };
+  },
+  exportActivityCsv: async (deckId: string) => {
+    const response = await fetch(`/api/decks/${deckId}/export/activity`, {
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+    });
+    if (!response.ok) throw new Error(`Activity export failed with ${response.status}`);
+    const blob = await response.blob();
+    const filename = response.headers.get('Content-Disposition')?.match(/filename="(.+?)"/)?.[1] || 'activity.csv';
+    return { blob, filename };
+  },
   discover: (params?: { q?: string; sort?: string; page?: number }) => {
     const qs = new URLSearchParams();
     if (params?.q) qs.set('q', params.q);

@@ -497,10 +497,42 @@ export default function App() {
               </div>
             ) : null}
             <NotificationsBell />
-            <button className="button primary" onClick={exportDeck} disabled={busy}>
-              <Icon name="download" />
-              Export/Download
-            </button>
+            <div className="export-dropdown">
+              <button className="button primary" onClick={exportDeck} disabled={busy}>
+                <Icon name="download" /> Export/Download
+              </button>
+              <div className="export-menu">
+                <button onClick={exportDeck} disabled={busy}>.apkg (Anki)</button>
+                <button onClick={async () => {
+                  if (!activeDeck) return;
+                  try {
+                    setBusy(true);
+                    const { blob, filename } = await api.exportDeckCsv(activeDeck.id);
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  } catch (e) { setNotice(e instanceof Error ? e.message : 'Export failed'); }
+                  finally { setBusy(false); }
+                }} disabled={busy}>.csv (Spreadsheet)</button>
+                <button onClick={async () => {
+                  if (!activeDeck) return;
+                  try {
+                    setBusy(true);
+                    const { blob, filename } = await api.exportActivityCsv(activeDeck.id);
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  } catch (e) { setNotice(e instanceof Error ? e.message : 'Export failed'); }
+                  finally { setBusy(false); }
+                }} disabled={busy}>Activity Log (.csv)</button>
+              </div>
+            </div>
           </div>
         </header>
 

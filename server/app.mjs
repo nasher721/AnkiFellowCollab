@@ -400,6 +400,67 @@ export function createApp(options = {}) {
   app.post('/api/decks/:deckId/export', auth.requireUser, createExport);
   app.post('/api/decks/export', auth.requireUser, createExport);
 
+  function escapeCsv(value) {
+    const str = String(value ?? '');
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  }
+
+  app.get('/api/decks/:deckId/export/csv', auth.requireUser, async (req, res, next) => {
+    try {
+      const deckState = await repository.getDeckState(req.user, req.params.deckId);
+      const deck = deckState.decks[0];
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+
+      const allFields = new Set();
+      for (const card of deck.cards) {
+        for (const key of Object.keys(card.fields)) allFields.add(key);
+      }
+      const fieldNames = [...allFields];
+
+      const header = ['Card ID', 'Note Type', 'State', 'Tags', ...fieldNames].map(escapeCsv).join(',');
+      const rows = deck.cards.map((card) => [
+        card.id,
+        card.type,
+        card.state,
+        card.tags.join('; '),
+        ...fieldNames.map((f) => card.fields[f] || '')
+      ].map(escapeCsv).join(','));
+
+      const csv = [header, ...rows].join('\n');
+      const filename = `${deck.name.replace(/[^a-z0-9_-]+/gi, '-')}-cards.csv`;
+
+      res.set({
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Cache-Control': 'private, max-age=60'
+      });
+      res.send(csv);
+    } catch (err) { next(err); }
+  });
+
+  app.get('/api/decks/:deckId/export/activity', auth.requireUser, async (req, res, next) => {
+    try {
+      const deckState = await repository.getDeckState(req.user, req.params.deckId);
+      const activities = deckState.activity || [];
+
+      const header = ['ID', 'Kind', 'Text', 'Timestamp'].map(escapeCsv).join(',');
+      const rows = activities.map((a) => [a.id, a.kind, a.text, a.at].map(escapeCsv).join(','));
+      const csv = [header, ...rows].join('\n');
+      const deck = deckState.decks[0];
+      const filename = `${(deck?.name || 'deck').replace(/[^a-z0-9_-]+/gi, '-')}-activity.csv`;
+
+      res.set({
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Cache-Control': 'private, max-age=60'
+      });
+      res.send(csv);
+    } catch (err) { next(err); }
+  });
+
   // ─── Phase 4: Discovery, Stars, Profiles, Analytics, Templates ───────────
 
   // Public deck discovery gallery

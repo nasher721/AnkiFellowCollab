@@ -9,6 +9,33 @@ interface Props {
   onCancel: () => void;
 }
 
+function FormattingToolbar({ textareaId }: { textareaId: string }) {
+  function wrapSelection(before: string, after: string) {
+    const textarea = document.getElementById(textareaId) as HTMLTextAreaElement | null;
+    if (!textarea) return;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selected = textarea.value.substring(start, end);
+    const newValue = textarea.value.substring(0, start) + before + selected + after + textarea.value.substring(end);
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+    nativeInputValueSetter?.call(textarea, newValue);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.focus();
+    textarea.selectionStart = start + before.length;
+    textarea.selectionEnd = start + before.length + selected.length;
+  }
+
+  return (
+    <div className="format-toolbar">
+      <button type="button" title="Bold" onClick={() => wrapSelection('**', '**')}><b>B</b></button>
+      <button type="button" title="Italic" onClick={() => wrapSelection('*', '*')}><i>I</i></button>
+      <button type="button" title="List" onClick={() => wrapSelection('- ', '')}>List</button>
+      <button type="button" title="Cloze" onClick={() => wrapSelection('{{c1::', '}}')}>{'{{}}'}</button>
+      <button type="button" title="Code" onClick={() => wrapSelection('`', '`')}>{'<>'}</button>
+    </div>
+  );
+}
+
 export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props) {
   const fieldNames = card.fieldOrder?.length ? card.fieldOrder : Object.keys(card.fields);
   const [fields, setFields] = useState<Record<string, string>>(() => ({ ...card.fields }));
@@ -64,30 +91,12 @@ export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props
       <div className="card-editor-fields">
         {fieldNames.map((name, i) => (
           <div className="card-editor-field" key={name}>
-            <label htmlFor={`field-${name}`}>{name}</label>
-            <div className="card-editor-toolbar">
-              <button type="button" className="toolbar-btn" title="Bold" onClick={() => {
-                const el = document.getElementById(`field-${name}`) as HTMLTextAreaElement;
-                if (!el) return;
-                const { selectionStart: s, selectionEnd: e } = el;
-                setField(name, fields[name].slice(0, s) + `<b>${fields[name].slice(s, e)}</b>` + fields[name].slice(e));
-              }}>B</button>
-              <button type="button" className="toolbar-btn" title="Italic" onClick={() => {
-                const el = document.getElementById(`field-${name}`) as HTMLTextAreaElement;
-                if (!el) return;
-                const { selectionStart: s, selectionEnd: e } = el;
-                setField(name, fields[name].slice(0, s) + `<i>${fields[name].slice(s, e)}</i>` + fields[name].slice(e));
-              }}><em>I</em></button>
-              <button type="button" className="toolbar-btn" title="Cloze deletion" onClick={() => {
-                const el = document.getElementById(`field-${name}`) as HTMLTextAreaElement;
-                if (!el) return;
-                const { selectionStart: s, selectionEnd: e } = el;
-                const n = (fields[name].match(/{{c(\d+)::/g) || []).length + 1;
-                setField(name, fields[name].slice(0, s) + `{{c${n}::${fields[name].slice(s, e)}}}` + fields[name].slice(e));
-              }}>[ ]</button>
-            </div>
+            <label htmlFor={`card-edit-${name.toLowerCase()}`}>{name}</label>
+            {(name.toLowerCase() === 'front' || name.toLowerCase() === 'back') && (
+              <FormattingToolbar textareaId={`card-edit-${name.toLowerCase()}`} />
+            )}
             <textarea
-              id={`field-${name}`}
+              id={`card-edit-${name.toLowerCase()}`}
               ref={i === 0 ? firstRef : undefined}
               className="card-editor-textarea"
               value={fields[name] ?? ''}
