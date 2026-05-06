@@ -10,6 +10,7 @@ import { checkAnki, pullDeck, pushDeck } from './ankiConnect.mjs';
 import { createApkg, parseApkg } from './ankiPackage.mjs';
 import { createRepository } from './repositories/index.mjs';
 import { ensureDataDirs, loadState, paths, saveState } from './store.mjs';
+import { createUserToken, listUserTokens, revokeUserToken } from './tokens.mjs';
 
 function legacyErrorMessage(body) {
   return body.error?.message || body.error || 'Unexpected server error';
@@ -67,6 +68,65 @@ export function createApp(options = {}) {
   app.get('/api/me', auth.requireUser, async (req, res, next) => {
     try {
       res.json(await repository.getMe(req.user));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // --- API Token management (for Anki add-on setup) ---
+
+  app.get('/api/tokens', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) return res.json({ tokens: [] });
+      res.json({ tokens: await listUserTokens(auth.supabase, req.user.id) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/tokens', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) fail(501, 'tokens_unavailable', 'Token management requires Supabase');
+      const label = typeof req.body.label === 'string' && req.body.label.trim()
+        ? req.body.label.trim()
+        : 'Anki Add-on';
+      const token = await createUserToken(auth.supabase, req.user.id, label);
+      res.status(201).json(token);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/api/tokens/:tokenId', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) fail(501, 'tokens_unavailable', 'Token management requires Supabase');
+      await revokeUserToken(auth.supabase, req.user.id, req.params.tokenId);
+      res.status(204).end();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // --- Add-on distribution ---
+
+  app.get('/api/addon/version', (_req, res) => {
+    res.json({ version: '0.2.0', minVersion: '0.1.0' });
+  });
+
+  app.get('/api/addon/download', async (_req, res, next) => {
+    try {
+      const addonPath = path.resolve(process.cwd(), 'dist', 'deckbridge-sync.ankiaddon');
+      try {
+        await fs.access(addonPath);
+      } catch {
+        fail(404, 'addon_not_built', 'Add-on package not found. Run npm run package:anki-addon first.');
+      }
+      res.set({
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'attachment; filename="deckbridge-sync.ankiaddon"',
+        'Cache-Control': 'public, max-age=3600'
+      });
+      res.sendFile(addonPath);
     } catch (error) {
       next(error);
     }

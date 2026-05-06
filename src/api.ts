@@ -32,8 +32,33 @@ async function jsonRequest<T>(url: string, options: RequestInit = {}): Promise<T
   return response.json() as Promise<T>;
 }
 
+export interface ApiToken {
+  id: string;
+  label: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface CreatedToken extends ApiToken {
+  raw: string;
+}
+
 export const api = {
   health: () => jsonRequest<{ ok: boolean; dataDir: string }>('/api/health'),
+  addonVersion: () => jsonRequest<{ version: string; minVersion: string }>('/api/addon/version'),
+  tokens: {
+    list: () => jsonRequest<{ tokens: ApiToken[] }>('/api/tokens'),
+    create: (label?: string) =>
+      jsonRequest<CreatedToken>('/api/tokens', {
+        method: 'POST',
+        body: JSON.stringify({ label: label || 'Anki Add-on' })
+      }),
+    revoke: (tokenId: string) =>
+      fetch(`/api/tokens/${tokenId}`, {
+        method: 'DELETE',
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+      }).then((r) => { if (!r.ok) throw new Error(`Revoke failed: ${r.status}`); })
+  },
   me: () => jsonRequest<{ user: User; memberships: DeckMember[] }>('/api/me'),
   decks: () => jsonRequest<{ decks: DeckSummary[] }>('/api/decks'),
   deck: (deckId: string) => jsonRequest<AppState>(`/api/decks/${deckId}`),

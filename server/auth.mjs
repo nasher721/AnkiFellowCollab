@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { fail } from './errors.mjs';
+import { resolveTokenUser } from './tokens.mjs';
 
 const defaultDevUser = {
   id: 'you',
@@ -24,6 +25,10 @@ export function createAuth(options = {}) {
   async function resolveUser(req) {
     const token = getBearerToken(req);
     if (supabase && token) {
+      // Try DeckBridge API token first (db_ prefix)
+      const tokenUser = await resolveTokenUser(supabase, token);
+      if (tokenUser) return tokenUser;
+      // Fall back to Supabase JWT
       const { data, error } = await supabase.auth.getUser(token);
       if (error || !data.user) fail(401, 'unauthorized', 'Invalid or expired session');
       return {
@@ -53,6 +58,7 @@ export function createAuth(options = {}) {
         next(error);
       }
     },
-    resolveUser
+    resolveUser,
+    supabase
   };
 }

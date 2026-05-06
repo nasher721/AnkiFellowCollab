@@ -2,6 +2,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
 import { createClient, type Session } from '@supabase/supabase-js';
 import { api, setApiAuthToken } from './api';
 import type { AppState, DeckCard, Suggestion } from './types';
+import { ConnectAnkiWizard } from './ConnectAnkiWizard';
 
 const PAGE_SIZE = 10;
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
@@ -79,6 +80,7 @@ export default function App() {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
+  const [showConnectWizard, setShowConnectWizard] = useState(false);
   const activeDeck = state?.decks.find((deck) => deck.id === state.activeDeckId) || state?.decks[0];
 
   useEffect(() => {
@@ -401,6 +403,10 @@ export default function App() {
               <Icon name="sync" />
               Import from Anki
             </button>
+            <button className="button primary" onClick={() => setShowConnectWizard(true)}>
+              <Icon name="sync" />
+              Connect Anki
+            </button>
           </div>
 
           <div className="sync-strip">
@@ -625,6 +631,13 @@ export default function App() {
 
       {notice ? <div className="toast">{notice}</div> : null}
       {busy ? <div className="busy-bar" /> : null}
+      {showConnectWizard && (
+        <ConnectAnkiWizard
+          decks={state.summaries}
+          platformUrl={window.location.origin}
+          onClose={() => setShowConnectWizard(false)}
+        />
+      )}
     </main>
   );
 }
