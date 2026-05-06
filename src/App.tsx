@@ -1,8 +1,14 @@
-import { ChangeEvent, useEffect, useMemo, useState } from 'react';
-import { api } from './api';
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
+import { createClient, type Session } from '@supabase/supabase-js';
+import { api, setApiAuthToken } from './api';
 import type { AppState, DeckCard, Suggestion } from './types';
 
 const PAGE_SIZE = 10;
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+const supabase = supabaseUrl && supabaseAnonKey
+  ? createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true } })
+  : null;
 
 const statusColors: Record<string, string> = {
   New: 'blue',
@@ -67,9 +73,37 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(1);
   const [apiHealth, setApiHealth] = useState<'checking' | 'ok' | 'down'>('checking');
+  const [authReady, setAuthReady] = useState(!supabase);
+  const [session, setSession] = useState<Session | null>(null);
+  const [authMode, setAuthMode] = useState<'sign-in' | 'sign-up'>('sign-in');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
   const activeDeck = state?.decks.find((deck) => deck.id === state.activeDeckId) || state?.decks[0];
 
   useEffect(() => {
+    if (!supabase) return;
+    let mounted = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      setSession(data.session);
+      setApiAuthToken(data.session?.access_token || null);
+      setAuthReady(true);
+    });
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setApiAuthToken(nextSession?.access_token || null);
+      setAuthReady(true);
+      if (!nextSession) setState(null);
+    });
+    return () => {
+      mounted = false;
+      subscription.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!authReady || (supabase && !session)) return;
     Promise.all([api.state(), api.health()])
       .then(([next]) => {
         setState(next);
@@ -81,14 +115,15 @@ export default function App() {
         setApiHealth('down');
         setNotice(error.message);
       });
-  }, []);
+  }, [authReady, session]);
 
   useEffect(() => {
+    if (supabase && !session) return undefined;
     const timer = window.setInterval(() => {
       api.ankiStatus().then(() => api.state()).then(setState).catch(() => undefined);
     }, 15000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [session]);
 
   useEffect(() => {
     setPage(1);
@@ -151,6 +186,19 @@ export default function App() {
     event.target.value = '';
   }
 
+  async function submitAuth(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    setAuthBusy(true);
+    setNotice('');
+    const credentials = { email: authEmail, password: authPassword };
+    const { error } = authMode === 'sign-in'
+      ? await supabase.auth.signInWithPassword(credentials)
+      : await supabase.auth.signUp({ ...credentials, options: { data: { name: authEmail } } });
+    if (error) setNotice(error.message);
+    setAuthBusy(false);
+  }
+
   function switchDeck(deckId: string) {
     setSelectedSuggestionId(null);
     setSelectedCardId(null);
@@ -208,11 +256,75 @@ export default function App() {
     }
   }
 
-  if (!state || !activeDeck) {
+  if (supabase && authReady && !session) {
+    return (
+      <div className="auth-screen">
+        <section className="auth-panel">
+          <div className="brand-mark"><Icon name="cards" /></div>
+          <h1>DeckBridge</h1>
+          <form className="auth-form" onSubmit={submitAuth}>
+            <input
+              aria-label="Email"
+              autoComplete="email"
+              placeholder="Email"
+              type="email"
+              value={authEmail}
+              onChange={(event) => setAuthEmail(event.target.value)}
+              required
+            />
+            <input
+              aria-label="Password"
+              autoComplete={authMode === 'sign-in' ? 'current-password' : 'new-password'}
+              placeholder="Password"
+              type="password"
+              minLength={6}
+              value={authPassword}
+              onChange={(event) => setAuthPassword(event.target.value)}
+              required
+            />
+            <button className="button primary" type="submit" disabled={authBusy}>
+              {authMode === 'sign-in' ? 'Sign in' : 'Create account'}
+            </button>
+          </form>
+          <button
+            className="auth-switch"
+            type="button"
+            onClick={() => setAuthMode(authMode === 'sign-in' ? 'sign-up' : 'sign-in')}
+          >
+            {authMode === 'sign-in' ? 'Create an account' : 'Use an existing account'}
+          </button>
+          {notice ? <p className="auth-notice">{notice}</p> : null}
+        </section>
+      </div>
+    );
+  }
+
+  if (!state) {
     return (
       <div className="loading">
         <strong>Loading DeckBridge...</strong>
         {apiHealth === 'down' ? <span>API bridge is unavailable. Start it with npm run dev:server.</span> : null}
+      </div>
+    );
+  }
+
+  if (!activeDeck) {
+    return (
+      <div className="empty-workspace">
+        <div className="brand-row">
+          <div className="brand-mark"><Icon name="cards" /></div>
+          <span>DeckBridge</span>
+        </div>
+        <section className="empty-import">
+          <Icon name="upload" />
+          <h1>Import your first Anki deck</h1>
+          <p>Upload an `.apkg` to create a collaborative workspace backed by Supabase.</p>
+          <label className="button primary">
+            Import .apkg
+            <input className="file-input-hidden" type="file" accept=".apkg" onChange={uploadDeck} />
+          </label>
+          {notice ? <span className="notice">{notice}</span> : null}
+        </section>
       </div>
     );
   }

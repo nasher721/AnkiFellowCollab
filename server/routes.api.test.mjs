@@ -88,3 +88,49 @@ test('upload, export, and local-bridge conflict APIs use authenticated deck scop
 
   await fs.rm(uploadPath, { force: true });
 });
+
+test('Anki add-on sync endpoint creates cards and records safe conflicts', async () => {
+  const { app } = await createTestApp();
+
+  const created = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'overwrite-platform',
+      source: 'DeckBridge Sync test',
+      cards: [{
+        id: 'anki-9001',
+        ankiNoteId: 9001,
+        type: 'Basic',
+        modelName: 'Basic',
+        fieldOrder: ['Front', 'Back'],
+        fields: { Front: 'Created from Anki', Back: 'Synced into platform' },
+        tags: ['DeckBridge'],
+        state: 'Review',
+        suspended: false
+      }]
+    }), 'you', 'You').expect(200);
+
+  assert.equal(created.body.result.stats.created, 1);
+  assert.equal(created.body.state.decks[0].cards.some((card) => card.ankiNoteId === 9001), true);
+
+  const conflict = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'detect',
+      source: 'DeckBridge Sync test',
+      cards: [{
+        id: 'anki-9001',
+        ankiNoteId: 9001,
+        type: 'Basic',
+        modelName: 'Basic',
+        fieldOrder: ['Front', 'Back'],
+        fields: { Front: 'Different local Anki text', Back: 'Synced into platform' },
+        tags: ['DeckBridge'],
+        state: 'Review',
+        suspended: false
+      }]
+    }), 'you', 'You').expect(200);
+
+  assert.equal(conflict.body.result.stats.conflicts, 1);
+  assert.equal(conflict.body.state.sync.conflicts[0].cardId, 'anki-9001');
+});

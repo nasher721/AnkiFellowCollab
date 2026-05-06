@@ -1,0 +1,16 @@
+{
+  "platform_url": "http://localhost:4175",
+  "api_token": "",
+  "deck_id": "deck-demo-zanki",
+  "local_deck": "",
+  "conflict_policy": "detect",
+  "auto_sync_minutes": 0,
+  "timeout_seconds": 30,
+  "batch_size": 250,
+  "tag_filter": "",
+  "include_suspended": true,
+  "create_missing_notes": true,
+  "pull_overwrites_local": false,
+  "sync_on_profile_open": false,
+  "sync_on_close": false
+}

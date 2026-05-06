@@ -1,5 +1,11 @@
 import type { ApiError, AppState, Role, StorageAsset, User, DeckMember, DeckSummary } from './types';
 
+let authToken: string | null = null;
+
+export function setApiAuthToken(token: string | null) {
+  authToken = token;
+}
+
 function extractError(body: unknown, fallback: string) {
   const value = body as Partial<ApiError> & { error?: string | { message?: string }; legacyError?: string };
   if (typeof value?.error === 'string') return value.error;
@@ -9,12 +15,14 @@ function extractError(body: unknown, fallback: string) {
 }
 
 async function jsonRequest<T>(url: string, options: RequestInit = {}): Promise<T> {
+  const headers: Record<string, string> = {
+    ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+    ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    ...(options.headers as Record<string, string> | undefined)
+  };
   const response = await fetch(url, {
     ...options,
-    headers: {
-      ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
-      ...options.headers
-    }
+    headers
   });
 
   if (!response.ok) {
@@ -79,7 +87,10 @@ export const api = {
   exportDeck: async (deckId: string) => {
     const response = await fetch(`/api/decks/${deckId}/export`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
+      },
       body: JSON.stringify({})
     });
     if (!response.ok) {

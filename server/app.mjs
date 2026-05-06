@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import multer from 'multer';
 import path from 'node:path';
 import { createAuth } from './auth.mjs';
-import { deckToCreateDeckJson, normalizeParsedDeck, normalizeSuggestionInput } from './domain.mjs';
+import { deckToCreateDeckJson, normalizeAddonSyncInput, normalizeParsedDeck, normalizeSuggestionInput } from './domain.mjs';
 import { AppError, errorPayload, fail } from './errors.mjs';
 import { checkAnki, pullDeck, pushDeck } from './ankiConnect.mjs';
 import { createApkg, parseApkg } from './ankiPackage.mjs';
@@ -199,6 +199,21 @@ export function createApp(options = {}) {
     try {
       const conflicts = Array.isArray(req.body.conflicts) ? req.body.conflicts : [];
       res.json(await repository.recordSyncConflicts(req.user, req.params.deckId, conflicts));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/decks/:deckId/sync/cards', auth.requireUser, async (req, res, next) => {
+    try {
+      let syncInput;
+      try {
+        syncInput = normalizeAddonSyncInput(req.body);
+      } catch (error) {
+        fail(400, 'invalid_sync_payload', error.message);
+      }
+      if (!repository.syncCardsFromAddon) fail(501, 'sync_unavailable', 'Card sync is not available for this repository');
+      res.json(await repository.syncCardsFromAddon(req.user, req.params.deckId, syncInput));
     } catch (error) {
       next(error);
     }

@@ -94,6 +94,167 @@ export function normalizeParsedDeck(parsed, sourceName = 'Imported Deck') {
   };
 }
 
+function cleanFields(fields) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return {};
+  return Object.fromEntries(
+    Object.entries(fields)
+      .slice(0, 80)
+      .map(([key, value]) => [cleanText(key, '', 120), cleanText(value, '', 12000)])
+      .filter(([key]) => key)
+  );
+}
+
+function normalizeAddonCard(card, index) {
+  const fields = cleanFields(card.fields);
+  if (!Object.keys(fields).length) {
+    throw new Error(`Sync card ${index + 1} must include fields`);
+  }
+  const fieldOrder = Array.isArray(card.fieldOrder)
+    ? card.fieldOrder.map((field) => cleanText(field, '', 120)).filter((field) => field && field in fields)
+    : Object.keys(fields);
+  const ankiNoteId = Number.isFinite(Number(card.ankiNoteId)) ? Number(card.ankiNoteId) : null;
+  const noteType = cleanText(card.type || card.noteType || card.modelName, 'Basic', 120);
+
+  return {
+    id: cleanText(card.id, ankiNoteId ? `anki-${ankiNoteId}` : `anki-${randomUUID()}`, 160),
+    ankiNoteId,
+    type: noteType,
+    modelName: cleanText(card.modelName || card.noteType || noteType, noteType, 120),
+    fieldOrder,
+    fields,
+    tags: Array.from(new Set(tagList(card.tags).map((tag) => cleanText(tag, '', 120)).filter(Boolean))).slice(0, 200),
+    due: Number.isFinite(Number(card.due)) ? Number(card.due) : null,
+    state: cleanText(card.state, 'Anki', 80),
+    modifiedAt: cleanText(card.modifiedAt, nowIso(), 80),
+    modifiedBy: cleanText(card.modifiedBy, 'DeckBridge Anki add-on', 120),
+    suspended: Boolean(card.suspended),
+    mediaRefs: Array.isArray(card.mediaRefs) ? card.mediaRefs.map((ref) => cleanText(ref, '', 500)).filter(Boolean) : [],
+    sourceDeckName: cleanText(card.sourceDeckName || card.deckName, '', 240) || null,
+    sourceDeckPath: cleanText(card.sourceDeckPath || card.deckPath, '', 500) || null
+  };
+}
+
+export function normalizeAddonSyncInput(body = {}) {
+  const cards = Array.isArray(body.cards) ? body.cards : [];
+  if (!cards.length) throw new Error('Sync payload must include cards');
+  if (cards.length > 50000) throw new Error('Sync payload exceeds the 50000-card limit');
+  const conflictPolicy = ['detect', 'overwrite-platform'].includes(body.conflictPolicy)
+    ? body.conflictPolicy
+    : 'detect';
+
+  return {
+    cards: cards.map(normalizeAddonCard),
+    dryRun: Boolean(body.dryRun),
+    allowCreate: body.allowCreate !== false,
+    conflictPolicy,
+    source: cleanText(body.source, 'DeckBridge Anki add-on', 120),
+    client: body.client && typeof body.client === 'object' ? {
+      name: cleanText(body.client.name, 'DeckBridge Anki add-on', 120),
+      version: cleanText(body.client.version, 'unknown', 80),
+      fingerprint: cleanText(body.client.fingerprint, '', 200)
+    } : null
+  };
+}
+
+function sameJson(left, right) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+function copySyncedCard(card, actorName, timestamp) {
+  return {
+    ...card,
+    modifiedAt: timestamp,
+    modifiedBy: actorName || card.modifiedBy || 'DeckBridge Anki add-on'
+  };
+}
+
+export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki add-on') {
+  const syncedAt = nowIso();
+  const byId = new Map(deck.cards.map((card) => [card.id, card]));
+  const byNoteId = new Map(deck.cards.filter((card) => card.ankiNoteId).map((card) => [String(card.ankiNoteId), card]));
+  const result = {
+    syncedAt,
+    stats: {
+      total: syncInput.cards.length,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      conflicts: 0,
+      dryRun: syncInput.dryRun
+    },
+    createdCards: [],
+    updatedCards: [],
+    conflicts: []
+  };
+
+  for (const incoming of syncInput.cards) {
+    const existing = byId.get(incoming.id) || (incoming.ankiNoteId ? byNoteId.get(String(incoming.ankiNoteId)) : null);
+    if (!existing) {
+      if (!syncInput.allowCreate) {
+        result.stats.skipped += 1;
+        continue;
+      }
+      const created = copySyncedCard(incoming, actorName, syncedAt);
+      result.createdCards.push(created);
+      result.stats.created += 1;
+      if (!syncInput.dryRun) {
+        deck.cards.push(created);
+        byId.set(created.id, created);
+        if (created.ankiNoteId) byNoteId.set(String(created.ankiNoteId), created);
+      }
+      continue;
+    }
+
+    const changed = !sameJson(existing.fields, incoming.fields)
+      || !sameJson(existing.tags, incoming.tags)
+      || existing.state !== incoming.state
+      || existing.suspended !== incoming.suspended
+      || existing.type !== incoming.type;
+    if (!changed) {
+      result.stats.skipped += 1;
+      continue;
+    }
+
+    if (syncInput.conflictPolicy === 'detect') {
+      result.conflicts.push({
+        id: `conflict-${randomUUID()}`,
+        deckId: deck.id,
+        cardId: existing.id,
+        source: syncInput.source,
+        detectedAt: syncedAt,
+        incomingFields: incoming.fields,
+        localFields: existing.fields
+      });
+      result.stats.conflicts += 1;
+      continue;
+    }
+
+    const updated = copySyncedCard({
+      ...existing,
+      ankiNoteId: incoming.ankiNoteId || existing.ankiNoteId,
+      type: incoming.type,
+      modelName: incoming.modelName,
+      fieldOrder: incoming.fieldOrder,
+      fields: incoming.fields,
+      tags: incoming.tags,
+      due: incoming.due,
+      state: incoming.state,
+      suspended: incoming.suspended,
+      mediaRefs: incoming.mediaRefs,
+      sourceDeckName: incoming.sourceDeckName || existing.sourceDeckName,
+      sourceDeckPath: incoming.sourceDeckPath || existing.sourceDeckPath
+    }, actorName, syncedAt);
+    result.updatedCards.push(updated);
+    result.stats.updated += 1;
+    if (!syncInput.dryRun) Object.assign(existing, updated);
+  }
+
+  if (!syncInput.dryRun && (result.stats.created || result.stats.updated || result.stats.conflicts)) {
+    deck.lastSyncedAt = syncedAt;
+  }
+  return result;
+}
+
 export function createSeedState() {
   const importedAt = nowIso();
   const deck = {

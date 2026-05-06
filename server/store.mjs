@@ -5,7 +5,8 @@ import { createSeedState } from './domain.mjs';
 let saveQueue = Promise.resolve();
 
 function dataDir() {
-  return path.resolve(process.env.DECKBRIDGE_DATA_DIR || path.join(process.cwd(), '.deckbridge'));
+  const defaultDir = process.env.VERCEL ? path.join('/tmp', 'deckbridge') : path.join(process.cwd(), '.deckbridge');
+  return path.resolve(process.env.DECKBRIDGE_DATA_DIR || defaultDir);
 }
 
 export async function ensureDataDirs() {

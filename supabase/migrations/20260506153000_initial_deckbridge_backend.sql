@@ -90,6 +90,12 @@ create table if not exists public.sync_conflicts (
   local_fields jsonb not null default '{}'::jsonb
 );
 
+create index if not exists deck_members_user_id_idx on public.deck_members (user_id, deck_id);
+create index if not exists cards_deck_id_created_at_idx on public.cards (deck_id, created_at);
+create index if not exists suggestions_deck_id_created_at_idx on public.suggestions (deck_id, created_at desc);
+create index if not exists activity_deck_id_created_at_idx on public.activity (deck_id, created_at desc);
+create index if not exists sync_conflicts_deck_id_detected_at_idx on public.sync_conflicts (deck_id, detected_at desc);
+
 alter table public.profiles enable row level security;
 alter table public.decks enable row level security;
 alter table public.deck_members enable row level security;
@@ -113,6 +119,16 @@ create policy "suggestions read member" on public.suggestions for select using (
 create policy "activity read member" on public.activity for select using (
   exists (select 1 from public.deck_members m where m.deck_id = activity.deck_id and m.user_id = auth.uid()::text)
 );
+create policy "sessions read member" on public.anki_sync_sessions for select using (
+  exists (select 1 from public.deck_members m where m.deck_id = anki_sync_sessions.deck_id and m.user_id = auth.uid()::text)
+);
 create policy "conflicts read member" on public.sync_conflicts for select using (
   exists (select 1 from public.deck_members m where m.deck_id = sync_conflicts.deck_id and m.user_id = auth.uid()::text)
 );
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('deckbridge-exports', 'deckbridge-exports', false, 52428800, array['application/octet-stream'])
+on conflict (id) do update set
+  public = excluded.public,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;

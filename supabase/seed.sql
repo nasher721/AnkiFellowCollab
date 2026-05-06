@@ -1,0 +1,1 @@
+-- DeckBridge does not seed shared data. Users and decks are created through the app.

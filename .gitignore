@@ -3,6 +3,7 @@ dist/
 .deckbridge/
 .env
 .env.*
+!.env.example
 .omx/
 test-results/
 playwright-report/
@@ -10,3 +11,4 @@ playwright-report/
 .DS_Store
 deckbridge-screenshot*.png
 deckbridge-final*.png
+.vercel

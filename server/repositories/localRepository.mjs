@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { applySuggestion, nowIso, summarizeDeck } from '../domain.mjs';
+import { applySuggestion, mergeAddonCards, nowIso, summarizeDeck } from '../domain.mjs';
 import { fail } from '../errors.mjs';
 import { loadState, saveState } from '../store.mjs';
 
@@ -204,6 +204,32 @@ export function createLocalRepository() {
       });
       await saveState(state);
       return this.getDeckState(user, deck.id);
+    },
+
+    async syncCardsFromAddon(user, deckId, syncInput) {
+      const state = await loadState();
+      const { deck } = requireRole(state, user.id, deckId, 'editor');
+      const result = mergeAddonCards(deck, syncInput, user.name);
+      state.sync.conflicts = result.conflicts;
+      if (!syncInput.dryRun) {
+        state.sync.lastPullAt = syncInput.conflictPolicy === 'overwrite-platform' ? result.syncedAt : state.sync.lastPullAt;
+        state.sync.lastPushAt = result.syncedAt;
+        state.activity.unshift({
+          id: `act-${randomUUID()}`,
+          kind: 'sync',
+          text: `${user.name} synced ${result.stats.total} Anki card(s): ${result.stats.created} new, ${result.stats.updated} updated, ${result.stats.conflicts} conflict(s)`,
+          at: result.syncedAt
+        });
+        await saveState(state);
+      }
+      return {
+        result: {
+          syncedAt: result.syncedAt,
+          stats: result.stats,
+          conflicts: result.conflicts
+        },
+        state: await this.getDeckState(user, deck.id)
+      };
     },
 
     async setActiveDeck(user, deckId) {

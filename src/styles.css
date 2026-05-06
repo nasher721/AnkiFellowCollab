@@ -945,6 +945,95 @@ button:disabled {
   background: #fff;
 }
 
+.auth-screen,
+.empty-workspace {
+  min-height: 100vh;
+  background: #f7f9fc;
+}
+
+.auth-screen {
+  display: grid;
+  place-items: center;
+  padding: 32px;
+}
+
+.auth-panel,
+.empty-import {
+  width: min(440px, 100%);
+  display: grid;
+  justify-items: start;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 28px;
+}
+
+.auth-panel h1,
+.empty-import h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.15;
+}
+
+.auth-form {
+  width: 100%;
+  display: grid;
+  gap: 10px;
+}
+
+.auth-form input {
+  width: 100%;
+  height: 42px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 0 12px;
+  color: #172033;
+  background: #fff;
+}
+
+.auth-switch {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--blue);
+  font-weight: 800;
+}
+
+.auth-notice,
+.empty-import p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.empty-workspace .brand-row {
+  background: var(--panel);
+}
+
+.empty-import {
+  margin: 14vh auto 0;
+  justify-items: center;
+  text-align: center;
+}
+
+.empty-import > .icon {
+  width: 34px;
+  height: 34px;
+  color: var(--blue);
+}
+
+.file-input-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .toast {
   position: fixed;
   right: 18px;

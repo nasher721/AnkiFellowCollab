@@ -5,7 +5,7 @@ const COMMAND_TIMEOUT_MS = Number(process.env.APKG_TOOL_TIMEOUT_MS || 30000);
 
 export function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { cwd: options.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timeout = setTimeout(() => {
