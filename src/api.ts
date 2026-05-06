@@ -43,6 +43,26 @@ export interface CreatedToken extends ApiToken {
   raw: string;
 }
 
+export interface Comment {
+  id: string;
+  authorId: string;
+  authorName: string;
+  body: string;
+  parentId: string | null;
+  createdAt: string;
+  updatedAt: string | null;
+}
+
+export interface Notification {
+  id: string;
+  deckId: string | null;
+  kind: string;
+  body: string;
+  refId: string | null;
+  read: boolean;
+  createdAt: string;
+}
+
 export const api = {
   health: () => jsonRequest<{ ok: boolean; dataDir: string }>('/api/health'),
   addonVersion: () => jsonRequest<{ version: string; minVersion: string }>('/api/addon/version'),
@@ -58,6 +78,35 @@ export const api = {
         method: 'DELETE',
         headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
       }).then((r) => { if (!r.ok) throw new Error(`Revoke failed: ${r.status}`); })
+  },
+  comments: {
+    list: (suggestionId: string) =>
+      jsonRequest<{ comments: Comment[] }>(`/api/suggestions/${suggestionId}/comments`),
+    create: (suggestionId: string, body: string, parentId?: string) =>
+      jsonRequest<Comment>(`/api/suggestions/${suggestionId}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ body, parentId })
+      })
+  },
+  reactions: {
+    add: (suggestionId: string, emoji: string) =>
+      jsonRequest<{ reactions: Record<string, number> }>(`/api/suggestions/${suggestionId}/reactions`, {
+        method: 'POST',
+        body: JSON.stringify({ emoji })
+      }),
+    remove: (suggestionId: string, emoji: string) =>
+      fetch(`/api/suggestions/${suggestionId}/reactions/${encodeURIComponent(emoji)}`, {
+        method: 'DELETE',
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+      }).then((r) => { if (!r.ok && r.status !== 204) throw new Error('Remove reaction failed'); })
+  },
+  notifications: {
+    list: () => jsonRequest<{ notifications: Notification[]; unread: number }>('/api/notifications'),
+    readAll: () =>
+      fetch('/api/notifications/read-all', {
+        method: 'POST',
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+      }).then(() => undefined)
   },
   me: () => jsonRequest<{ user: User; memberships: DeckMember[] }>('/api/me'),
   decks: () => jsonRequest<{ decks: DeckSummary[] }>('/api/decks'),

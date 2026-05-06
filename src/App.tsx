@@ -3,6 +3,10 @@ import { createClient, type Session } from '@supabase/supabase-js';
 import { api, setApiAuthToken } from './api';
 import type { AppState, DeckCard, Suggestion } from './types';
 import { ConnectAnkiWizard } from './ConnectAnkiWizard';
+import { CardEditor } from './CardEditor';
+import { StudyView } from './StudyView';
+import { SuggestionDiscussion } from './SuggestionDiscussion';
+import { NotificationsBell } from './NotificationsBell';
 
 const PAGE_SIZE = 10;
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
@@ -81,6 +85,10 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [showConnectWizard, setShowConnectWizard] = useState(false);
+  const [editingCardId, setEditingCardId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'overview' | 'study' | 'activity'>('overview');
+  const [showStudy, setShowStudy] = useState(false);
+  const [reviewTab, setReviewTab] = useState<'changes' | 'discussion'>('changes');
   const activeDeck = state?.decks.find((deck) => deck.id === state.activeDeckId) || state?.decks[0];
 
   useEffect(() => {
@@ -428,6 +436,7 @@ export default function App() {
                 <button className={membershipRole !== 'owner' ? 'selected' : ''} onClick={() => switchRole('collaborator')}>Collaborator</button>
               </div>
             ) : null}
+            <NotificationsBell />
             <button className="button primary" onClick={exportDeck} disabled={busy}>
               <Icon name="download" />
               Export/Download
@@ -439,10 +448,11 @@ export default function App() {
           <section className="deck-panel">
             <div className="breadcrumb">Decks <span>/</span> {activeDeck.name}</div>
             <div className="tabs">
-              <button className="active">Overview</button>
+              <button className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
+              <button className={activeTab === 'study' ? 'active' : ''} onClick={() => { setActiveTab('study'); setShowStudy(true); }}>Study</button>
               <button disabled>Cards</button>
               <button disabled>Stats</button>
-              <button disabled>Activity</button>
+              <button className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab('activity')}>Activity</button>
               <button disabled>Settings</button>
               <span className="pending-callout">{pendingSuggestions.length} pending suggestions</span>
             </div>
@@ -504,6 +514,27 @@ export default function App() {
                   <span>Last Modified</span>
                 </div>
                 {pagedCards.length ? pagedCards.map((card) => (
+                  editingCardId === card.id ? (
+                    <div key={card.id} className="table-row editing">
+                      <CardEditor
+                        card={card}
+                        canSuggest={canSuggest}
+                        busy={busy}
+                        onSubmit={(proposedFields, proposedTags, reason) => {
+                          setEditingCardId(null);
+                          refreshWith(api.createSuggestion({
+                            deckId: activeDeck.id,
+                            cardId: card.id,
+                            authorId: state.user?.id || 'you',
+                            reason,
+                            proposedFields,
+                            proposedTags,
+                          }), 'Suggestion submitted for review');
+                        }}
+                        onCancel={() => setEditingCardId(null)}
+                      />
+                    </div>
+                  ) : (
                   <button
                     className={`table-row ${card.id === selectedCard?.id ? 'selected' : ''}`}
                     key={card.id}
@@ -512,6 +543,8 @@ export default function App() {
                       const linked = suggestions.find((item) => item.cardId === card.id && item.status === 'pending');
                       if (linked) setSelectedSuggestionId(linked.id);
                     }}
+                    onDoubleClick={() => canSuggest && setEditingCardId(card.id)}
+                    title={canSuggest ? 'Double-click to edit' : undefined}
                     role="row"
                   >
                     <span className="checkbox" />
@@ -522,6 +555,7 @@ export default function App() {
                     <span><b className={`state-chip ${statusColors[card.state] || 'neutral'}`}>{card.state}</b></span>
                     <span><small>{relativeTime(card.modifiedAt)}<br />{card.modifiedBy}</small></span>
                   </button>
+                  )
                 )) : <EmptyState message="No cards match the current filters." />}
               </div>
 
@@ -554,8 +588,12 @@ export default function App() {
                   <b className="pending-status">{selectedSuggestion?.status || 'draft'}</b>
                 </div>
                 <p className="card-context">Card: {fieldValue(selectedCard, 'Front') || Object.values(selectedCard.fields)[0]}</p>
-                <div className="review-tabs"><button className="active">Changes</button><button>Discussion ({selectedSuggestion ? 1 : 0})</button></div>
+                <div className="review-tabs">
+                  <button className={reviewTab === 'changes' ? 'active' : ''} onClick={() => setReviewTab('changes')}>Changes</button>
+                  <button className={reviewTab === 'discussion' ? 'active' : ''} onClick={() => setReviewTab('discussion')}>Discussion</button>
+                </div>
 
+                {reviewTab === 'changes' ? (<>
                 <DiffBlock
                   label="Front"
                   before={fieldValue(selectedCard, 'Front')}
@@ -593,6 +631,15 @@ export default function App() {
                       <Icon name="sync" /> Push to Anki
                     </button>
                   </div>
+                )}
+                </>) : (
+                  selectedSuggestion ? (
+                    <SuggestionDiscussion
+                      suggestionId={selectedSuggestion.id}
+                      currentUserId={state.user?.id || 'you'}
+                      currentUserName={state.user?.name || 'You'}
+                    />
+                  ) : <EmptyState message="Select a suggestion to view its discussion." />
                 )}
               </section>
             ) : <EmptyState message="Select a card to review changes." />}
@@ -636,6 +683,13 @@ export default function App() {
           decks={state.summaries}
           platformUrl={window.location.origin}
           onClose={() => setShowConnectWizard(false)}
+        />
+      )}
+      {showStudy && activeDeck && (
+        <StudyView
+          deckId={activeDeck.id}
+          cards={activeDeck.cards}
+          onClose={() => { setShowStudy(false); setActiveTab('overview'); }}
         />
       )}
     </main>

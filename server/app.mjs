@@ -1,4 +1,5 @@
 import cors from 'cors';
+import crypto from 'node:crypto';
 import express from 'express';
 import fs from 'node:fs/promises';
 import multer from 'multer';
@@ -214,6 +215,124 @@ export function createApp(options = {}) {
     } catch (error) {
       next(error);
     }
+  });
+
+  // --- Comments ---
+
+  app.get('/api/suggestions/:id/comments', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) return res.json({ comments: [] });
+      const { data, error } = await auth.supabase
+        .from('comments')
+        .select('id, author_id, author_name, body, parent_id, created_at, updated_at')
+        .eq('suggestion_id', req.params.id)
+        .order('created_at', { ascending: true });
+      if (error) fail(500, 'comments_error', error.message);
+      res.json({ comments: data });
+    } catch (err) { next(err); }
+  });
+
+  app.post('/api/suggestions/:id/comments', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) fail(501, 'comments_unavailable', 'Comments require Supabase');
+      const body = typeof req.body.body === 'string' ? req.body.body.trim() : '';
+      if (!body) fail(400, 'empty_comment', 'Comment body is required');
+      // Verify suggestion exists and user is a deck member
+      const { data: suggestion } = await auth.supabase
+        .from('suggestions').select('deck_id').eq('id', req.params.id).single();
+      if (!suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
+      const id = crypto.randomUUID();
+      const { data, error } = await auth.supabase.from('comments').insert({
+        id,
+        suggestion_id: req.params.id,
+        deck_id: suggestion.deck_id,
+        author_id: req.user.id,
+        author_name: req.user.name,
+        body,
+        parent_id: req.body.parentId || null,
+        created_at: new Date().toISOString()
+      }).select().single();
+      if (error) fail(500, 'comment_error', error.message);
+      // Create notification for suggestion author
+      const { data: sugg } = await auth.supabase.from('suggestions')
+        .select('author_id').eq('id', req.params.id).single();
+      if (sugg?.author_id && sugg.author_id !== req.user.id) {
+        await auth.supabase.from('notifications').insert({
+          id: crypto.randomUUID(),
+          user_id: sugg.author_id,
+          deck_id: suggestion.deck_id,
+          kind: 'comment',
+          body: `${req.user.name} commented on your suggestion`,
+          ref_id: req.params.id,
+          created_at: new Date().toISOString()
+        }).then(() => undefined).catch(() => undefined);
+      }
+      res.status(201).json(data);
+    } catch (err) { next(err); }
+  });
+
+  // --- Reactions ---
+
+  app.post('/api/suggestions/:id/reactions', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) fail(501, 'reactions_unavailable', 'Reactions require Supabase');
+      const allowed = ['👍', '❓', '✅'];
+      if (!allowed.includes(req.body.emoji)) fail(400, 'invalid_emoji', `Emoji must be one of: ${allowed.join(' ')}`);
+      const { data: suggestion } = await auth.supabase
+        .from('suggestions').select('deck_id').eq('id', req.params.id).single();
+      if (!suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
+      const { error } = await auth.supabase.from('reactions').upsert({
+        id: crypto.randomUUID(),
+        suggestion_id: req.params.id,
+        user_id: req.user.id,
+        emoji: req.body.emoji,
+        created_at: new Date().toISOString()
+      }, { onConflict: 'suggestion_id,user_id,emoji', ignoreDuplicates: true });
+      if (error) fail(500, 'reaction_error', error.message);
+      const { data: counts } = await auth.supabase.from('reactions')
+        .select('emoji').eq('suggestion_id', req.params.id);
+      const tally = allowed.reduce((acc, e) => ({ ...acc, [e]: 0 }), {});
+      (counts || []).forEach((r) => { tally[r.emoji] = (tally[r.emoji] || 0) + 1; });
+      res.json({ reactions: tally });
+    } catch (err) { next(err); }
+  });
+
+  app.delete('/api/suggestions/:id/reactions/:emoji', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) fail(501, 'reactions_unavailable', 'Reactions require Supabase');
+      await auth.supabase.from('reactions')
+        .delete()
+        .eq('suggestion_id', req.params.id)
+        .eq('user_id', req.user.id)
+        .eq('emoji', decodeURIComponent(req.params.emoji));
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
+  // --- Notifications ---
+
+  app.get('/api/notifications', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) return res.json({ notifications: [], unread: 0 });
+      const { data } = await auth.supabase.from('notifications')
+        .select('id, deck_id, kind, body, ref_id, read, created_at')
+        .eq('user_id', req.user.id)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      const unread = (data || []).filter((n) => !n.read).length;
+      res.json({ notifications: data || [], unread });
+    } catch (err) { next(err); }
+  });
+
+  app.post('/api/notifications/read-all', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) return res.status(204).end();
+      await auth.supabase.from('notifications')
+        .update({ read: true })
+        .eq('user_id', req.user.id)
+        .eq('read', false);
+      res.status(204).end();
+    } catch (err) { next(err); }
   });
 
   async function createExport(req, res, next) {
