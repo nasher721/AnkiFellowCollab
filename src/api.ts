@@ -243,5 +243,12 @@ export const api = {
     jsonRequest<{ deckId: string; name: string }>(`/api/templates/${templateId}/use`, {
       method: 'POST',
       body: JSON.stringify({ name })
-    })
+    }),
+  syncStudyProgress: (updates: Array<{ deckId: string; cardId: string; intervalDays: number; easeFactor: number; repetitions: number; nextDue: string; lastRating: number | null }>) =>
+    jsonRequest<{ ok: boolean; synced: number }>('/api/study/progress', {
+      method: 'POST',
+      body: JSON.stringify({ updates })
+    }),
+  fetchStudyProgress: (deckId: string) =>
+    jsonRequest<{ progress: Array<{ cardId: string; intervalDays: number; easeFactor: number; repetitions: number; nextDue: string; lastRating: number | null; updatedAt: string }> }>(`/api/study/progress/${deckId}`)
 };

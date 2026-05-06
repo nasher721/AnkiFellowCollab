@@ -12,7 +12,7 @@
     "preview": "vite preview --host 0.0.0.0",
     "package:anki-addon": "node scripts/package-anki-addon.mjs",
     "migrate:state": "node scripts/migrate-state-to-supabase.mjs",
-    "test": "node --test server/domain.test.mjs",
+    "test": "node --test server/*.test.mjs",
     "test:api": "node --test server/*.api.test.mjs",
     "test:e2e": "playwright test"
   },

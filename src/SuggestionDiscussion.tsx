@@ -153,6 +153,13 @@ export function SuggestionDiscussion({ suggestionId, currentUserId, currentUserN
   );
 }
 
+function renderWithMentions(text: string) {
+  const parts = text.split(/(@\w[\w.-]*)/g);
+  return parts.map((part, i) =>
+    part.startsWith('@') ? <strong key={i} className="mention-highlight">{part}</strong> : part
+  );
+}
+
 function CommentItem({
   comment, currentUserId, onReply, relTime
 }: {
@@ -169,7 +176,7 @@ function CommentItem({
           <strong>{comment.authorName}</strong>
           <small>{relTime(comment.createdAt)}</small>
         </div>
-        <p className="comment-text">{comment.body}</p>
+        <p className="comment-text">{renderWithMentions(comment.body)}</p>
         <button className="comment-reply-btn" onClick={onReply}>Reply</button>
       </div>
     </div>

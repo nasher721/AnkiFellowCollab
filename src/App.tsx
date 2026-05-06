@@ -1,7 +1,8 @@
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient, type Session } from '@supabase/supabase-js';
 import { api, setApiAuthToken } from './api';
 import type { AppState, DeckCard, Suggestion } from './types';
+import { useRealtime } from './useRealtime';
 import { ConnectAnkiWizard } from './ConnectAnkiWizard';
 import { CardEditor } from './CardEditor';
 import { StudyView } from './StudyView';
@@ -9,7 +10,9 @@ import { SuggestionDiscussion } from './SuggestionDiscussion';
 import { NotificationsBell } from './NotificationsBell';
 import { DiscoverView } from './DiscoverView';
 import { AnalyticsDashboard } from './AnalyticsDashboard';
+import { ActivityTimeline } from './ActivityTimeline';
 import { TemplateGallery } from './TemplateGallery';
+import { ConflictResolution } from './ConflictResolution';
 
 const PAGE_SIZE = 10;
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
@@ -143,6 +146,22 @@ export default function App() {
   useEffect(() => {
     setPage(1);
   }, [query, tagFilter, cardStateFilter, activeDeck?.id]);
+
+  const handleSuggestionChange = useCallback(() => {
+    api.state().then(setState).catch(() => undefined);
+  }, []);
+
+  const handleCommentChange = useCallback(() => {
+    api.state().then(setState).catch(() => undefined);
+  }, []);
+
+  useRealtime({
+    supabase,
+    deckId: activeDeck?.id,
+    onSuggestionChange: handleSuggestionChange,
+    onCommentChange: handleCommentChange,
+    enabled: !!session,
+  });
 
   const activeSummary = state?.summaries.find((summary) => summary.id === activeDeck?.id);
   const currentMembership = state?.memberships?.find((item) => item.deckId === activeDeck?.id);
@@ -509,11 +528,30 @@ export default function App() {
               />
             ) : null}
 
+            {activeTab === 'activity' && activeDeck ? (
+              <ActivityTimeline
+                deckId={activeDeck.id}
+                deckName={activeDeck.name}
+                activities={state.activity}
+              />
+            ) : null}
+
             {state.sync.conflicts.length ? (
-              <div className="risk-banner" role="status">
-                <strong>{state.sync.conflicts.length} Anki conflict{state.sync.conflicts.length === 1 ? '' : 's'} need review</strong>
-                <span>Pull found local and Anki field differences. Review before pushing accepted changes.</span>
-              </div>
+              <ConflictResolution
+                conflicts={state.sync.conflicts}
+                onResolve={(conflictId, resolution) => {
+                  setState(prev => prev ? {
+                    ...prev,
+                    sync: {
+                      ...prev.sync,
+                      conflicts: prev.sync.conflicts.filter(c => c.id !== conflictId)
+                    }
+                  } : prev);
+                  if (resolution !== 'skip') {
+                    setNotice(resolution === 'local' ? 'Kept local version' : 'Applied incoming changes');
+                  }
+                }}
+              />
             ) : null}
 
             <div className="summary-band">

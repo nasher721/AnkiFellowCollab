@@ -104,3 +104,40 @@ export function buildStudyQueue(
     .sort((a, b) => new Date(a.nextDue).getTime() - new Date(b.nextDue).getTime())
     .map((p) => p.cardId);
 }
+
+export async function syncProgressToServer(deckId: string, cardId: string, state: CardProgress) {
+  try {
+    const mod = await import('./api');
+    await mod.api.syncStudyProgress([{
+      deckId,
+      cardId,
+      intervalDays: state.interval,
+      easeFactor: state.easeFactor,
+      repetitions: state.repetitions,
+      nextDue: state.nextDue,
+      lastRating: state.lastRating ?? null
+    }]);
+  } catch {}
+}
+
+export async function loadServerProgress(deckId: string): Promise<void> {
+  try {
+    const mod = await import('./api');
+    const { progress } = await mod.api.fetchStudyProgress(deckId);
+    const all = loadProgress(deckId);
+    for (const p of progress) {
+      const existing = all[p.cardId];
+      if (!existing || new Date(p.updatedAt) > new Date(existing.nextDue)) {
+        all[p.cardId] = {
+          cardId: p.cardId,
+          interval: p.intervalDays,
+          easeFactor: p.easeFactor,
+          repetitions: p.repetitions,
+          nextDue: p.nextDue,
+          lastRating: (p.lastRating as Rating) ?? null
+        };
+      }
+    }
+    saveProgress(deckId, all);
+  } catch {}
+}

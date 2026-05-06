@@ -7,7 +7,9 @@ import {
   buildStudyQueue,
   initialProgress,
   loadProgress,
+  loadServerProgress,
   saveProgress,
+  syncProgressToServer,
 } from './sm2';
 
 interface Props {
@@ -46,6 +48,14 @@ export function StudyView({ deckId, cards, onClose }: Props) {
   const [done, setDone] = useState(false);
   const startTime = useRef(Date.now());
 
+  useEffect(() => {
+    loadServerProgress(deckId).then(() => {
+      const fresh = loadProgress(deckId);
+      setAllProgress(fresh);
+      setQueue(buildStudyQueue(cards.map((c) => c.id), fresh));
+    });
+  }, [deckId, cards]);
+
   const currentCardId = queue[queueIndex];
   const currentCard = cards.find((c) => c.id === currentCardId);
 
@@ -60,6 +70,7 @@ export function StudyView({ deckId, cards, onClose }: Props) {
     const next = applyRating(prev, rating);
     const updated = { ...allProgress, [currentCardId]: next };
     setAllProgress(updated);
+    syncProgressToServer(deckId, currentCardId, next);
     setSessionStats((s) => ({
       ...s,
       again: s.again + (rating === 1 ? 1 : 0),

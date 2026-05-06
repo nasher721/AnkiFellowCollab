@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import multer from 'multer';
 import path from 'node:path';
 import { createAuth } from './auth.mjs';
+import { requireContributor, requireEditor, requireOwner, requireReviewer, resolveSuggestionDeck } from './rbac.mjs';
 import { deckToCreateDeckJson, normalizeAddonSyncInput, normalizeParsedDeck, normalizeSuggestionInput } from './domain.mjs';
 import { AppError, errorPayload, fail } from './errors.mjs';
 import { checkAnki, pullDeck, pushDeck } from './ankiConnect.mjs';
@@ -12,6 +13,16 @@ import { createApkg, parseApkg } from './ankiPackage.mjs';
 import { createRepository } from './repositories/index.mjs';
 import { ensureDataDirs, loadState, paths, saveState } from './store.mjs';
 import { createUserToken, listUserTokens, revokeUserToken } from './tokens.mjs';
+
+function parseMentions(body) {
+  const regex = /@(\w[\w.-]*)/g;
+  const matches = new Set();
+  let match;
+  while ((match = regex.exec(body)) !== null) {
+    matches.add(match[1]);
+  }
+  return [...matches];
+}
 
 function legacyErrorMessage(body) {
   return body.error?.message || body.error || 'Unexpected server error';
@@ -203,10 +214,10 @@ export function createApp(options = {}) {
     }
   }
 
-  app.post('/api/decks/:deckId/suggestions', auth.requireUser, createSuggestion);
-  app.post('/api/suggestions', auth.requireUser, createSuggestion);
+  app.post('/api/decks/:deckId/suggestions', auth.requireUser, requireContributor(auth.supabase), createSuggestion);
+  app.post('/api/suggestions', auth.requireUser, requireContributor(auth.supabase), createSuggestion);
 
-  app.post('/api/suggestions/:id/decision', auth.requireUser, async (req, res, next) => {
+  app.post('/api/suggestions/:id/decision', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireReviewer(auth.supabase), async (req, res, next) => {
     try {
       if (!['accepted', 'rejected', 'revision'].includes(req.body.decision)) {
         fail(400, 'invalid_decision', 'Decision must be accepted, rejected, or revision');
@@ -219,7 +230,7 @@ export function createApp(options = {}) {
 
   // --- Comments ---
 
-  app.get('/api/suggestions/:id/comments', auth.requireUser, async (req, res, next) => {
+  app.get('/api/suggestions/:id/comments', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireContributor(auth.supabase), async (req, res, next) => {
     try {
       if (!auth.supabase) return res.json({ comments: [] });
       const { data, error } = await auth.supabase
@@ -232,20 +243,17 @@ export function createApp(options = {}) {
     } catch (err) { next(err); }
   });
 
-  app.post('/api/suggestions/:id/comments', auth.requireUser, async (req, res, next) => {
+  app.post('/api/suggestions/:id/comments', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireContributor(auth.supabase), async (req, res, next) => {
     try {
       if (!auth.supabase) fail(501, 'comments_unavailable', 'Comments require Supabase');
       const body = typeof req.body.body === 'string' ? req.body.body.trim() : '';
       if (!body) fail(400, 'empty_comment', 'Comment body is required');
-      // Verify suggestion exists and user is a deck member
-      const { data: suggestion } = await auth.supabase
-        .from('suggestions').select('deck_id').eq('id', req.params.id).single();
-      if (!suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
+      const deckId = req._resolvedDeckId;
       const id = crypto.randomUUID();
       const { data, error } = await auth.supabase.from('comments').insert({
         id,
         suggestion_id: req.params.id,
-        deck_id: suggestion.deck_id,
+        deck_id: deckId,
         author_id: req.user.id,
         author_name: req.user.name,
         body,
@@ -260,12 +268,30 @@ export function createApp(options = {}) {
         await auth.supabase.from('notifications').insert({
           id: crypto.randomUUID(),
           user_id: sugg.author_id,
-          deck_id: suggestion.deck_id,
+          deck_id: deckId,
           kind: 'comment',
           body: `${req.user.name} commented on your suggestion`,
           ref_id: req.params.id,
           created_at: new Date().toISOString()
         }).then(() => undefined).catch(() => undefined);
+      }
+      const mentions = parseMentions(body);
+      if (mentions.length) {
+        Promise.all(mentions.map(async (name) => {
+          const { data: profile } = await auth.supabase.from('profiles')
+            .select('id').ilike('name', name).single();
+          if (profile?.id && profile.id !== req.user.id) {
+            await auth.supabase.from('notifications').insert({
+              id: crypto.randomUUID(),
+              user_id: profile.id,
+          deck_id: deckId,
+              kind: 'mention',
+              body: `${req.user.name} mentioned you in a comment`,
+              ref_id: id,
+              created_at: new Date().toISOString()
+            });
+          }
+        })).then(() => undefined).catch(() => undefined);
       }
       res.status(201).json(data);
     } catch (err) { next(err); }
@@ -416,15 +442,11 @@ export function createApp(options = {}) {
   });
 
   // Make a deck public/private/unlisted
-  app.patch('/api/decks/:deckId/visibility', auth.requireUser, async (req, res, next) => {
+  app.patch('/api/decks/:deckId/visibility', auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
     try {
       if (!auth.supabase) fail(501, 'visibility_unavailable', 'Requires Supabase');
       const allowed = ['public', 'private', 'unlisted'];
       if (!allowed.includes(req.body.visibility)) fail(400, 'invalid_visibility', `Must be one of: ${allowed.join(', ')}`);
-      // Only owner can change visibility
-      const { data: member } = await auth.supabase.from('deck_members')
-        .select('role').eq('deck_id', req.params.deckId).eq('user_id', req.user.id).single();
-      if (member?.role !== 'owner') fail(403, 'forbidden', 'Only the deck owner can change visibility');
       const { error } = await auth.supabase.from('decks')
         .update({ visibility: req.body.visibility })
         .eq('id', req.params.deckId);
@@ -540,13 +562,9 @@ export function createApp(options = {}) {
   });
 
   // Deck analytics
-  app.get('/api/decks/:deckId/analytics', auth.requireUser, async (req, res, next) => {
+  app.get('/api/decks/:deckId/analytics', auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
     try {
       if (!auth.supabase) return res.json({ analytics: null });
-      // Must be owner or editor
-      const { data: member } = await auth.supabase.from('deck_members')
-        .select('role').eq('deck_id', req.params.deckId).eq('user_id', req.user.id).single();
-      if (!member || member.role === 'viewer') fail(403, 'forbidden', 'Analytics require editor or owner role');
 
       const [suggestionsRes, starsRes] = await Promise.all([
         auth.supabase.from('suggestions').select('status, author_id, author_name, created_at')
@@ -657,6 +675,53 @@ export function createApp(options = {}) {
       });
 
       res.status(201).json({ deckId, name: deckName });
+    } catch (err) { next(err); }
+  });
+
+  app.post('/api/study/progress', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) { res.json({ ok: true }); return; }
+      const updates = Array.isArray(req.body.updates) ? req.body.updates : [];
+      if (!updates.length) { res.json({ ok: true, synced: 0 }); return; }
+      const valid = updates.filter(u => u.deckId && u.cardId).slice(0, 200);
+      let synced = 0;
+      for (const u of valid) {
+        const id = crypto.randomUUID();
+        const { error } = await auth.supabase.from('study_progress').upsert({
+          id,
+          user_id: req.user.id,
+          deck_id: u.deckId,
+          card_id: u.cardId,
+          interval_days: u.intervalDays ?? 1,
+          ease_factor: u.easeFactor ?? 2.5,
+          repetitions: u.repetitions ?? 0,
+          next_due: u.nextDue ?? new Date().toISOString(),
+          last_rating: u.lastRating ?? null,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'user_id,deck_id,card_id', ignoreDuplicates: false });
+        if (!error) synced++;
+      }
+      res.json({ ok: true, synced });
+    } catch (err) { next(err); }
+  });
+
+  app.get('/api/study/progress/:deckId', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!auth.supabase) { res.json({ progress: [] }); return; }
+      const { data, error } = await auth.supabase.from('study_progress')
+        .select('*')
+        .eq('user_id', req.user.id)
+        .eq('deck_id', req.params.deckId);
+      if (error) fail(500, 'progress_error', error.message);
+      res.json({ progress: (data || []).map(p => ({
+        cardId: p.card_id,
+        intervalDays: p.interval_days,
+        easeFactor: Number(p.ease_factor),
+        repetitions: p.repetitions,
+        nextDue: p.next_due,
+        lastRating: p.last_rating,
+        updatedAt: p.updated_at
+      })) });
     } catch (err) { next(err); }
   });
 
