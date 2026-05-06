@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.deckbridge/
+.env
+.env.*
+.omx/
+test-results/
+playwright-report/
+*.log
+.DS_Store
+deckbridge-screenshot*.png
+deckbridge-final*.png

@@ -1,0 +1,35 @@
+{
+  "name": "anki-deck-collab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "node server/index.mjs",
+    "dev:web": "vite --host 0.0.0.0",
+    "build": "tsc && vite build",
+    "start": "NODE_ENV=production node server/index.mjs",
+    "preview": "vite preview --host 0.0.0.0",
+    "migrate:state": "node scripts/migrate-state-to-supabase.mjs",
+    "test": "node --test server/domain.test.mjs",
+    "test:api": "node --test server/*.api.test.mjs",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.59.1",
+    "@supabase/supabase-js": "^2.105.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "multer": "^2.0.2",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "supertest": "^7.2.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3"
+  }
+}

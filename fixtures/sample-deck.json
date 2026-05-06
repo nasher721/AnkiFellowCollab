@@ -1,0 +1,17 @@
+{
+  "deck_name": "DeckBridge Fixture",
+  "cards": [
+    {
+      "front": "What does AnkiConnect let DeckBridge do?",
+      "back": "Talk to desktop Anki through a local HTTP bridge.",
+      "type": "basic",
+      "tags": ["DeckBridge", "Sync"]
+    },
+    {
+      "front": "{{c1::Owner approval}} keeps collaborator suggestions from changing the canonical deck too early.",
+      "back": "Accepted suggestions are applied; rejected ones stay in history.",
+      "type": "cloze",
+      "tags": ["DeckBridge", "Review"]
+    }
+  ]
+}
