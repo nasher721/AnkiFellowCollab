@@ -12,6 +12,7 @@ import { AppError, errorPayload, fail } from './errors.mjs';
 import { checkAnki, pullDeck, pushDeck } from './ankiConnect.mjs';
 import { createApkg, parseApkg } from './ankiPackage.mjs';
 import { createRepository } from './repositories/index.mjs';
+import { createRateLimiters } from './rateLimits.mjs';
 import { ensureDataDirs, loadState, paths, saveState } from './store.mjs';
 import { createUserToken, listUserTokens, revokeUserToken } from './tokens.mjs';
 import { assertValidDeckId, assertValidEmail, assertValidSessionRole, deckIdFromRequest, hashSecret } from './security.mjs';
@@ -207,6 +208,7 @@ export function createApp(options = {}) {
     }
   });
   const corsOrigin = options.corsOrigin ?? process.env.CORS_ORIGIN ?? (production ? false : true);
+  const rateLimiters = createRateLimiters(options.rateLimits);
 
   app.disable('x-powered-by');
   app.use((_req, res, next) => {
@@ -226,6 +228,11 @@ export function createApp(options = {}) {
       res.set('Cache-Control', 'private, max-age=300');
     }
   }));
+  app.use('/api/decks/upload', rateLimiters.upload);
+  app.use('/api/decks/:deckId/sync/cards', rateLimiters.sync);
+  app.use('/api/decks/:deckId/analytics', rateLimiters.analytics);
+  app.use('/api/notifications', rateLimiters.read);
+  app.use('/api/decks', rateLimiters.read);
 
   function validateDeckIdParam(req, _res, next) {
     try {

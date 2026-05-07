@@ -134,7 +134,7 @@ class FakeQuery {
   }
 }
 
-async function createTestApp() {
+async function createTestApp(options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
   process.env.DECKBRIDGE_DATA_DIR = dataDir;
   const { createApp } = await import(`./app.mjs?test=${Date.now()}-${Math.random()}`);
@@ -142,13 +142,15 @@ async function createTestApp() {
     app: createApp({
       production: false,
       repositoryMode: 'local',
+      rateLimits: { disabled: true },
       parseApkg: async () => ({
         deck_name: 'Uploaded Deck',
         cards: [{ id: 'uploaded-card', front: 'Front', back: 'Back', type: 'Basic', tags: ['Upload'] }]
       }),
       createApkg: async (_jsonPath, apkgPath) => {
         await fs.writeFile(apkgPath, 'fake-apkg', 'utf8');
-      }
+      },
+      ...options
     }),
     dataDir
   };
@@ -183,7 +185,7 @@ async function createTokenTestApp(options = {}) {
     }
   };
   return {
-    app: createApp({ production: false, repositoryMode: 'local', auth, ...options }),
+    app: createApp({ production: false, repositoryMode: 'local', auth, rateLimits: { disabled: true }, ...options }),
     supabase
   };
 }
@@ -211,6 +213,52 @@ test('authenticated API returns current user and visible decks', async () => {
     .patch('/api/session')
     .send({ role: 'contributor' }), 'you', 'You').expect(200);
   assert.equal(contributorSession.body.role, 'contributor');
+});
+
+test('rate limiting protects read and sync routes with configurable limits', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
+  process.env.DECKBRIDGE_DATA_DIR = dataDir;
+  const { createApp } = await import(`./app.mjs?test=${Date.now()}-${Math.random()}`);
+  const app = createApp({
+    production: false,
+    repositoryMode: 'local',
+    rateLimits: {
+      windowMs: 60_000,
+      readLimit: 1,
+      syncLimit: 1,
+      uploadLimit: 1,
+      analyticsLimit: 1
+    }
+  });
+
+  await asUser(request(app).get('/api/decks'), 'you', 'You').expect(200);
+  const readLimited = await asUser(request(app).get('/api/decks'), 'you', 'You').expect(429);
+  assert.equal(readLimited.body.error.code, 'rate_limited');
+
+  const syncBody = {
+    conflictPolicy: 'overwrite-platform',
+    source: 'DeckBridge Sync rate-limit test',
+    client: { name: 'DeckBridge Sync', version: '0.1.0', fingerprint: 'rate-limit-test' },
+    cards: [{
+      id: 'anki-rate-limit-1',
+      ankiNoteId: 99001,
+      type: 'Basic',
+      modelName: 'Basic',
+      fieldOrder: ['Front', 'Back'],
+      fields: { Front: 'Rate limit front', Back: 'Rate limit back' },
+      tags: ['DeckBridge'],
+      state: 'Review',
+      suspended: false
+    }]
+  };
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send(syncBody), 'you', 'You').expect(200);
+  const syncLimited = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send(syncBody), 'you', 'You').expect(429);
+  assert.equal(syncLimited.body.error.code, 'rate_limited');
 });
 
 test('token API creates one-time raw tokens and lists metadata only', async () => {
