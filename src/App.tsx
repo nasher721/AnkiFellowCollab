@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Session } from '@supabase/supabase-js';
 import { api, setApiAuthToken, type ShareLink } from './api';
 import type { AppState, Deck, DeckCard, DeckSummary, Suggestion } from './types';
@@ -14,7 +14,27 @@ import { ActivityTimeline } from './ActivityTimeline';
 import { TemplateGallery } from './TemplateGallery';
 import { ConflictResolution } from './ConflictResolution';
 
-const PAGE_SIZE = 10;
+interface Toast {
+  id: string;
+  message: string;
+  type: 'success' | 'error' | 'info';
+}
+
+const TOAST_ICONS: Record<Toast['type'], string> = {
+  success: '✓',
+  error: '✕',
+  info: 'ℹ',
+};
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
+
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 const supabase = supabaseUrl && supabaseAnonKey
@@ -74,7 +94,7 @@ function authMessage(message: string, mode: 'sign-in' | 'sign-up') {
   return message;
 }
 
-function Icon({ name }: { name: 'upload' | 'download' | 'sync' | 'search' | 'filter' | 'cards' | 'users' | 'check' | 'x' | 'spark' }) {
+function Icon({ name }: { name: 'upload' | 'download' | 'sync' | 'search' | 'filter' | 'cards' | 'users' | 'check' | 'x' | 'spark' | 'moon' | 'sun' }) {
   const paths = {
     upload: 'M12 3v12m0-12 4 4m-4-4-4 4M4 17v3h16v-3',
     download: 'M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3',
@@ -85,7 +105,9 @@ function Icon({ name }: { name: 'upload' | 'download' | 'sync' | 'search' | 'fil
     users: 'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm8 1a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM3 20a6 6 0 0 1 12 0M14 20a5 5 0 0 1 7-4.5',
     check: 'm5 13 4 4L19 7',
     x: 'M6 6l12 12M18 6 6 18',
-    spark: 'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z'
+    spark: 'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z',
+    moon: 'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z',
+    sun: 'M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10z'
   };
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="icon">
@@ -102,13 +124,16 @@ export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
+  const [queryInput, setQueryInput] = useState('');
+  const query = useDebounce(queryInput, 220);
   const [tagFilter, setTagFilter] = useState('All');
   const [cardStateFilter, setCardStateFilter] = useState('All');
   const [draftReason, setDraftReason] = useState('Clarified wording and improved tagging.');
-  const [notice, setNotice] = useState('');
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [authNotice, setAuthNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const [apiHealth, setApiHealth] = useState<'checking' | 'ok' | 'down'>('checking');
   const [authReady, setAuthReady] = useState(!supabase);
   const [session, setSession] = useState<Session | null>(null);
@@ -127,6 +152,8 @@ export default function App() {
   const [topView, setTopView] = useState<'workspace' | 'discover' | 'templates'>('workspace');
   const [deckVisibility, setDeckVisibility] = useState<Record<string, string>>({});
   const [copiedShare, setCopiedShare] = useState('');
+  const [darkMode, setDarkMode] = useState(() => localStorage.getItem('deckbridge-dark') === 'true');
+  const toastTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const activeDeck = state?.decks.find((deck) => deck.id === state.activeDeckId) || state?.decks[0];
 
   useEffect(() => {
@@ -161,7 +188,7 @@ export default function App() {
         setSelectedSuggestionId(next.suggestions.find((item) => item.status === 'pending')?.id || null);
       }).catch((error) => {
         setApiHealth('down');
-        setNotice(error.message);
+        pushToast(error.message, 'error');
       });
   }, [authReady, session]);
 
@@ -174,8 +201,28 @@ export default function App() {
   }, [session]);
 
   useEffect(() => {
+    document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
+    localStorage.setItem('deckbridge-dark', String(darkMode));
+  }, [darkMode]);
+
+  useEffect(() => {
     setPage(1);
   }, [query, tagFilter, cardStateFilter, activeDeck?.id]);
+
+  function pushToast(message: string, type: Toast['type'] = 'info') {
+    const id = Math.random().toString(36).slice(2);
+    setToasts((prev) => [...prev.slice(-2), { id, message, type }]);
+    toastTimers.current[id] = setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+      delete toastTimers.current[id];
+    }, 4500);
+  }
+
+  function dismissToast(id: string) {
+    clearTimeout(toastTimers.current[id]);
+    delete toastTimers.current[id];
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }
 
   const handleSuggestionChange = useCallback(() => {
     api.state().then(setState).catch(() => undefined);
@@ -228,11 +275,11 @@ export default function App() {
       return textMatch && tagMatch && stateMatch;
     });
   }, [activeDeck, query, tagFilter, cardStateFilter]);
-  const maxPage = Math.max(1, Math.ceil(filteredCards.length / PAGE_SIZE));
+  const maxPage = Math.max(1, Math.ceil(filteredCards.length / pageSize));
   const safePage = Math.min(page, maxPage);
-  const pagedCards = filteredCards.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
-  const currentStart = filteredCards.length ? (safePage - 1) * PAGE_SIZE + 1 : 0;
-  const currentEnd = Math.min(safePage * PAGE_SIZE, filteredCards.length);
+  const pagedCards = filteredCards.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const currentStart = filteredCards.length ? (safePage - 1) * pageSize + 1 : 0;
+  const currentEnd = Math.min(safePage * pageSize, filteredCards.length);
   const cardsWithPendingSuggestions = useMemo(() => new Set(pendingSuggestions.map((item) => item.cardId)), [pendingSuggestions]);
   const approvedStudyCards = useMemo(() => (activeDeck?.cards || []).filter((card) => (
     !card.suspended && !cardsWithPendingSuggestions.has(card.id)
@@ -257,14 +304,13 @@ export default function App() {
 
   async function refreshWith<T extends AppState | unknown>(task: Promise<T>, success: string, map?: (value: T) => AppState) {
     setBusy(true);
-    setNotice('');
     try {
       const result = await task;
       if (map) setState(map(result));
       else if (result && typeof result === 'object' && 'decks' in result) setState(result as unknown as AppState);
-      setNotice(success);
+      pushToast(success, 'success');
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Something went wrong');
+      pushToast(error instanceof Error ? error.message : 'Something went wrong', 'error');
     } finally {
       setBusy(false);
     }
@@ -281,15 +327,15 @@ export default function App() {
     event.preventDefault();
     if (!supabase) return;
     setAuthBusy(true);
-    setNotice('');
+    setAuthNotice('');
     const credentials = { email: authEmail, password: authPassword };
     const { error } = authMode === 'sign-in'
       ? await supabase.auth.signInWithPassword(credentials)
       : await supabase.auth.signUp({ ...credentials, options: { data: { name: authEmail } } });
     if (error) {
-      setNotice(authMessage(error.message, authMode));
+      setAuthNotice(authMessage(error.message, authMode));
     } else if (authMode === 'sign-up') {
-      setNotice('Account created. DeckBridge will sign you in automatically.');
+      setAuthNotice('Account created. DeckBridge will sign you in automatically.');
     }
     setAuthBusy(false);
   }
@@ -332,7 +378,6 @@ export default function App() {
   async function exportDeck() {
     if (!activeDeck) return;
     setBusy(true);
-    setNotice('');
     try {
       const { blob, filename } = await api.exportDeck(activeDeck.id);
       const url = URL.createObjectURL(blob);
@@ -343,9 +388,9 @@ export default function App() {
       URL.revokeObjectURL(url);
       const next = await api.state();
       setState(next);
-      setNotice(`Exported ${filename}`);
+      pushToast(`Exported ${filename}`, 'success');
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Export failed');
+      pushToast(error instanceof Error ? error.message : 'Export failed', 'error');
     } finally {
       setBusy(false);
     }
@@ -391,7 +436,7 @@ export default function App() {
           >
             {authMode === 'sign-in' ? 'Create an account' : 'Use an existing account'}
           </button>
-          {notice ? <p className="auth-notice">{notice}</p> : null}
+          {authNotice ? <p className="auth-notice">{authNotice}</p> : null}
         </section>
       </div>
     );
@@ -421,8 +466,8 @@ export default function App() {
             Import .apkg
             <input className="file-input-hidden" type="file" accept=".apkg" onChange={uploadDeck} />
           </label>
-          {notice ? <span className="notice">{notice}</span> : null}
         </section>
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
       </div>
     );
   }
@@ -497,6 +542,16 @@ export default function App() {
             </div>
           ))}
         </section>
+
+        <button
+          className="dark-toggle"
+          onClick={() => setDarkMode((d) => !d)}
+          aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+          title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+        >
+          <Icon name={darkMode ? 'sun' : 'moon'} />
+          {darkMode ? 'Light mode' : 'Dark mode'}
+        </button>
       </aside>
 
       {topView === 'discover' && (
@@ -504,7 +559,7 @@ export default function App() {
           <DiscoverView
             onFork={(deckId, name) => {
               setTopView('workspace');
-              setNotice(`Forked "${name}" into your workspace`);
+              pushToast(`Forked "${name}" into your workspace`, 'success');
               api.state().then(setState).catch(() => undefined);
             }}
           />
@@ -516,7 +571,7 @@ export default function App() {
           <TemplateGallery
             onUse={(deckId, name) => {
               setTopView('workspace');
-              setNotice(`Created "${name}" from template`);
+              pushToast(`Created "${name}" from template`, 'success');
               api.state().then(setState).catch(() => undefined);
             }}
           />
@@ -578,7 +633,8 @@ export default function App() {
                     a.download = filename;
                     a.click();
                     URL.revokeObjectURL(url);
-                  } catch (e) { setNotice(e instanceof Error ? e.message : 'Export failed'); }
+                    pushToast(`Exported ${filename}`, 'success');
+                  } catch (e) { pushToast(e instanceof Error ? e.message : 'Export failed', 'error'); }
                   finally { setBusy(false); }
                 }} disabled={busy}>.csv (Spreadsheet)</button>
                 <button onClick={async () => {
@@ -592,7 +648,8 @@ export default function App() {
                     a.download = filename;
                     a.click();
                     URL.revokeObjectURL(url);
-                  } catch (e) { setNotice(e instanceof Error ? e.message : 'Export failed'); }
+                    pushToast(`Exported ${filename}`, 'success');
+                  } catch (e) { pushToast(e instanceof Error ? e.message : 'Export failed', 'error'); }
                   finally { setBusy(false); }
                 }} disabled={busy}>Activity Log (.csv)</button>
               </div>
@@ -683,7 +740,7 @@ export default function App() {
                     }
                   } : prev);
                   if (resolution !== 'skip') {
-                    setNotice(resolution === 'local' ? 'Kept local version' : 'Applied incoming changes');
+                    pushToast(resolution === 'local' ? 'Kept local version' : 'Applied incoming changes', 'info');
                   }
                 }}
               />
@@ -706,7 +763,7 @@ export default function App() {
                 <label className="sr-only" htmlFor="card-search">Search cards</label>
                 <label className="search-box">
                   <Icon name="search" />
-                  <input id="card-search" name="card-search" aria-label="Search cards" placeholder="Search cards..." value={query} onChange={(event) => setQuery(event.target.value)} />
+                  <input id="card-search" name="card-search" aria-label="Search cards" placeholder="Search cards..." value={queryInput} onChange={(event) => setQueryInput(event.target.value)} />
                 </label>
                 <label className="sr-only" htmlFor="tag-filter">Filter by tag</label>
                 <select id="tag-filter" name="tag-filter" aria-label="Filter by tag" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}>
@@ -719,11 +776,11 @@ export default function App() {
                 <button
                   className="button secondary"
                   onClick={() => {
-                    setQuery('');
+                    setQueryInput('');
                     setTagFilter('All');
                     setCardStateFilter('All');
                   }}
-                  disabled={!query && tagFilter === 'All' && cardStateFilter === 'All'}
+                  disabled={!queryInput && tagFilter === 'All' && cardStateFilter === 'All'}
                 >
                   <Icon name="filter" /> Clear filters
                 </button>
@@ -786,12 +843,26 @@ export default function App() {
               </div>
 
               <div className="pagination-row">
-                <span>Rows per page <strong>{PAGE_SIZE}</strong></span>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                  Rows
+                  <select
+                    className="page-size-select"
+                    value={pageSize}
+                    onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+                    aria-label="Rows per page"
+                  >
+                    <option value={10}>10</option>
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                  </select>
+                </label>
                 <span>{currentStart}-{currentEnd} of {filteredCards.length.toLocaleString()}</span>
                 <span className="pager">
+                  <button aria-label="First page" onClick={() => setPage(1)} disabled={safePage === 1}>«</button>
                   <button aria-label="Previous page" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={safePage === 1}>‹</button>
-                  <strong>{safePage}</strong>
+                  <strong>{safePage} / {maxPage}</strong>
                   <button aria-label="Next page" onClick={() => setPage((value) => Math.min(maxPage, value + 1))} disabled={safePage === maxPage}>›</button>
+                  <button aria-label="Last page" onClick={() => setPage(maxPage)} disabled={safePage === maxPage}>»</button>
                 </span>
               </div>
             </div>
@@ -938,7 +1009,7 @@ export default function App() {
         </div>
       </section>}
 
-      {notice ? <div className="toast">{notice}</div> : null}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
       {busy ? <div className="busy-bar" /> : null}
       {showConnectWizard && (
         <ConnectAnkiWizard
@@ -956,6 +1027,21 @@ export default function App() {
         />
       )}
     </main>
+  );
+}
+
+function ToastStack({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: string) => void }) {
+  if (!toasts.length) return null;
+  return (
+    <div className="toast-stack" role="status" aria-live="polite">
+      {toasts.map((t) => (
+        <div key={t.id} className={`toast toast--${t.type}`}>
+          <span className="toast__icon" aria-hidden="true">{TOAST_ICONS[t.type]}</span>
+          <span className="toast__message">{t.message}</span>
+          <button className="toast__dismiss" onClick={() => onDismiss(t.id)} aria-label="Dismiss notification">✕</button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -1053,12 +1139,21 @@ function DeckStatsView({
       <div className="stats-columns">
         <section>
           <h3>Card states</h3>
-          {Object.entries(stateCounts).map(([state, count]) => (
-            <div className="metric-row" key={state}>
-              <span>{state}</span>
-              <strong>{count.toLocaleString()}</strong>
-            </div>
-          ))}
+          <div className="state-bar-wrap">
+            {Object.entries(stateCounts).map(([st, count]) => {
+              const pct = deck.cards.length ? Math.round((count / deck.cards.length) * 100) : 0;
+              const color = (statusColors[st] || 'neutral');
+              return (
+                <div className="state-bar-row" key={st}>
+                  <span title={st}>{st}</span>
+                  <div className="state-bar-track">
+                    <div className={`state-bar-fill ${color}`} style={{ width: `${pct}%` }} />
+                  </div>
+                  <strong>{count}</strong>
+                </div>
+              );
+            })}
+          </div>
         </section>
         <section>
           <h3>Suggestion flow</h3>
