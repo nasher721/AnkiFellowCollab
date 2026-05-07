@@ -156,6 +156,64 @@ export function normalizeAddonSyncInput(body = {}) {
   };
 }
 
+export function normalizeAddonDeckCreateInput(body = {}, user = {}) {
+  const syncInput = normalizeAddonSyncInput({
+    ...body,
+    dryRun: false,
+    allowCreate: true
+  });
+  const createdAt = nowIso();
+  const firstCard = syncInput.cards[0] || {};
+  const deckName = cleanText(
+    body.deckName || body.name || firstCard.sourceDeckName,
+    'Synced Anki Deck',
+    180
+  ) || 'Synced Anki Deck';
+  const deckPath = cleanText(body.deckPath || firstCard.sourceDeckPath || deckName, deckName, 500);
+  const cards = syncInput.cards.map((card) => ({
+    ...card,
+    modifiedAt: card.modifiedAt || createdAt,
+    modifiedBy: card.modifiedBy || user.name || 'Anki'
+  }));
+
+  return {
+    deck: {
+      id: `deck-${randomUUID()}`,
+      name: deckName,
+      description: cleanText(
+        body.description,
+        `${deckName} synced from Anki.`,
+        600
+      ) || `${deckName} synced from Anki.`,
+      owner: user.name || 'DeckBridge User',
+      importedAt: createdAt,
+      lastSyncedAt: createdAt,
+      cards,
+      media: {},
+      models: [],
+      source: {
+        filename: null,
+        format: 'anki-addon',
+        deckName,
+        deckPath,
+        client: syncInput.client
+      }
+    },
+    result: {
+      syncedAt: createdAt,
+      stats: {
+        total: cards.length,
+        created: cards.length,
+        updated: 0,
+        skipped: 0,
+        conflicts: 0,
+        dryRun: false
+      },
+      conflicts: []
+    }
+  };
+}
+
 function sameJson(left, right) {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }

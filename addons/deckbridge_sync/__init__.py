@@ -44,7 +44,8 @@ _last_autoconfig_error = ""
 DEFAULT_CONFIG: Dict[str, Any] = {
     "platform_url": "http://localhost:4175",
     "api_token": "",
-    "deck_id": "deck-demo-zanki",
+    "deck_id": "",
+    "email": "",
     "local_deck": "",
     "conflict_policy": "detect",
     "auto_sync_minutes": 0,
@@ -61,6 +62,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 DEFAULT_STORED_CONFIG: Dict[str, Any] = {
     "url": DEFAULT_CONFIG["platform_url"],
     "token": "",
+    "email": DEFAULT_CONFIG["email"],
     "deckMappings": [],
     "autoSync": False,
     "auto_sync_minutes": DEFAULT_CONFIG["auto_sync_minutes"],
@@ -165,6 +167,7 @@ def _stored_from_flat(flat: Dict[str, Any], base: Optional[Dict[str, Any]] = Non
         **base_config,
         "url": normalize_platform_url(str(flat.get("platform_url", flat.get("url", base_config.get("url", DEFAULT_CONFIG["platform_url"]))) or "")),
         "token": str(flat.get("api_token", flat.get("token", base_config.get("token", ""))) or "").strip(),
+        "email": str(flat.get("email", base_config.get("email", "")) or "").strip(),
         "autoSync": bool(flat.get("autoSync", base_config.get("autoSync", False))),
         "auto_sync_minutes": int(flat.get("auto_sync_minutes", base_config.get("auto_sync_minutes", 0)) or 0),
         "timeout_seconds": int(flat.get("timeout_seconds", base_config.get("timeout_seconds", 30)) or 30),
@@ -199,6 +202,7 @@ def _flat_from_stored(stored: Dict[str, Any]) -> Dict[str, Any]:
         **DEFAULT_CONFIG,
         "platform_url": stored.get("url", stored.get("platform_url", DEFAULT_CONFIG["platform_url"])),
         "api_token": stored.get("token", stored.get("api_token", "")),
+        "email": stored.get("email", stored.get("email", "")),
         "deck_id": mapping.get("deckId", stored.get("deck_id", DEFAULT_CONFIG["deck_id"])),
         "local_deck": mapping.get("localDeck", stored.get("local_deck", "")),
         "conflict_policy": mapping.get("conflictPolicy", stored.get("conflict_policy", "detect")),
@@ -309,13 +313,14 @@ def request_json(
     path: str,
     payload: Optional[Dict[str, Any]] = None,
     cfg: Optional[Dict[str, Any]] = None,
+    include_auth: bool = True,
 ) -> Dict[str, Any]:
     cfg = cfg or config()
     body = json.dumps(payload or {}).encode("utf-8") if payload is not None else None
     headers = {"Accept": "application/json"}
     if payload is not None:
         headers["Content-Type"] = "application/json"
-    if cfg.get("api_token"):
+    if include_auth and cfg.get("api_token"):
         headers["Authorization"] = f"Bearer {cfg['api_token']}"
     request = urllib.request.Request(platform_url(cfg, path), data=body, headers=headers, method=method)
     timeout = max(5, int(cfg.get("timeout_seconds") or 30))
@@ -346,6 +351,29 @@ def validate_token(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     decks = result.get("decks", [])
     if decks is not None and not isinstance(decks, list):
         raise RuntimeError("DeckBridge token validation returned an invalid deck list.")
+    return result
+
+
+def login_to_account(platform: str, email: str, password: str) -> Dict[str, Any]:
+    active_config = {**config(), "platform_url": normalize_platform_url(platform), "api_token": ""}
+    clean_email = str(email or "").strip()
+    if not clean_email:
+        raise RuntimeError("DeckBridge email is required.")
+    if not password:
+        raise RuntimeError("DeckBridge password is required.")
+    result = request_json(
+        "POST",
+        "/api/anki/login",
+        {"email": clean_email, "password": password},
+        cfg=active_config,
+        include_auth=False,
+    )
+    token = result.get("token") or {}
+    raw_token = token.get("token") or token.get("raw")
+    if not raw_token:
+        raise RuntimeError("DeckBridge login did not return an add-on token.")
+    result["api_token"] = normalize_api_token(raw_token)
+    result["email"] = clean_email
     return result
 
 
@@ -440,8 +468,11 @@ def collect_cards() -> List[Dict[str, Any]]:
 
 def sync_payload(*, dry_run: bool = False) -> Dict[str, Any]:
     cfg = config()
+    deck_name = active_local_deck()
     return {
         "cards": collect_cards(),
+        "deckName": deck_name,
+        "deckPath": deck_name,
         "dryRun": dry_run,
         "allowCreate": True,
         "conflictPolicy": cfg.get("conflict_policy", "detect"),
@@ -454,8 +485,39 @@ def sync_payload(*, dry_run: bool = False) -> Dict[str, Any]:
     }
 
 
+def _visible_deck_ids(me: Dict[str, Any]) -> set[str]:
+    return {str(deck.get("id")) for deck in me.get("decks", []) if deck.get("id")}
+
+
+def create_platform_deck_from_anki(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    cfg = cfg or config()
+    created = request_json("POST", "/api/decks/sync/from-anki", sync_payload(dry_run=False), cfg=cfg)
+    new_deck_id = str((created.get("deck") or {}).get("id") or created.get("state", {}).get("activeDeckId") or "").strip()
+    if not new_deck_id:
+        raise RuntimeError("DeckBridge created a deck but did not return its deck ID.")
+    save_config({**cfg, "deck_id": new_deck_id, "local_deck": active_local_deck()})
+    return created
+
+
+def ensure_platform_deck() -> Dict[str, Any]:
+    cfg = config()
+    me = validate_token(cfg)
+    deck_id = str(cfg.get("deck_id", "") or "").strip()
+    if deck_id and deck_id in _visible_deck_ids(me):
+        return cfg
+    create_platform_deck_from_anki(cfg)
+    return config()
+
+
 def post_cards(*, dry_run: bool = False) -> Dict[str, Any]:
     cfg = config()
+    deck_id = str(cfg.get("deck_id", "") or "").strip()
+    if not dry_run:
+        me = validate_token(cfg)
+        if not deck_id or deck_id not in _visible_deck_ids(me):
+            return create_platform_deck_from_anki(cfg)
+    elif not deck_id:
+        raise RuntimeError("No DeckBridge deck is selected yet. Use Push Anki deck to DeckBridge to create one from Anki first.")
     return request_json("POST", f"/api/decks/{cfg['deck_id']}/sync/cards", sync_payload(dry_run=dry_run))
 
 
@@ -609,7 +671,7 @@ def preview_push() -> None:
 
 
 def push_to_platform() -> None:
-    run_guarded("Push", lambda: show_result("Anki cards pushed to DeckBridge.", post_cards(dry_run=False)))
+    run_guarded("Push", lambda: show_result("Anki deck synced to DeckBridge.", post_cards(dry_run=False)))
 
 
 def pull_to_anki() -> None:
@@ -654,9 +716,16 @@ class SettingsDialog(QDialog):
         self.platform_url = QLineEdit(str(cfg["platform_url"]))
         self.platform_url.setPlaceholderText("https://your-deckbridge.vercel.app")
 
+        self.email = QLineEdit(str(cfg.get("email", "")))
+        self.email.setPlaceholderText("you@example.com")
+
+        self.password = QLineEdit("")
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password.setPlaceholderText("DeckBridge password")
+
         self.api_token = QLineEdit(str(cfg["api_token"]))
         self.api_token.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_token.setPlaceholderText("db_…  (generate in DeckBridge → Connect Anki)")
+        self.api_token.setPlaceholderText("Created automatically after login")
 
         self.deck_id = QLineEdit(str(cfg["deck_id"]))
         self.deck_id.setPlaceholderText("deck-id from DeckBridge")
@@ -670,6 +739,8 @@ class SettingsDialog(QDialog):
 
         test_btn = QPushButton("Test connection")
         test_btn.clicked.connect(self._test_connection)
+        login_btn = QPushButton("Log in to DeckBridge")
+        login_btn.clicked.connect(self._login)
 
         # --- Sync section ---
         sync_label = QLabel("<b>Sync options</b>")
@@ -703,9 +774,12 @@ class SettingsDialog(QDialog):
         conn_form = QFormLayout()
         conn_form.addRow(setup_label)
         conn_form.addRow("Platform URL", self.platform_url)
+        conn_form.addRow("Email", self.email)
+        conn_form.addRow("Password", self.password)
         conn_form.addRow("API token", self.api_token)
         conn_form.addRow("DeckBridge deck ID", self.deck_id)
         conn_form.addRow("Local Anki deck", self.local_deck)
+        conn_form.addRow("", login_btn)
         conn_form.addRow("", test_btn)
 
         sync_form = QFormLayout()
@@ -747,10 +821,32 @@ class SettingsDialog(QDialog):
         except Exception as error:
             showInfo(str(error), title=f"{ADDON_NAME}: Connection failed")
 
+    def _login(self) -> None:
+        try:
+            result = login_to_account(
+                self.platform_url.text().strip(),
+                self.email.text().strip(),
+                self.password.text(),
+            )
+            self.api_token.setText(result["api_token"])
+            decks = result.get("decks") or []
+            if decks and not self.deck_id.text().strip():
+                self.deck_id.setText(str(decks[0].get("id") or ""))
+            self.password.clear()
+            showInfo(
+                f"Logged in as {self.email.text().strip()}.\n"
+                f"Visible DeckBridge decks: {len(decks)}.\n\n"
+                "Use Push Anki deck to DeckBridge to create a workspace from this Anki deck if none exists.",
+                title=ADDON_NAME,
+            )
+        except Exception as error:
+            showInfo(str(error), title=f"{ADDON_NAME}: Login failed")
+
     def values(self) -> Dict[str, Any]:
         return {
             "platform_url": self.platform_url.text().strip(),
             "api_token": self.api_token.text().strip(),
+            "email": self.email.text().strip(),
             "deck_id": self.deck_id.text().strip(),
             "local_deck": self.local_deck.currentText().strip(),
             "conflict_policy": self.conflict_policy.currentText(),
@@ -799,7 +895,7 @@ def add_menu() -> None:
     actions = [
         ("Test connection", test_connection),
         ("Preview push to DeckBridge", preview_push),
-        ("Push Anki deck to DeckBridge", push_to_platform),
+        ("Push/create Anki deck in DeckBridge", push_to_platform),
         ("Pull DeckBridge deck into Anki", pull_to_anki),
         ("Bidirectional sync", bidirectional_sync),
         ("Settings", open_settings),

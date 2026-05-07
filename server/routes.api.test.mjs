@@ -154,7 +154,7 @@ async function createTestApp() {
   };
 }
 
-async function createTokenTestApp() {
+async function createTokenTestApp(options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
   process.env.DECKBRIDGE_DATA_DIR = dataDir;
   const supabase = new FakeSupabase();
@@ -183,7 +183,7 @@ async function createTokenTestApp() {
     }
   };
   return {
-    app: createApp({ production: false, repositoryMode: 'local', auth }),
+    app: createApp({ production: false, repositoryMode: 'local', auth, ...options }),
     supabase
   };
 }
@@ -251,6 +251,38 @@ test('token management gracefully reports unavailable Supabase setup', async () 
     .expect((res) => {
       assert.equal(res.body.error.code, 'tokens_unavailable');
     });
+});
+
+test('Anki login exchanges account credentials for an add-on token', async () => {
+  const authLoginClient = {
+    auth: {
+      async signInWithPassword({ email, password }) {
+        assert.equal(email, 'anki@example.com');
+        assert.equal(password, 'correct horse');
+        return {
+          data: {
+            user: {
+              id: 'anki-user',
+              email,
+              user_metadata: { name: 'Anki User' }
+            }
+          },
+          error: null
+        };
+      }
+    }
+  };
+  const { app, supabase } = await createTokenTestApp({ authLoginClient });
+
+  const response = await request(app)
+    .post('/api/anki/login')
+    .send({ email: 'anki@example.com', password: 'correct horse' })
+    .expect(200);
+
+  assert.equal(response.body.user.id, 'anki-user');
+  assert.match(response.body.token.token, /^db_/);
+  assert.equal(supabase.tables.user_tokens[0].user_id, 'anki-user');
+  assert.equal(response.body.decks.length, 0);
 });
 
 test('add-on endpoints expose manifest version and package download behavior', async () => {
@@ -369,6 +401,35 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
 
   assert.equal(conflict.body.result.stats.conflicts, 1);
   assert.equal(conflict.body.state.sync.conflicts[0].cardId, 'anki-9001');
+});
+
+test('Anki add-on can create the first DeckBridge workspace from a local deck', async () => {
+  const { app } = await createTestApp();
+
+  const created = await asUser(request(app)
+    .post('/api/decks/sync/from-anki')
+    .send({
+      deckName: 'Neuro Boards',
+      source: 'DeckBridge Sync test',
+      cards: [{
+        id: 'anki-777',
+        ankiNoteId: 777,
+        type: 'Cloze',
+        modelName: 'Cloze',
+        fieldOrder: ['Text', 'Extra'],
+        fields: { Text: '{{c1::Nimodipine}} after SAH reduces delayed ischemia risk.', Extra: 'Board-style pearl' },
+        tags: ['NeuroICU'],
+        state: 'Review',
+        suspended: false,
+        sourceDeckName: 'Neuro Boards'
+      }]
+    }), 'new-user', 'New User').expect(201);
+
+  assert.equal(created.body.deck.name, 'Neuro Boards');
+  assert.equal(created.body.result.stats.created, 1);
+  assert.equal(created.body.state.decks[0].name, 'Neuro Boards');
+  assert.equal(created.body.state.memberships[0].role, 'owner');
+  assert.equal(created.body.state.decks[0].cards[0].ankiNoteId, 777);
 });
 
 test('study session API persists and lists sessions without changing progress contract', async () => {

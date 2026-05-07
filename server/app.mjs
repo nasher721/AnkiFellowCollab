@@ -4,9 +4,10 @@ import express from 'express';
 import fs from 'node:fs/promises';
 import multer from 'multer';
 import path from 'node:path';
+import { createClient } from '@supabase/supabase-js';
 import { createAuth } from './auth.mjs';
 import { requireContributor, requireEditor, requireOwner, requireReviewer, resolveSuggestionDeck } from './rbac.mjs';
-import { deckToCreateDeckJson, normalizeAddonSyncInput, normalizeParsedDeck, normalizeSuggestionInput } from './domain.mjs';
+import { deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeParsedDeck, normalizeSuggestionInput } from './domain.mjs';
 import { AppError, errorPayload, fail } from './errors.mjs';
 import { checkAnki, pullDeck, pushDeck } from './ankiConnect.mjs';
 import { createApkg, parseApkg } from './ankiPackage.mjs';
@@ -195,6 +196,12 @@ export function createApp(options = {}) {
   const auth = options.auth || createAuth({ ...options, production });
   const parsePackage = options.parseApkg || parseApkg;
   const createPackage = options.createApkg || createApkg;
+  const anonKey = options.supabaseAnonKey || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+  const loginClient = options.authLoginClient || ((options.supabaseUrl || process.env.SUPABASE_URL) && anonKey
+    ? createClient(options.supabaseUrl || process.env.SUPABASE_URL, anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    })
+    : null);
   const upload = multer({
     dest: paths().uploadsDir,
     limits: { fileSize: Number(process.env.MAX_APKG_BYTES || 250 * 1024 * 1024), files: 1 },
@@ -268,6 +275,28 @@ export function createApp(options = {}) {
         : 'Anki Add-on';
       const token = await createUserToken(auth.supabase, req.user, label);
       res.status(201).json(token);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/anki/login', async (req, res, next) => {
+    try {
+      if (!auth.supabase || !loginClient) fail(501, 'anki_login_unavailable', 'Anki login requires Supabase auth');
+      const email = typeof req.body.email === 'string' ? req.body.email.trim() : '';
+      const password = typeof req.body.password === 'string' ? req.body.password : '';
+      if (!email || !password) fail(400, 'missing_credentials', 'Email and password are required');
+
+      const { data, error } = await loginClient.auth.signInWithPassword({ email, password });
+      if (error || !data.user) fail(401, 'invalid_credentials', 'Invalid DeckBridge email or password');
+      const user = {
+        id: data.user.id,
+        email: data.user.email || email,
+        name: data.user.user_metadata?.name || data.user.email || email
+      };
+      const token = await createUserToken(auth.supabase, user, 'Anki Add-on login');
+      const decks = typeof repository.listDecks === 'function' ? await repository.listDecks(user) : [];
+      res.json({ user, token, decks });
     } catch (error) {
       next(error);
     }
@@ -368,6 +397,25 @@ export function createApp(options = {}) {
       if (req.file?.path) {
         await fs.rm(req.file.path, { force: true }).catch(() => undefined);
       }
+    }
+  });
+
+  app.post('/api/decks/sync/from-anki', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!repository.uploadDeck) fail(501, 'deck_create_unavailable', 'Deck creation is not available for this repository');
+      const { deck, result } = normalizeAddonDeckCreateInput(req.body, req.user);
+      const state = await repository.uploadDeck(req.user, deck);
+      res.status(201).json({
+        deck: {
+          id: deck.id,
+          name: deck.name,
+          cardCount: deck.cards.length
+        },
+        result,
+        state
+      });
+    } catch (error) {
+      next(error);
     }
   });
 

@@ -22,9 +22,11 @@ from deckbridge_sync import (
     apply_autoconfig,
     addon_manifest,
     config,
+    create_platform_deck_from_anki,
     DEFAULT_CONFIG,
     CONFIG_KEY,
     last_autoconfig_error,
+    login_to_account,
     local_deck_names,
     normalize_platform_url,
     open_settings,
@@ -250,7 +252,7 @@ class TestVersion(unittest.TestCase):
 class TestDefaultConfig(unittest.TestCase):
     def test_has_required_fields(self):
         required = [
-            'platform_url', 'api_token', 'deck_id', 'local_deck',
+            'platform_url', 'api_token', 'deck_id', 'email', 'local_deck',
             'conflict_policy', 'auto_sync_minutes', 'timeout_seconds',
             'batch_size', 'tag_filter', 'include_suspended',
             'create_missing_notes', 'pull_overwrites_local',
@@ -262,7 +264,7 @@ class TestDefaultConfig(unittest.TestCase):
     def test_defaults(self):
         self.assertEqual(DEFAULT_CONFIG['platform_url'], 'http://localhost:4175')
         self.assertEqual(DEFAULT_CONFIG['api_token'], '')
-        self.assertEqual(DEFAULT_CONFIG['deck_id'], 'deck-demo-zanki')
+        self.assertEqual(DEFAULT_CONFIG['deck_id'], '')
         self.assertEqual(DEFAULT_CONFIG['local_deck'], '')
         self.assertEqual(DEFAULT_CONFIG['conflict_policy'], 'detect')
         self.assertEqual(DEFAULT_CONFIG['auto_sync_minutes'], 0)
@@ -460,6 +462,37 @@ class TestTokenValidation(unittest.TestCase):
     def test_validate_token_requires_token(self):
         with self.assertRaisesRegex(RuntimeError, 'token is required'):
             validate_token({**DEFAULT_CONFIG, 'api_token': ''})
+
+    @patch('deckbridge_sync.urllib.request.urlopen')
+    def test_login_to_account_returns_addon_token(self, mock_urlopen):
+        mock_urlopen.return_value = FakeResponse({
+            'user': {'email': 'user@example.com', 'name': 'User'},
+            'token': {'token': 'db_login_token'},
+            'decks': [],
+        })
+        result = login_to_account('https://deckbridge.example', 'user@example.com', 'secret')
+        self.assertEqual(result['api_token'], 'db_login_token')
+        request = mock_urlopen.call_args[0][0]
+        self.assertEqual(request.full_url, 'https://deckbridge.example/api/anki/login')
+        self.assertNotIn('Authorization', request.headers)
+
+    @patch('deckbridge_sync.save_config')
+    @patch('deckbridge_sync.sync_payload', return_value={'cards': [{'id': 'anki-1', 'fields': {'Front': 'A'}}]})
+    @patch('deckbridge_sync.request_json')
+    def test_create_platform_deck_from_anki_saves_returned_deck_id(self, mock_request, _mock_payload, mock_save):
+        mock_request.return_value = {
+            'deck': {'id': 'deck-created', 'name': 'Created'},
+            'result': {'stats': {'created': 1}},
+        }
+        result = create_platform_deck_from_anki({
+            **DEFAULT_CONFIG,
+            'platform_url': 'https://deckbridge.example',
+            'api_token': 'db_token',
+            'local_deck': 'Local Deck',
+        })
+        self.assertEqual(result['deck']['id'], 'deck-created')
+        saved = mock_save.call_args[0][0]
+        self.assertEqual(saved['deck_id'], 'deck-created')
 
     @patch('deckbridge_sync.urllib.request.urlopen')
     def test_validate_token_rejects_non_db_without_network_call(self, mock_urlopen):
