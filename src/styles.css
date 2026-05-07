@@ -2779,6 +2779,27 @@ button:disabled {
 .leaderboard-bar-wrap { height: 6px; background: var(--bg-secondary, #f0f0f0); border-radius: 99px; overflow: hidden; }
 .leaderboard-bar { height: 100%; background: var(--color-primary, #4f46e5); border-radius: 99px; transition: width 0.4s; }
 
+/* ─── Analytics — Study Trend ────────────────────────────────────────────── */
+.study-trend { margin-top: 16px; }
+.study-trend h4 { font-size: 0.85rem; font-weight: 600; margin: 0 0 10px; color: var(--text-muted, #888); text-transform: uppercase; letter-spacing: 0.04em; }
+.study-trend-bars { display: flex; align-items: flex-end; gap: 6px; height: 80px; padding-bottom: 20px; position: relative; }
+.trend-bar-col { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; flex: 1; height: 100%; position: relative; }
+.trend-bar { width: 100%; background: var(--color-primary, #4f46e5); border-radius: 4px 4px 0 0; opacity: 0.7; transition: opacity 0.15s; }
+.trend-bar-col:hover .trend-bar { opacity: 1; }
+.trend-bar-label { position: absolute; bottom: -18px; font-size: 0.65rem; color: var(--text-muted, #888); white-space: nowrap; }
+
+/* ─── Analytics — Struggling Cards ──────────────────────────────────────── */
+.struggling-cards { margin-top: 16px; }
+.struggling-cards h4 { font-size: 0.85rem; font-weight: 600; margin: 0 0 10px; color: var(--text-muted, #888); text-transform: uppercase; letter-spacing: 0.04em; }
+.struggling-card-row { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; background: var(--bg-secondary, #f9fafb); border: 1px solid var(--border, #e5e7eb); border-radius: 8px; margin-bottom: 6px; }
+.struggling-card-content { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.struggling-front { font-size: 0.875rem; font-weight: 600; color: var(--text-primary, #111); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.struggling-back { font-size: 0.8rem; color: var(--text-muted, #888); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.struggling-id { font-size: 0.75rem; font-family: monospace; color: var(--text-muted, #888); }
+.struggling-card-meta { display: flex; gap: 12px; flex-wrap: wrap; }
+.struggling-ease, .struggling-reps, .struggling-due { font-size: 0.75rem; color: var(--text-muted, #888); white-space: nowrap; }
+.struggling-ease { color: var(--color-error, #dc2626); font-weight: 600; }
+
 /* ─── Conflict Resolution ────────────────────────────────────────────────── */
 
 .conflict-panel {

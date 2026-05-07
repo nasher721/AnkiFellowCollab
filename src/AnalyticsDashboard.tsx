@@ -191,10 +191,18 @@ export function AnalyticsDashboard({ deckId, deckName, isOwner, onSetVisibility,
               <h4>Cards needing attention</h4>
               {analytics.study.strugglingCards.map((card) => (
                 <div key={card.cardId} className="struggling-card-row">
-                  <span className="struggling-id">{card.cardId.slice(0, 8)}…</span>
-                  <span className="struggling-ease">Ease {card.easeFactor.toFixed(2)}</span>
-                  <span className="struggling-reps">{card.repetitions} reps</span>
-                  <span className="struggling-due">Due {card.nextDue.slice(0, 10)}</span>
+                  <div className="struggling-card-content">
+                    {card.front
+                      ? <span className="struggling-front">{card.front}</span>
+                      : <span className="struggling-id">{card.cardId.slice(0, 8)}…</span>
+                    }
+                    {card.back && <span className="struggling-back">{card.back}</span>}
+                  </div>
+                  <div className="struggling-card-meta">
+                    <span className="struggling-ease">Ease {card.easeFactor.toFixed(2)}</span>
+                    <span className="struggling-reps">{card.repetitions} reps</span>
+                    <span className="struggling-due">Due {card.nextDue.slice(0, 10)}</span>
+                  </div>
                 </div>
               ))}
             </div>
