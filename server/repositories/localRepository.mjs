@@ -9,6 +9,7 @@ function ensureCollections(state) {
   state.studySessions ||= [];
   state.shareLinks ||= [];
   state.invites ||= [];
+  state.comments ||= [];
   state.sync ||= {};
   state.sync.lastAddonSync ??= null;
   // Migrate legacy 'collaborator' role to 'contributor'
@@ -75,6 +76,22 @@ function publicState(state, activeDeckId = state.activeDeckId) {
     ...state,
     activeDeckId: activeDeck?.id || null,
     summaries: state.decks.map((deck) => summarizeDeck(deck, state.suggestions))
+  };
+}
+
+function toComment(comment) {
+  return {
+    id: comment.id,
+    suggestionId: comment.suggestionId,
+    deckId: comment.deckId,
+    authorId: comment.authorId,
+    authorName: comment.authorName,
+    body: comment.body,
+    parentId: comment.parentId || null,
+    createdAt: comment.createdAt,
+    updatedAt: comment.updatedAt || null,
+    resolvedAt: comment.resolvedAt || null,
+    resolvedBy: comment.resolvedBy || null
   };
 }
 
@@ -242,6 +259,69 @@ export function createLocalRepository() {
       });
       await saveState(state);
       return this.getDeckState(user, deck.id);
+    },
+
+    async listSuggestionComments(user, suggestionId) {
+      const state = await loadState();
+      ensureCollections(state);
+      const suggestion = state.suggestions.find((item) => item.id === suggestionId);
+      if (!suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
+      requireRole(state, user.id, suggestion.deckId, 'contributor');
+      return state.comments
+        .filter((comment) => comment.suggestionId === suggestionId)
+        .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+        .map(toComment);
+    },
+
+    async createSuggestionComment(user, suggestionId, payload) {
+      const state = await loadState();
+      ensureCollections(state);
+      const suggestion = state.suggestions.find((item) => item.id === suggestionId);
+      if (!suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
+      const { collaborator } = requireRole(state, user.id, suggestion.deckId, 'contributor');
+      const parentId = payload.parentId || null;
+      if (parentId && !state.comments.some((comment) => comment.id === parentId && comment.suggestionId === suggestionId)) {
+        fail(404, 'comment_not_found', 'Parent comment not found');
+      }
+      const createdAt = nowIso();
+      const comment = {
+        id: `comment-${randomUUID()}`,
+        suggestionId,
+        deckId: suggestion.deckId,
+        authorId: collaborator.id,
+        authorName: collaborator.name,
+        body: payload.body,
+        parentId,
+        createdAt,
+        updatedAt: null,
+        resolvedAt: null,
+        resolvedBy: null
+      };
+      state.comments.push(comment);
+      state.activity.unshift({
+        id: `act-${randomUUID()}`,
+        kind: 'comment',
+        text: `${collaborator.name} commented on a suggestion`,
+        at: createdAt
+      });
+      await saveState(state);
+      return toComment(comment);
+    },
+
+    async setSuggestionCommentResolved(user, suggestionId, commentId, resolved) {
+      const state = await loadState();
+      ensureCollections(state);
+      const suggestion = state.suggestions.find((item) => item.id === suggestionId);
+      if (!suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
+      requireRole(state, user.id, suggestion.deckId, 'contributor');
+      const comment = state.comments.find((item) => item.id === commentId && item.suggestionId === suggestionId);
+      if (!comment) fail(404, 'comment_not_found', 'Comment not found');
+      const nextResolved = typeof resolved === 'boolean' ? resolved : !comment.resolvedAt;
+      comment.resolvedAt = nextResolved ? nowIso() : null;
+      comment.resolvedBy = nextResolved ? user.id : null;
+      comment.updatedAt = nowIso();
+      await saveState(state);
+      return toComment(comment);
     },
 
     async getExportDeck(user, deckId) {

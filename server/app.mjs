@@ -559,68 +559,65 @@ export function createApp(options = {}) {
 
   app.get('/api/suggestions/:id/comments', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireContributor(auth.supabase), async (req, res, next) => {
     try {
-      if (!auth.supabase) return res.json({ comments: [] });
-      const { data, error } = await auth.supabase
-        .from('comments')
-        .select('id, author_id, author_name, body, parent_id, created_at, updated_at')
-        .eq('suggestion_id', req.params.id)
-        .order('created_at', { ascending: true });
-      if (error) fail(500, 'comments_error', error.message);
-      res.json({ comments: data });
+      if (!repository.listSuggestionComments) fail(501, 'comments_unavailable', 'Comments are unavailable');
+      const comments = await repository.listSuggestionComments(req.user, req.params.id);
+      res.json({ comments });
     } catch (err) { next(err); }
   });
 
   app.post('/api/suggestions/:id/comments', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireContributor(auth.supabase), async (req, res, next) => {
     try {
-      if (!auth.supabase) fail(501, 'comments_unavailable', 'Comments require Supabase');
+      if (!repository.createSuggestionComment) fail(501, 'comments_unavailable', 'Comments are unavailable');
       const body = typeof req.body.body === 'string' ? req.body.body.trim() : '';
       if (!body) fail(400, 'empty_comment', 'Comment body is required');
-      const deckId = req._resolvedDeckId;
-      const id = crypto.randomUUID();
-      const { data, error } = await auth.supabase.from('comments').insert({
-        id,
-        suggestion_id: req.params.id,
-        deck_id: deckId,
-        author_id: req.user.id,
-        author_name: req.user.name,
-        body,
-        parent_id: req.body.parentId || null,
-        created_at: new Date().toISOString()
-      }).select().single();
-      if (error) fail(500, 'comment_error', error.message);
+      const parentId = typeof req.body.parentId === 'string' && req.body.parentId.trim()
+        ? cleanShortText(req.body.parentId, '', 200)
+        : null;
+      const comment = await repository.createSuggestionComment(req.user, req.params.id, { body, parentId });
       // Create notification for suggestion author
-      const { data: sugg } = await auth.supabase.from('suggestions')
-        .select('author_id').eq('id', req.params.id).single();
-      if (sugg?.author_id && sugg.author_id !== req.user.id) {
-        await auth.supabase.from('notifications').insert({
-          id: crypto.randomUUID(),
-          user_id: sugg.author_id,
-          deck_id: deckId,
-          kind: 'comment',
-          body: `${req.user.name} commented on your suggestion`,
-          ref_id: req.params.id,
-          created_at: new Date().toISOString()
-        }).then(() => undefined).catch(() => undefined);
+      if (auth.supabase) {
+        const { data: sugg } = await auth.supabase.from('suggestions')
+          .select('author_id').eq('id', req.params.id).single();
+        if (sugg?.author_id && sugg.author_id !== req.user.id) {
+          await auth.supabase.from('notifications').insert({
+            id: crypto.randomUUID(),
+            user_id: sugg.author_id,
+            deck_id: comment.deckId,
+            kind: 'comment',
+            body: `${req.user.name} commented on your suggestion`,
+            ref_id: req.params.id,
+            created_at: new Date().toISOString()
+          }).then(() => undefined).catch(() => undefined);
+        }
+        const mentions = parseMentions(body);
+        if (mentions.length) {
+          Promise.all(mentions.map(async (name) => {
+            const { data: profile } = await auth.supabase.from('profiles')
+              .select('id').ilike('name', name).single();
+            if (profile?.id && profile.id !== req.user.id) {
+              await auth.supabase.from('notifications').insert({
+                id: crypto.randomUUID(),
+                user_id: profile.id,
+                deck_id: comment.deckId,
+                kind: 'mention',
+                body: `${req.user.name} mentioned you in a comment`,
+                ref_id: comment.id,
+                created_at: new Date().toISOString()
+              });
+            }
+          })).then(() => undefined).catch(() => undefined);
+        }
       }
-      const mentions = parseMentions(body);
-      if (mentions.length) {
-        Promise.all(mentions.map(async (name) => {
-          const { data: profile } = await auth.supabase.from('profiles')
-            .select('id').ilike('name', name).single();
-          if (profile?.id && profile.id !== req.user.id) {
-            await auth.supabase.from('notifications').insert({
-              id: crypto.randomUUID(),
-              user_id: profile.id,
-          deck_id: deckId,
-              kind: 'mention',
-              body: `${req.user.name} mentioned you in a comment`,
-              ref_id: id,
-              created_at: new Date().toISOString()
-            });
-          }
-        })).then(() => undefined).catch(() => undefined);
-      }
-      res.status(201).json(data);
+      res.status(201).json(comment);
+    } catch (err) { next(err); }
+  });
+
+  app.patch('/api/suggestions/:id/comments/:commentId/resolved', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireContributor(auth.supabase), async (req, res, next) => {
+    try {
+      if (!repository.setSuggestionCommentResolved) fail(501, 'comments_unavailable', 'Comments are unavailable');
+      const resolved = typeof req.body.resolved === 'boolean' ? req.body.resolved : undefined;
+      const comment = await repository.setSuggestionCommentResolved(req.user, req.params.id, req.params.commentId, resolved);
+      res.json(comment);
     } catch (err) { next(err); }
   });
 

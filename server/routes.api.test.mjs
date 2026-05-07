@@ -535,6 +535,35 @@ test('membership roles gate owner decisions and collaborator suggestions', async
     });
 });
 
+test('suggestion comments can be listed and resolved in local repository mode', async () => {
+  const { app } = await createTestApp();
+
+  const created = await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/comments')
+    .send({ body: 'This thread is handled by the source edit.' }), 'maya', 'Maya Patel').expect(201);
+
+  assert.equal(created.body.authorId, 'maya');
+  assert.equal(created.body.resolvedAt, null);
+  assert.equal(created.body.resolvedBy, null);
+
+  const listed = await asUser(request(app)
+    .get('/api/suggestions/sugg-anca/comments'), 'you', 'You').expect(200);
+  assert.equal(listed.body.comments.length, 1);
+  assert.equal(listed.body.comments[0].id, created.body.id);
+
+  const resolved = await asUser(request(app)
+    .patch(`/api/suggestions/sugg-anca/comments/${created.body.id}/resolved`)
+    .send({ resolved: true }), 'you', 'You').expect(200);
+  assert.ok(resolved.body.resolvedAt);
+  assert.equal(resolved.body.resolvedBy, 'you');
+
+  const unresolved = await asUser(request(app)
+    .patch(`/api/suggestions/sugg-anca/comments/${created.body.id}/resolved`)
+    .send({ resolved: false }), 'you', 'You').expect(200);
+  assert.equal(unresolved.body.resolvedAt, null);
+  assert.equal(unresolved.body.resolvedBy, null);
+});
+
 test('single suggestion role access allows reviewers and editors but rejects contributors', async () => {
   for (const role of ['reviewer', 'editor']) {
     const { app, dataDir } = await createTestApp();

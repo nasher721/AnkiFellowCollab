@@ -107,6 +107,22 @@ function toActivity(row) {
   };
 }
 
+function toComment(row) {
+  return {
+    id: row.id,
+    suggestionId: row.suggestion_id,
+    deckId: row.deck_id,
+    authorId: row.author_id,
+    authorName: row.author_name,
+    body: row.body,
+    parentId: row.parent_id || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at || null,
+    resolvedAt: row.resolved_at || null,
+    resolvedBy: row.resolved_by || null
+  };
+}
+
 function toStudySession(row) {
   return {
     id: row.id,
@@ -413,6 +429,82 @@ export function createSupabaseRepository(options = {}) {
       });
       if (error) throw error;
       return getDeckRows(user, deckId);
+    },
+
+    async listSuggestionComments(user, suggestionId) {
+      const { data: suggestion, error: suggestionError } = await supabase
+        .from('suggestions')
+        .select('deck_id')
+        .eq('id', suggestionId)
+        .single();
+      if (suggestionError || !suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
+      await assertMembership(user.id, suggestion.deck_id, 'contributor');
+      const { data, error } = await supabase
+        .from('comments')
+        .select('id, suggestion_id, deck_id, author_id, author_name, body, parent_id, created_at, updated_at, resolved_at, resolved_by')
+        .eq('suggestion_id', suggestionId)
+        .order('created_at', { ascending: true });
+      if (error) throw error;
+      return (data || []).map(toComment);
+    },
+
+    async createSuggestionComment(user, suggestionId, payload) {
+      const { data: suggestion, error: suggestionError } = await supabase
+        .from('suggestions')
+        .select('deck_id,author_id')
+        .eq('id', suggestionId)
+        .single();
+      if (suggestionError || !suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
+      await assertMembership(user.id, suggestion.deck_id, 'contributor');
+      const createdAt = nowIso();
+      const id = `comment-${randomUUID()}`;
+      const { data, error } = await supabase.from('comments').insert({
+        id,
+        suggestion_id: suggestionId,
+        deck_id: suggestion.deck_id,
+        author_id: user.id,
+        author_name: user.name,
+        body: payload.body,
+        parent_id: payload.parentId || null,
+        created_at: createdAt,
+        resolved_at: null,
+        resolved_by: null
+      }).select('id, suggestion_id, deck_id, author_id, author_name, body, parent_id, created_at, updated_at, resolved_at, resolved_by').single();
+      if (error) throw error;
+      await supabase.from('activity').insert({
+        id: `act-${randomUUID()}`,
+        deck_id: suggestion.deck_id,
+        user_id: user.id,
+        kind: 'comment',
+        text: `${user.name} commented on a suggestion`,
+        created_at: createdAt
+      });
+      return toComment(data);
+    },
+
+    async setSuggestionCommentResolved(user, suggestionId, commentId, resolved) {
+      const { data: comment, error: commentError } = await supabase
+        .from('comments')
+        .select('id, suggestion_id, deck_id, resolved_at')
+        .eq('id', commentId)
+        .eq('suggestion_id', suggestionId)
+        .single();
+      if (commentError || !comment) fail(404, 'comment_not_found', 'Comment not found');
+      await assertMembership(user.id, comment.deck_id, 'contributor');
+      const nextResolved = typeof resolved === 'boolean' ? resolved : !comment.resolved_at;
+      const { data, error } = await supabase
+        .from('comments')
+        .update({
+          resolved_at: nextResolved ? nowIso() : null,
+          resolved_by: nextResolved ? user.id : null,
+          updated_at: nowIso()
+        })
+        .eq('id', commentId)
+        .eq('suggestion_id', suggestionId)
+        .select('id, suggestion_id, deck_id, author_id, author_name, body, parent_id, created_at, updated_at, resolved_at, resolved_by')
+        .single();
+      if (error) throw error;
+      return toComment(data);
     },
 
     async getExportDeck(user, deckId) {

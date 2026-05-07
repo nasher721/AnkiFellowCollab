@@ -67,12 +67,16 @@ export interface MeResponse {
 
 export interface Comment {
   id: string;
+  suggestionId: string;
+  deckId: string;
   authorId: string;
   authorName: string;
   body: string;
   parentId: string | null;
   createdAt: string;
   updatedAt: string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
 }
 
 export interface Notification {
@@ -242,6 +246,11 @@ export const api = {
       jsonRequest<Comment>(`/api/suggestions/${suggestionId}/comments`, {
         method: 'POST',
         body: JSON.stringify({ body, parentId })
+      }),
+    setResolved: (suggestionId: string, commentId: string, resolved?: boolean) =>
+      jsonRequest<Comment>(`/api/suggestions/${suggestionId}/comments/${commentId}/resolved`, {
+        method: 'PATCH',
+        body: JSON.stringify(typeof resolved === 'boolean' ? { resolved } : {})
       })
   },
   reactions: {
