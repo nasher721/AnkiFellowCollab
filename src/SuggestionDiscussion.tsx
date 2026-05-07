@@ -129,6 +129,7 @@ export function SuggestionDiscussion({ suggestionId, currentUserId, currentUserN
                 currentUserId={currentUserId}
                 onReply={() => setReplyTo(comment.id)}
                 onToggleResolved={() => toggleResolved(comment)}
+                canResolve
                 resolving={resolvingIds.has(comment.id)}
                 relTime={relTime}
               />
@@ -139,6 +140,7 @@ export function SuggestionDiscussion({ suggestionId, currentUserId, currentUserN
                     currentUserId={currentUserId}
                     onReply={() => setReplyTo(comment.id)}
                     onToggleResolved={() => toggleResolved(reply)}
+                    canResolve={false}
                     resolving={resolvingIds.has(reply.id)}
                     relTime={relTime}
                   />
@@ -184,12 +186,13 @@ function renderWithMentions(text: string) {
 }
 
 function CommentItem({
-  comment, currentUserId, onReply, onToggleResolved, resolving, relTime
+  comment, currentUserId, onReply, onToggleResolved, canResolve, resolving, relTime
 }: {
   comment: Comment;
   currentUserId: string;
   onReply: () => void;
   onToggleResolved: () => void;
+  canResolve: boolean;
   resolving: boolean;
   relTime: (iso: string) => string;
 }) {
@@ -206,15 +209,17 @@ function CommentItem({
         <p className="comment-text">{renderWithMentions(comment.body)}</p>
         <div className="comment-actions">
           <button className="comment-reply-btn" onClick={onReply}>Reply</button>
-          <button
-            className="comment-resolve-btn"
-            onClick={onToggleResolved}
-            disabled={resolving}
-            aria-pressed={resolved}
-            aria-label={resolved ? 'Mark comment unresolved' : 'Mark comment resolved'}
-          >
-            {resolving ? 'Saving…' : resolved ? 'Unresolve' : 'Resolve'}
-          </button>
+          {canResolve && (
+            <button
+              className="comment-resolve-btn"
+              onClick={onToggleResolved}
+              disabled={resolving}
+              aria-pressed={resolved}
+              aria-label={resolved ? 'Mark comment unresolved' : 'Mark comment resolved'}
+            >
+              {resolving ? 'Saving…' : resolved ? 'Unresolve' : 'Resolve'}
+            </button>
+          )}
         </div>
       </div>
     </div>

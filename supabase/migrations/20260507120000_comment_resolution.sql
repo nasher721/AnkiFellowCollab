@@ -65,6 +65,31 @@ create trigger enforce_comment_insert_scope
 before insert on public.comments
 for each row execute function public.enforce_comment_insert_scope();
 
+do $$
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime')
+    and not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'suggestions'
+  ) then
+    alter publication supabase_realtime add table public.suggestions;
+  end if;
+
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime')
+    and not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'comments'
+  ) then
+    alter publication supabase_realtime add table public.comments;
+  end if;
+end $$;
+
 create or replace function public.enforce_comment_resolution_update()
 returns trigger
 language plpgsql
@@ -72,6 +97,11 @@ security definer
 set search_path = public
 as $$
 begin
+  if old.parent_id is not null then
+    raise exception 'Only top-level comment threads may be resolved'
+      using errcode = '42501';
+  end if;
+
   if new.id is distinct from old.id
     or new.suggestion_id is distinct from old.suggestion_id
     or new.deck_id is distinct from old.deck_id
@@ -87,6 +117,7 @@ begin
   if new.resolved_at is null then
     new.resolved_by := null;
   else
+    new.resolved_at := now();
     if auth.uid() is not null then
       new.resolved_by := auth.uid()::text;
     elsif current_setting('request.jwt.claim.role', true) = 'service_role' and new.resolved_by is not null then
@@ -96,6 +127,8 @@ begin
         using errcode = '42501';
     end if;
   end if;
+
+  new.updated_at := now();
 
   return new;
 end;
@@ -109,10 +142,36 @@ for each row execute function public.enforce_comment_resolution_update();
 revoke update on public.comments from anon, authenticated;
 grant update (resolved_at, resolved_by, updated_at) on public.comments to authenticated;
 
+drop policy if exists "comments insert member" on public.comments;
+create policy "comments insert contributor" on public.comments for insert with check (
+  auth.uid()::text = author_id
+  and exists (
+    select 1
+    from public.deck_members m
+    where m.deck_id = comments.deck_id
+      and m.user_id = auth.uid()::text
+      and m.role in ('owner', 'editor', 'reviewer', 'contributor')
+  )
+);
+
 drop policy if exists "comments update member" on public.comments;
 
-create policy "comments update member" on public.comments for update using (
-  exists (select 1 from public.deck_members m where m.deck_id = comments.deck_id and m.user_id = auth.uid()::text)
+create policy "comments update reviewer" on public.comments for update using (
+  parent_id is null
+  and exists (
+    select 1
+    from public.deck_members m
+    where m.deck_id = comments.deck_id
+      and m.user_id = auth.uid()::text
+      and m.role in ('owner', 'editor', 'reviewer')
+  )
 ) with check (
-  exists (select 1 from public.deck_members m where m.deck_id = comments.deck_id and m.user_id = auth.uid()::text)
+  parent_id is null
+  and exists (
+    select 1
+    from public.deck_members m
+    where m.deck_id = comments.deck_id
+      and m.user_id = auth.uid()::text
+      and m.role in ('owner', 'editor', 'reviewer')
+  )
 );

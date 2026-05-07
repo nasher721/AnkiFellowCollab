@@ -564,7 +564,7 @@ test('suggestion comments can be listed and resolved in local repository mode', 
   assert.equal(unresolved.body.resolvedBy, null);
 });
 
-test('suggestion comment API rejects non-members, missing comments, and invalid parents', async () => {
+test('suggestion comment API rejects non-members, non-reviewer resolution, missing comments, replies, and invalid parents', async () => {
   const { app } = await createTestApp();
 
   await asUser(request(app)
@@ -577,6 +577,30 @@ test('suggestion comment API rejects non-members, missing comments, and invalid 
   await asUser(request(app)
     .post('/api/suggestions/sugg-anca/comments')
     .send({ body: 'Reply to a missing parent', parentId: 'comment-missing' }), 'you', 'You')
+    .expect(404)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'comment_not_found');
+    });
+
+  const topLevel = await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/comments')
+    .send({ body: 'Thread to resolve' }), 'maya', 'Maya Patel').expect(201);
+
+  await asUser(request(app)
+    .patch(`/api/suggestions/sugg-anca/comments/${topLevel.body.id}/resolved`)
+    .send({ resolved: true }), 'maya', 'Maya Patel')
+    .expect(403)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'forbidden');
+    });
+
+  const reply = await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/comments')
+    .send({ body: 'Reply should not be resolvable', parentId: topLevel.body.id }), 'maya', 'Maya Patel').expect(201);
+
+  await asUser(request(app)
+    .patch(`/api/suggestions/sugg-anca/comments/${reply.body.id}/resolved`)
+    .send({ resolved: true }), 'you', 'You')
     .expect(404)
     .expect((res) => {
       assert.equal(res.body.error.code, 'comment_not_found');

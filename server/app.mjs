@@ -612,7 +612,7 @@ export function createApp(options = {}) {
     } catch (err) { next(err); }
   });
 
-  app.patch('/api/suggestions/:id/comments/:commentId/resolved', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireContributor(auth.supabase), async (req, res, next) => {
+  app.patch('/api/suggestions/:id/comments/:commentId/resolved', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireReviewer(auth.supabase), async (req, res, next) => {
     try {
       if (!repository.setSuggestionCommentResolved) fail(501, 'comments_unavailable', 'Comments are unavailable');
       const resolved = typeof req.body.resolved === 'boolean' ? req.body.resolved : undefined;

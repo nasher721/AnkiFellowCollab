@@ -313,8 +313,8 @@ export function createLocalRepository() {
       ensureCollections(state);
       const suggestion = state.suggestions.find((item) => item.id === suggestionId);
       if (!suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
-      requireRole(state, user.id, suggestion.deckId, 'contributor');
-      const comment = state.comments.find((item) => item.id === commentId && item.suggestionId === suggestionId);
+      requireRole(state, user.id, suggestion.deckId, 'reviewer');
+      const comment = state.comments.find((item) => item.id === commentId && item.suggestionId === suggestionId && item.deckId === suggestion.deckId && !item.parentId);
       if (!comment) fail(404, 'comment_not_found', 'Comment not found');
       const nextResolved = typeof resolved === 'boolean' ? resolved : !comment.resolvedAt;
       comment.resolvedAt = nextResolved ? nowIso() : null;
