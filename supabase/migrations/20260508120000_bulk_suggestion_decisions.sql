@@ -136,3 +136,9 @@ begin
     order by ordered.ordinal;
 end;
 $$;
+
+-- Server-only RPC: the function trusts reviewer identity supplied by the service-role API server.
+revoke all on function public.bulk_decide_suggestions(text, text[], text, text, text, text, timestamptz) from public;
+revoke all on function public.bulk_decide_suggestions(text, text[], text, text, text, text, timestamptz) from anon;
+revoke all on function public.bulk_decide_suggestions(text, text[], text, text, text, text, timestamptz) from authenticated;
+grant execute on function public.bulk_decide_suggestions(text, text[], text, text, text, text, timestamptz) to service_role;
