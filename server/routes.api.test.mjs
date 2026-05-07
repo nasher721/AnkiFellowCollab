@@ -261,6 +261,36 @@ test('rate limiting protects read and sync routes with configurable limits', asy
   assert.equal(syncLimited.body.error.code, 'rate_limited');
 });
 
+test('rate limiting separates forwarded client IPs behind one trusted proxy', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
+  process.env.DECKBRIDGE_DATA_DIR = dataDir;
+  const { createApp } = await import(`./app.mjs?test=${Date.now()}-${Math.random()}`);
+  const app = createApp({
+    production: false,
+    repositoryMode: 'local',
+    trustProxy: 1,
+    rateLimits: {
+      windowMs: 60_000,
+      readLimit: 1,
+      syncLimit: 1,
+      uploadLimit: 1,
+      analyticsLimit: 1
+    }
+  });
+
+  await asUser(request(app)
+    .get('/api/decks')
+    .set('x-forwarded-for', '203.0.113.10'), 'you', 'You').expect(200);
+  const sameIpLimited = await asUser(request(app)
+    .get('/api/decks')
+    .set('x-forwarded-for', '203.0.113.10'), 'you', 'You').expect(429);
+  assert.equal(sameIpLimited.body.error.code, 'rate_limited');
+
+  await asUser(request(app)
+    .get('/api/decks')
+    .set('x-forwarded-for', '203.0.113.11'), 'you', 'You').expect(200);
+});
+
 test('token API creates one-time raw tokens and lists metadata only', async () => {
   const { app, supabase } = await createTokenTestApp();
 
