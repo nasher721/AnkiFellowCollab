@@ -10,6 +10,7 @@ const SCRYPT_KEY_LENGTH = 32;
 const SCRYPT_PREFIX = `scrypt$N=${SCRYPT_N},r=${SCRYPT_R},p=${SCRYPT_P}`;
 const DECK_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 export const VALID_SESSION_ROLES = Object.freeze(['owner', 'editor', 'reviewer', 'contributor', 'viewer']);
 
@@ -19,8 +20,10 @@ function parseScryptSecretHash(value) {
   if (parts.length !== 4) return null;
   const [algorithm, params, salt, derived] = parts;
   if (algorithm !== 'scrypt' || params !== `N=${SCRYPT_N},r=${SCRYPT_R},p=${SCRYPT_P}`) return null;
-  if (!salt || !derived) return null;
-  return { salt, derived };
+  if (!BASE64URL_PATTERN.test(salt) || !BASE64URL_PATTERN.test(derived)) return null;
+  const expected = Buffer.from(derived, 'base64url');
+  if (expected.length !== SCRYPT_KEY_LENGTH) return null;
+  return { salt, expected };
 }
 
 export async function hashSecret(value) {
@@ -40,13 +43,12 @@ export function isScryptSecretHash(value) {
 export async function verifySecret(value, hash) {
   const parsed = parseScryptSecretHash(hash);
   if (!parsed) return false;
-  const expected = Buffer.from(parsed.derived, 'base64url');
-  const actual = await scrypt(String(value), parsed.salt, expected.length, {
+  const actual = await scrypt(String(value), parsed.salt, SCRYPT_KEY_LENGTH, {
     N: SCRYPT_N,
     r: SCRYPT_R,
     p: SCRYPT_P
   });
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  return actual.length === SCRYPT_KEY_LENGTH && timingSafeEqual(parsed.expected, actual);
 }
 
 export function assertValidEmail(value) {

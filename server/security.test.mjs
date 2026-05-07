@@ -20,6 +20,22 @@ test('share-link secrets use salted scrypt hashes', async () => {
   assert.doesNotMatch(first, /^[a-f0-9]{64}$/);
 });
 
+test('share-link secret verification fails closed for malformed scrypt hashes', async () => {
+  const malformed = [
+    'scrypt$N=16384,r=8,p=1$!!!!$????',
+    'scrypt$N=16384,r=8,p=1$validsalt$',
+    'scrypt$N=16384,r=8,p=1$$validderived',
+    'scrypt$N=16384,r=8,p=1$validsalt$A',
+    'scrypt$N=16384,r=8,p=2$validsalt$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'sha256$N=16384,r=8,p=1$validsalt$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+  ];
+
+  for (const hash of malformed) {
+    assert.equal(isScryptSecretHash(hash), false);
+    assert.equal(await verifySecret('study-room', hash), false);
+  }
+});
+
 test('email validation normalizes and rejects malformed values', () => {
   assert.equal(assertValidEmail(' Owner+Boards@example.COM '), 'owner+boards@example.com');
 
