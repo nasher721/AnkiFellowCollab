@@ -35,6 +35,9 @@ function createLimiter({ windowMs, limit, message, skip }) {
     limit,
     standardHeaders: 'draft-8',
     legacyHeaders: false,
+    validate: {
+      xForwardedForHeader: false
+    },
     skip,
     handler(_req, res) {
       res.status(429).json(rateLimitedResponse(message));

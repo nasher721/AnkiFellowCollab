@@ -189,7 +189,8 @@ function createSimplePdf(lines) {
 export function createApp(options = {}) {
   const production = options.production ?? process.env.NODE_ENV === 'production';
   const app = express();
-  app.set('trust proxy', options.trustProxy ?? 1);
+  const trustProxy = options.trustProxy ?? (process.env.VERCEL ? 1 : false);
+  app.set('trust proxy', trustProxy);
   const repository = options.repository || createRepository(options);
   const auth = options.auth || createAuth({ ...options, production });
   const parsePackage = options.parseApkg || parseApkg;

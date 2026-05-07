@@ -289,6 +289,61 @@ test('rate limiting separates forwarded client IPs behind one trusted proxy', as
   await asUser(request(app)
     .get('/api/decks')
     .set('x-forwarded-for', '203.0.113.11'), 'you', 'You').expect(200);
+
+  const multiHopDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
+  process.env.DECKBRIDGE_DATA_DIR = multiHopDataDir;
+  const multiHopApp = createApp({
+    production: false,
+    repositoryMode: 'local',
+    trustProxy: 1,
+    rateLimits: {
+      windowMs: 60_000,
+      readLimit: 1,
+      syncLimit: 1,
+      uploadLimit: 1,
+      analyticsLimit: 1
+    }
+  });
+
+  await asUser(request(multiHopApp)
+    .get('/api/decks')
+    .set('x-forwarded-for', '198.51.100.1, 203.0.113.10'), 'you', 'You').expect(200);
+  const sameTrustedHopLimited = await asUser(request(multiHopApp)
+    .get('/api/decks')
+    .set('x-forwarded-for', '198.51.100.2, 203.0.113.10'), 'you', 'You').expect(429);
+  assert.equal(sameTrustedHopLimited.body.error.code, 'rate_limited');
+});
+
+test('rate limiting ignores spoofed forwarded IPs without a trusted proxy', async () => {
+  const previousVercel = process.env.VERCEL;
+  delete process.env.VERCEL;
+  try {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
+    process.env.DECKBRIDGE_DATA_DIR = dataDir;
+    const { createApp } = await import(`./app.mjs?test=${Date.now()}-${Math.random()}`);
+    const app = createApp({
+      production: false,
+      repositoryMode: 'local',
+      rateLimits: {
+        windowMs: 60_000,
+        readLimit: 1,
+        syncLimit: 1,
+        uploadLimit: 1,
+        analyticsLimit: 1
+      }
+    });
+
+    await asUser(request(app)
+      .get('/api/decks')
+      .set('x-forwarded-for', '203.0.113.20'), 'you', 'You').expect(200);
+    const spoofedIpLimited = await asUser(request(app)
+      .get('/api/decks')
+      .set('x-forwarded-for', '203.0.113.21'), 'you', 'You').expect(429);
+    assert.equal(spoofedIpLimited.body.error.code, 'rate_limited');
+  } finally {
+    if (previousVercel === undefined) delete process.env.VERCEL;
+    else process.env.VERCEL = previousVercel;
+  }
 });
 
 test('token API creates one-time raw tokens and lists metadata only', async () => {
