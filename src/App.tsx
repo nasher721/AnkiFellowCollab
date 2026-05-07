@@ -940,6 +940,7 @@ export default function App() {
   if (!state) {
     return (
       <div className="loading">
+        <div className="loading-spinner" aria-hidden="true" />
         <strong>Loading DeckBridge...</strong>
         {apiHealth === 'down' ? <span>API bridge is unavailable. Start it with npm run dev:server.</span> : null}
       </div>
@@ -956,8 +957,9 @@ export default function App() {
         <section className="empty-import">
           <Icon name="upload" />
           <h1>Import your first Anki deck</h1>
-          <p>Upload an `.apkg` to create a collaborative workspace backed by Supabase.</p>
+          <p>Upload an <code>.apkg</code> file to create a collaborative workspace. Invite teammates, review suggestions, and export approved changes back to Anki.</p>
           <label className="button primary">
+            <Icon name="upload" />
             Import .apkg
             <input className="file-input-hidden" type="file" accept=".apkg" onChange={uploadDeck} />
           </label>
@@ -1153,7 +1155,11 @@ export default function App() {
               <button className={activeTab === 'analytics' ? 'active' : ''} onClick={() => setActiveTab('analytics')}>Analytics</button>
               <button className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab('activity')}>Activity</button>
               <button className={activeTab === 'settings' ? 'active' : ''} onClick={() => setActiveTab('settings')}>Settings</button>
-              <span className="pending-callout">{pendingSuggestions.length} pending suggestions</span>
+              {pendingSuggestions.length > 0 && (
+                <span className="pending-callout" title={`${pendingSuggestions.length} suggestion${pendingSuggestions.length === 1 ? '' : 's'} pending owner review`}>
+                  {pendingSuggestions.length} pending
+                </span>
+              )}
             </div>
 
             {activeTab === 'study' && activeDeck ? (
