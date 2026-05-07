@@ -4,7 +4,18 @@ import { createClient } from '@supabase/supabase-js';
 import { applySuggestion, mergeAddonCards, nowIso, summarizeDeck } from '../domain.mjs';
 import { fail } from '../errors.mjs';
 
-const roleRank = { viewer: 0, editor: 1, owner: 2 };
+export const roleRank = {
+  viewer: 0,
+  contributor: 1,
+  reviewer: 2,
+  editor: 3,
+  owner: 4
+};
+
+export function roleMeetsMinimum(role, minimumRole = 'viewer') {
+  if (!Object.hasOwn(roleRank, role) || !Object.hasOwn(roleRank, minimumRole)) return false;
+  return roleRank[role] >= roleRank[minimumRole];
+}
 
 function requireEnv(name, value) {
   if (!value) fail(500, 'missing_config', `${name} is required for Supabase repository`);
@@ -72,6 +83,37 @@ function toActivity(row) {
   };
 }
 
+function toStudySession(row) {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    deckId: row.deck_id,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    durationSeconds: row.duration_seconds,
+    cardsStudied: row.cards_studied,
+    cardsCorrect: row.cards_correct,
+    newCards: row.new_cards,
+    reviewCards: row.review_cards,
+    metadata: row.metadata || {},
+    createdAt: row.created_at
+  };
+}
+
+function toShareLink(row) {
+  return {
+    id: row.id,
+    deckId: row.deck_id,
+    token: row.token,
+    label: row.label,
+    passwordProtected: Boolean(row.password_hash),
+    expiresAt: row.expires_at,
+    disabledAt: row.disabled_at,
+    createdBy: row.created_by,
+    createdAt: row.created_at
+  };
+}
+
 function emptyState(user) {
   return {
     decks: [],
@@ -108,7 +150,7 @@ export function createSupabaseRepository(options = {}) {
       .maybeSingle();
     if (error) throw error;
     if (!data) fail(403, 'forbidden', 'You are not a member of this deck');
-    if (roleRank[data.role] < roleRank[minimumRole]) fail(403, 'forbidden', `${minimumRole} access required`);
+    if (!roleMeetsMinimum(data.role, minimumRole)) fail(403, 'forbidden', `${minimumRole} access required`);
     return {
       deckId: data.deck_id,
       userId: data.user_id,
@@ -367,6 +409,105 @@ export function createSupabaseRepository(options = {}) {
         created_at: nowIso()
       });
       return { download, state: await getDeckRows(user, deckId) };
+    },
+
+    async createStudySession(user, session) {
+      await assertMembership(user.id, session.deckId);
+      const now = nowIso();
+      const row = {
+        id: session.id || `study-${randomUUID()}`,
+        user_id: user.id,
+        deck_id: session.deckId,
+        started_at: session.startedAt || now,
+        ended_at: session.endedAt || null,
+        duration_seconds: session.durationSeconds || 0,
+        cards_studied: session.cardsStudied || 0,
+        cards_correct: session.cardsCorrect || 0,
+        new_cards: session.newCards || 0,
+        review_cards: session.reviewCards || 0,
+        metadata: session.metadata || {},
+        created_at: now
+      };
+      const { data, error } = await supabase.from('study_sessions').insert(row).select('*').single();
+      if (error) throw error;
+      await supabase.from('activity').insert({
+        id: `act-${randomUUID()}`,
+        deck_id: session.deckId,
+        user_id: user.id,
+        kind: 'study',
+        text: `${user.name} studied ${row.cards_studied} card(s)`,
+        created_at: now
+      });
+      return toStudySession(data || row);
+    },
+
+    async listStudySessions(user, deckId, options = {}) {
+      if (deckId) await assertMembership(user.id, deckId);
+      const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 200);
+      let query = supabase.from('study_sessions')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('started_at', { ascending: false })
+        .limit(limit);
+      if (deckId) query = query.eq('deck_id', deckId);
+      const { data, error } = await query;
+      if (error) throw error;
+      return (data || []).map(toStudySession);
+    },
+
+    async createShareLink(user, deckId, link) {
+      await assertMembership(user.id, deckId, 'owner');
+      const row = {
+        id: link.id || `share-${randomUUID()}`,
+        deck_id: deckId,
+        created_by: user.id,
+        token: link.token,
+        label: link.label || 'Share link',
+        password_hash: link.passwordHash || null,
+        expires_at: link.expiresAt || null,
+        disabled_at: null,
+        created_at: nowIso()
+      };
+      const { data, error } = await supabase.from('deck_share_links').insert(row).select('*').single();
+      if (error) throw error;
+      await supabase.from('activity').insert({
+        id: `act-${randomUUID()}`,
+        deck_id: deckId,
+        user_id: user.id,
+        kind: 'share',
+        text: `${user.name} created a share link`,
+        created_at: row.created_at
+      });
+      return toShareLink(data || row);
+    },
+
+    async listShareLinks(user, deckId) {
+      await assertMembership(user.id, deckId, 'owner');
+      const { data, error } = await supabase.from('deck_share_links')
+        .select('id, deck_id, created_by, token, label, password_hash, expires_at, disabled_at, created_at')
+        .eq('deck_id', deckId)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      return (data || []).map(toShareLink);
+    },
+
+    async listActivity(user, deckId, filters = {}) {
+      await assertMembership(user.id, deckId);
+      const limit = Math.min(Math.max(Number(filters.limit) || 50, 1), 200);
+      let query = supabase.from('activity')
+        .select('*')
+        .eq('deck_id', deckId)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+      if (Array.isArray(filters.kinds) && filters.kinds.length === 1) query = query.eq('kind', filters.kinds[0]);
+      if (filters.since) query = query.gte('created_at', filters.since);
+      if (filters.until) query = query.lte('created_at', filters.until);
+      const { data, error } = await query;
+      if (error) throw error;
+      const kinds = Array.isArray(filters.kinds) ? filters.kinds : [];
+      return (data || [])
+        .map(toActivity)
+        .filter((activity) => !kinds.length || kinds.includes(activity.kind));
     },
 
     async recordSyncConflicts(user, deckId, conflicts) {

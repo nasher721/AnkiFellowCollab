@@ -63,8 +63,14 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
     return decks;
   }, [decks, testResult]);
 
-  const autoConfigUrl = createdToken && selectedDeckId && localDeckNameForConfig
-    ? `anki://deckbridge?url=${encodeURIComponent(platformUrl)}&token=${encodeURIComponent(createdToken.raw)}&deckId=${encodeURIComponent(selectedDeckId)}&localDeck=${encodeURIComponent(localDeckNameForConfig)}&conflictPolicy=${encodeURIComponent(conflictPolicy)}`
+  const autoConfigUrl = createdToken && selectedDeckId
+    ? [
+      `anki://deckbridge?url=${encodeURIComponent(platformUrl)}`,
+      `token=${encodeURIComponent(createdToken.raw)}`,
+      `deckId=${encodeURIComponent(selectedDeckId)}`,
+      localDeckNameForConfig ? `localDeck=${encodeURIComponent(localDeckNameForConfig)}` : null,
+      `conflictPolicy=${encodeURIComponent(conflictPolicy)}`
+    ].filter(Boolean).join('&')
     : null;
 
   useEffect(() => {

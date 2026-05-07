@@ -47,6 +47,16 @@ test.describe('Review Queue', () => {
     await expect(page.getByRole('button', { name: /Maya Patel.*pending/ })).toBeVisible();
   });
 
+  test('filters the review queue by status and author', async ({ page }) => {
+    await expect(page.getByLabel('Filter review queue by status')).toHaveValue('pending');
+    await page.getByLabel('Filter review queue by author').selectOption('Maya Patel');
+    await expect(page.getByRole('button', { name: /Maya Patel.*pending/ })).toBeVisible();
+    await page.getByLabel('Filter review queue by status').selectOption('accepted');
+    await expect(page.getByText('No suggestions match the queue filters.')).toBeVisible();
+    await page.getByRole('button', { name: 'Reset' }).click();
+    await expect(page.getByRole('button', { name: /Maya Patel.*pending/ })).toBeVisible();
+  });
+
   test('displays suggestion diff', async ({ page }) => {
     await expect(page.getByText('ANCA autoantibody')).toBeVisible();
   });
@@ -79,7 +89,22 @@ test.describe('Tabs', () => {
 
   test('switches to Study tab', async ({ page }) => {
     await page.getByRole('button', { name: 'Study' }).click();
+    await expect(page.getByRole('heading', { name: 'Study session' })).toBeVisible();
+    await expect(page.getByLabel('Study approved cards only')).toBeChecked();
+    await page.getByRole('button', { name: 'Start study session' }).click();
     await expect(page.locator('.study-overlay')).toBeVisible();
+  });
+
+  test('switches to Cards tab', async ({ page }) => {
+    await page.getByRole('button', { name: 'Cards', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Cards', exact: true })).toHaveClass(/active/);
+    await expect(page.getByRole('row', { name: /Microscopic polyangiitis/ })).toBeVisible();
+  });
+
+  test('switches to Stats tab', async ({ page }) => {
+    await page.getByRole('button', { name: 'Stats' }).click();
+    await expect(page.getByText('Deck stats')).toBeVisible();
+    await expect(page.getByText('Suggestion flow')).toBeVisible();
   });
 
   test('switches to Analytics tab', async ({ page }) => {
@@ -91,6 +116,52 @@ test.describe('Tabs', () => {
     await page.getByRole('button', { name: 'Activity' }).click();
     await expect(page.locator('.activity-timeline')).toBeVisible();
   });
+
+  test('switches to Settings tab', async ({ page }) => {
+    let listedShareLinks = false;
+    let createdShareLink = false;
+    await page.route('**/api/decks/deck-demo-zanki/share-links', async (route) => {
+      if (route.request().method() === 'GET') {
+        listedShareLinks = true;
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ shareLinks: [] })
+        });
+        return;
+      }
+      if (route.request().method() === 'POST') {
+        createdShareLink = true;
+        await route.fulfill({
+          status: 201,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            shareLink: {
+              id: 'share-link-1',
+              deckId: 'deck-demo-zanki',
+              token: 'share-token-abc',
+              label: 'Zanki share link',
+              passwordProtected: false,
+              expiresAt: null,
+              disabledAt: null,
+              createdBy: 'you',
+              createdAt: new Date().toISOString()
+            }
+          })
+        });
+        return;
+      }
+      await route.fallback();
+    });
+
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await expect(page.getByText('Deck settings')).toBeVisible();
+    await expect.poll(() => listedShareLinks).toBe(true);
+    await page.getByRole('button', { name: 'Create share link' }).click();
+    await expect.poll(() => createdShareLink).toBe(true);
+    await expect(page.getByLabel('Deck share link')).toHaveValue(/\/share\/share-token-abc/);
+    await expect(page.getByLabel('Deck embed code')).toHaveValue(/\/embed\/decks\/deck-demo-zanki/);
+  });
 });
 
 test.describe('Navigation', () => {
@@ -101,6 +172,34 @@ test.describe('Navigation', () => {
   test('switches to Discover view', async ({ page }) => {
     await page.getByRole('button', { name: /Discover/ }).click();
     await expect(page.locator('.discover-view')).toBeVisible();
+  });
+
+  test('shows discover deck preview fields when the API provides them', async ({ page }) => {
+    await page.route('**/api/discover?*', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          decks: [{
+            id: 'public-preview',
+            name: 'Public Preview Deck',
+            description: 'Previewable deck',
+            ownerName: 'You',
+            importedAt: new Date().toISOString(),
+            downloadCount: 3,
+            starCount: 7,
+            forkedFrom: null,
+            cardCount: 2,
+            noteTypes: ['Basic'],
+            sampleCards: [{ Front: 'Preview front', Back: 'Preview back' }]
+          }]
+        })
+      });
+    });
+    await page.getByRole('button', { name: /Discover/ }).click();
+    await expect(page.getByText('Public Preview Deck')).toBeVisible();
+    await expect(page.getByText('2 cards')).toBeVisible();
+    await expect(page.getByText('Preview front')).toBeVisible();
   });
 
   test('switches to Templates view', async ({ page }) => {
@@ -214,7 +313,10 @@ test.describe('Connect Anki Wizard', () => {
 
     await page.getByRole('button', { name: 'Next →' }).click();
     await expect(page.getByLabel('DeckBridge Deck')).toHaveValue('deck-visible');
-    await expect(page.getByRole('link', { name: /Auto-Configure with Mapping/ })).toHaveCount(0);
+    await expect(page.getByRole('link', { name: /Auto-Configure with Mapping/ })).toHaveAttribute(
+      'href',
+      'anki://deckbridge?url=http%3A%2F%2F127.0.0.1%3A5174&token=db_test_token&deckId=deck-visible&conflictPolicy=detect'
+    );
     await page.getByLabel('Conflict Policy').selectOption('overwrite-platform');
     await page.getByLabel('Local Anki Deck').fill('Zanki Step 2 CK::Cardiology');
     await expect(page.getByText('DeckBridge deck ID: deck-visible')).toBeVisible();

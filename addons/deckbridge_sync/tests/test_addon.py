@@ -18,7 +18,9 @@ sys.modules['anki'] = MagicMock()
 sys.modules['anki.collection'] = MagicMock()
 
 from deckbridge_sync import (
+    ADDON_VERSION,
     apply_autoconfig,
+    addon_manifest,
     config,
     DEFAULT_CONFIG,
     CONFIG_KEY,
@@ -34,6 +36,7 @@ from deckbridge_sync import (
     note_query,
     validate_token,
     TRACKING_TAG_PREFIX,
+    _handle_url_scheme,
 )
 
 
@@ -81,6 +84,21 @@ class TestApplyAutoconfig(unittest.TestCase):
         self.assertEqual(saved['local_deck'], 'Boards::Neuro')
         self.assertEqual(saved['conflict_policy'], 'overwrite-platform')
         mock_validate.assert_called_once()
+
+    @patch('deckbridge_sync.validate_token')
+    @patch('deckbridge_sync.save_config')
+    @patch('deckbridge_sync.config')
+    def test_omitted_local_deck_clears_prior_mapping(self, mock_config, mock_save, mock_validate):
+        mock_config.return_value = {**DEFAULT_CONFIG, 'local_deck': 'Old::Deck'}
+        mock_validate.return_value = {'user': {'email': 'user@example.com'}, 'decks': []}
+        url = (
+            'anki://deckbridge?url=https%3A%2F%2Fdeckbridge.com&token=db_abc123'
+            '&deckId=deck-1'
+        )
+        result = apply_autoconfig(url)
+        self.assertTrue(result)
+        saved = mock_save.call_args[0][0]
+        self.assertEqual(saved['local_deck'], '')
 
     @patch('deckbridge_sync.save_config')
     @patch('deckbridge_sync.config')
@@ -192,6 +210,41 @@ class TestApplyAutoconfig(unittest.TestCase):
             'deckId': 'deck-neuro',
             'conflictPolicy': 'overwrite-platform',
         }])
+
+    @patch('deckbridge_sync.validate_token', return_value={'user': {'email': 'user@example.com'}, 'decks': []})
+    @patch('deckbridge_sync.configure_timer')
+    def test_autoconfig_without_local_deck_persists_blank_mapping(self, _mock_timer, _mock_validate):
+        aqt_mock.mw.col.conf = {
+            CONFIG_KEY: {
+                'url': 'https://old.example',
+                'token': 'db_old',
+                'deckMappings': [{
+                    'localDeck': 'Old::Deck',
+                    'deckId': 'deck-old',
+                    'conflictPolicy': 'detect',
+                }],
+            }
+        }
+        aqt_mock.mw.addonManager.getConfig.return_value = None
+        url = (
+            'anki://deckbridge?url=https%3A%2F%2Fdeckbridge.example%2F'
+            '&token=db_good&deckId=deck-neuro'
+        )
+
+        self.assertTrue(apply_autoconfig(url))
+
+        stored = aqt_mock.mw.col.conf[CONFIG_KEY]
+        self.assertEqual(stored['deckMappings'], [{
+            'localDeck': '',
+            'deckId': 'deck-neuro',
+            'conflictPolicy': 'detect',
+        }])
+
+
+class TestVersion(unittest.TestCase):
+    def test_manifest_is_version_source(self):
+        self.assertEqual(addon_manifest()['version'], '0.2.0')
+        self.assertEqual(ADDON_VERSION, addon_manifest()['version'])
 
 
 class TestDefaultConfig(unittest.TestCase):
@@ -507,6 +560,31 @@ class TestOpenSettings(unittest.TestCase):
         mock_tooltip.assert_called_once()
         mock_single_shot.assert_called_once_with(0, pull_to_anki)
         mock_post_cards.assert_not_called()
+
+
+class TestHandleUrlScheme(unittest.TestCase):
+    @patch('deckbridge_sync.QTimer.singleShot')
+    @patch('deckbridge_sync.showInfo')
+    @patch('deckbridge_sync.apply_autoconfig', return_value=True)
+    def test_success_opens_settings_after_saved_message(self, mock_apply, mock_show, mock_single_shot):
+        _handle_url_scheme('anki://deckbridge?url=https%3A%2F%2Fdeckbridge.example&token=db_good&deckId=deck-1')
+
+        mock_apply.assert_called_once()
+        message = mock_show.call_args[0][0]
+        self.assertIn('configuration saved', message)
+        self.assertIn('Settings will open', message)
+        mock_single_shot.assert_called_once_with(0, open_settings)
+
+    @patch('deckbridge_sync.QTimer.singleShot')
+    @patch('deckbridge_sync.showInfo')
+    @patch('deckbridge_sync.last_autoconfig_error', return_value='bad link')
+    @patch('deckbridge_sync.apply_autoconfig', return_value=False)
+    def test_failure_does_not_open_settings(self, _mock_apply, mock_error, mock_show, mock_single_shot):
+        _handle_url_scheme('anki://deckbridge')
+
+        mock_error.assert_called_once()
+        self.assertIn('bad link', mock_show.call_args[0][0])
+        mock_single_shot.assert_not_called()
 
 
 class TestLocalDeckNames(unittest.TestCase):

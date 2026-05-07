@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import time
@@ -33,7 +34,7 @@ from aqt.utils import showInfo, tooltip
 
 
 ADDON_NAME = "DeckBridge Sync"
-ADDON_VERSION = "0.2.0"
+DEFAULT_ADDON_VERSION = "0.2.0"
 TRACKING_MODEL = "DeckBridge Sync"
 TRACKING_TAG_PREFIX = "deckbridge_card_"
 CONFIG_KEY = "deckbridge"
@@ -75,6 +76,23 @@ DEFAULT_STORED_CONFIG: Dict[str, Any] = {
 
 _timer: Optional[QTimer] = None
 _sync_running = False
+
+
+def addon_manifest() -> Dict[str, Any]:
+    try:
+        manifest_path = os.path.join(os.path.dirname(__file__), "manifest.json")
+        with open(manifest_path, "r", encoding="utf-8") as manifest_file:
+            manifest = json.load(manifest_file)
+        return manifest if isinstance(manifest, dict) else {}
+    except Exception:
+        return {}
+
+
+def addon_version() -> str:
+    return str(addon_manifest().get("version") or DEFAULT_ADDON_VERSION)
+
+
+ADDON_VERSION = addon_version()
 
 
 def _collection_config() -> Dict[str, Any]:
@@ -272,8 +290,7 @@ def apply_autoconfig(url_string: str) -> bool:
         next_config["platform_url"] = values["platform_url"]
         next_config["api_token"] = values["api_token"]
         next_config["deck_id"] = values["deck_id"]
-        if values["local_deck"]:
-            next_config["local_deck"] = values["local_deck"]
+        next_config["local_deck"] = values["local_deck"]
         next_config["conflict_policy"] = values["conflict_policy"]
         validate_token(next_config)
         save_config(next_config)
@@ -816,11 +833,11 @@ def _handle_url_scheme(url: str) -> None:
     """Called by Anki when the add-on's URL scheme is triggered."""
     if apply_autoconfig(url):
         showInfo(
-            "DeckBridge Sync configured successfully!\n\n"
-            "Platform URL and token have been saved. "
-            "Use Tools → DeckBridge Sync → Test connection to verify.",
+            "DeckBridge Sync configuration saved.\n\n"
+            "Settings will open next so you can choose the Local Anki deck.",
             title=ADDON_NAME,
         )
+        QTimer.singleShot(0, open_settings)
     else:
         detail = last_autoconfig_error()
         message = "Could not apply auto-config link. Please configure manually via Settings."

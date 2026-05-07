@@ -42,6 +42,152 @@ function legacyErrorMessage(body) {
   return body.error?.message || body.error || 'Unexpected server error';
 }
 
+function toBoundedInt(value, fallback = 0, max = 100000) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(Math.max(Math.trunc(number), 0), max);
+}
+
+function cleanShortText(value, fallback, maxLength = 120) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return (text || fallback).slice(0, maxLength);
+}
+
+function cleanIsoOrNull(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function hashSecret(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+async function loadDiscoverPreview(supabase, deckId) {
+  const [{ count, error: countError }, { data: noteRows, error: noteError }, { data: sampleRows, error: sampleError }] = await Promise.all([
+    supabase.from('cards').select('id', { count: 'exact', head: true }).eq('deck_id', deckId),
+    supabase.from('cards').select('note_type').eq('deck_id', deckId),
+    supabase.from('cards').select('fields').eq('deck_id', deckId).order('created_at').limit(3)
+  ]);
+  if (countError) throw countError;
+  if (noteError) throw noteError;
+  if (sampleError) throw sampleError;
+  return {
+    cardCount: count ?? noteRows?.length ?? 0,
+    noteTypes: Array.from(new Set((noteRows || []).map((row) => row.note_type || 'Basic'))),
+    sampleCards: (sampleRows || []).map((row) => row.fields || {})
+  };
+}
+
+function normalizeStudySessionBody(user, body = {}) {
+  const deckId = cleanShortText(body.deckId, '', 200);
+  if (!deckId) fail(400, 'missing_deck_id', 'deckId is required');
+  const startedAt = cleanIsoOrNull(body.startedAt) || new Date().toISOString();
+  const endedAt = cleanIsoOrNull(body.endedAt);
+  const metadata = body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+    ? body.metadata
+    : {};
+  return {
+    id: typeof body.id === 'string' && body.id.trim() ? body.id.trim().slice(0, 200) : undefined,
+    userId: user.id,
+    deckId,
+    startedAt,
+    endedAt,
+    durationSeconds: toBoundedInt(body.durationSeconds, endedAt ? Math.max(0, Math.round((Date.parse(endedAt) - Date.parse(startedAt)) / 1000)) : 0),
+    cardsStudied: toBoundedInt(body.cardsStudied),
+    cardsCorrect: toBoundedInt(body.cardsCorrect),
+    newCards: toBoundedInt(body.newCards),
+    reviewCards: toBoundedInt(body.reviewCards),
+    metadata
+  };
+}
+
+function normalizeActivityFilters(query = {}) {
+  const kinds = String(query.kind || query.kinds || '')
+    .split(',')
+    .map((kind) => kind.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+  return {
+    kinds,
+    since: cleanIsoOrNull(query.since),
+    until: cleanIsoOrNull(query.until),
+    limit: toBoundedInt(query.limit, 50, 200) || 50
+  };
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapePdfText(value) {
+  return String(value ?? '').replace(/[\\()]/g, '\\$&').replace(/\r?\n/g, ' ');
+}
+
+function createDeckSummaryLines(deck) {
+  const stateCounts = {};
+  const tagCounts = {};
+  const typeCounts = {};
+  for (const card of deck.cards || []) {
+    stateCounts[card.state || 'Unknown'] = (stateCounts[card.state || 'Unknown'] || 0) + 1;
+    typeCounts[card.type || card.modelName || 'Unknown'] = (typeCounts[card.type || card.modelName || 'Unknown'] || 0) + 1;
+    for (const tag of card.tags || []) tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+  }
+  const topTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  return [
+    `DeckBridge summary: ${deck.name}`,
+    deck.description ? `Description: ${deck.description}` : null,
+    `Cards: ${(deck.cards || []).length}`,
+    `Imported: ${deck.importedAt || 'unknown'}`,
+    `Last synced: ${deck.lastSyncedAt || 'never'}`,
+    `States: ${Object.entries(stateCounts).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}`,
+    `Note types: ${Object.entries(typeCounts).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}`,
+    `Top tags: ${topTags.map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}`
+  ].filter(Boolean);
+}
+
+function createSimplePdf(lines) {
+  const safeLines = lines.flatMap((line) => {
+    const text = String(line || '');
+    const chunks = [];
+    for (let index = 0; index < text.length; index += 88) chunks.push(text.slice(index, index + 88));
+    return chunks.length ? chunks : [''];
+  }).slice(0, 42);
+  const content = [
+    'BT',
+    '/F1 12 Tf',
+    '50 760 Td',
+    '16 TL',
+    ...safeLines.map((line) => `(${escapePdfText(line)}) Tj T*`),
+    'ET'
+  ].join('\n');
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    `<< /Length ${Buffer.byteLength(content, 'utf8')} >>\nstream\n${content}\nendstream`
+  ];
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(pdf, 'utf8'));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xrefOffset = Buffer.byteLength(pdf, 'utf8');
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (let index = 1; index < offsets.length; index++) {
+    pdf += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(pdf, 'utf8');
+}
+
 export function createApp(options = {}) {
   const production = options.production ?? process.env.NODE_ENV === 'production';
   const app = express();
@@ -473,7 +619,9 @@ export function createApp(options = {}) {
   app.get('/api/decks/:deckId/export/activity', auth.requireUser, async (req, res, next) => {
     try {
       const deckState = await repository.getDeckState(req.user, req.params.deckId);
-      const activities = deckState.activity || [];
+      const activities = repository.listActivity
+        ? await repository.listActivity(req.user, req.params.deckId, normalizeActivityFilters(req.query))
+        : (deckState.activity || []);
 
       const header = ['ID', 'Kind', 'Text', 'Timestamp'].map(escapeCsv).join(',');
       const rows = activities.map((a) => [a.id, a.kind, a.text, a.at].map(escapeCsv).join(','));
@@ -487,6 +635,44 @@ export function createApp(options = {}) {
         'Cache-Control': 'private, max-age=60'
       });
       res.send(csv);
+    } catch (err) { next(err); }
+  });
+
+  app.get('/api/decks/:deckId/activity', auth.requireUser, async (req, res, next) => {
+    try {
+      const filters = normalizeActivityFilters(req.query);
+      const deckState = await repository.getDeckState(req.user, req.params.deckId);
+      const activities = repository.listActivity
+        ? await repository.listActivity(req.user, req.params.deckId, filters)
+        : (deckState.activity || []).slice(0, filters.limit);
+      res.json({ activity: activities });
+    } catch (err) { next(err); }
+  });
+
+  app.get('/api/decks/:deckId/export/summary', auth.requireUser, async (req, res, next) => {
+    try {
+      const deckState = await repository.getDeckState(req.user, req.params.deckId);
+      const deck = deckState.decks[0];
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+      const format = String(req.query.format || 'pdf').toLowerCase();
+      const filenameBase = `${deck.name.replace(/[^a-z0-9_-]+/gi, '-')}-summary`;
+      const lines = createDeckSummaryLines(deck);
+      if (format === 'html') {
+        res.set({
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Disposition': `attachment; filename="${filenameBase}.html"`,
+          'Cache-Control': 'private, max-age=60'
+        });
+        res.send(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(deck.name)} summary</title></head><body><h1>${escapeHtml(deck.name)}</h1><ul>${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></body></html>`);
+        return;
+      }
+      const pdf = createSimplePdf(lines);
+      res.set({
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="${filenameBase}.pdf"`,
+        'Cache-Control': 'private, max-age=60'
+      });
+      res.send(pdf);
     } catch (err) { next(err); }
   });
 
@@ -517,6 +703,11 @@ export function createApp(options = {}) {
       const { data, error } = await query;
       if (error) fail(500, 'discover_error', error.message);
 
+      const previewByDeck = new Map(await Promise.all((data || []).map(async (deck) => [
+        deck.id,
+        await loadDiscoverPreview(auth.supabase, deck.id)
+      ])));
+
       const decks = (data || []).map((d) => ({
         id: d.id,
         name: d.name,
@@ -526,6 +717,9 @@ export function createApp(options = {}) {
         downloadCount: d.download_count,
         starCount: d.deck_stars?.[0]?.count ?? 0,
         forkedFrom: d.fork_of ?? null,
+        cardCount: previewByDeck.get(d.id)?.cardCount ?? 0,
+        noteTypes: previewByDeck.get(d.id)?.noteTypes ?? [],
+        sampleCards: previewByDeck.get(d.id)?.sampleCards ?? [],
       }));
       res.json({ decks });
     } catch (err) { next(err); }
@@ -542,6 +736,29 @@ export function createApp(options = {}) {
         .eq('id', req.params.deckId);
       if (error) fail(500, 'visibility_error', error.message);
       res.json({ visibility: req.body.visibility });
+    } catch (err) { next(err); }
+  });
+
+  app.get('/api/decks/:deckId/share-links', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!repository.listShareLinks) fail(501, 'share_links_unavailable', 'Share links are not available for this repository');
+      res.json({ shareLinks: await repository.listShareLinks(req.user, req.params.deckId) });
+    } catch (err) { next(err); }
+  });
+
+  app.post('/api/decks/:deckId/share-links', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!repository.createShareLink) fail(501, 'share_links_unavailable', 'Share links are not available for this repository');
+      const passwordHash = req.body.passwordHash
+        ? cleanShortText(req.body.passwordHash, '', 256)
+        : (req.body.password ? hashSecret(req.body.password) : null);
+      const link = await repository.createShareLink(req.user, req.params.deckId, {
+        token: crypto.randomBytes(18).toString('base64url'),
+        label: cleanShortText(req.body.label, 'Share link'),
+        passwordHash,
+        expiresAt: cleanIsoOrNull(req.body.expiresAt)
+      });
+      res.status(201).json({ shareLink: link });
     } catch (err) { next(err); }
   });
 
@@ -656,14 +873,24 @@ export function createApp(options = {}) {
     try {
       if (!auth.supabase) return res.json({ analytics: null });
 
-      const [suggestionsRes, starsRes] = await Promise.all([
+      const [suggestionsRes, starsRes, cardsRes, progressRes, sessionsRes] = await Promise.all([
         auth.supabase.from('suggestions').select('status, author_id, author_name, created_at')
           .eq('deck_id', req.params.deckId),
         auth.supabase.from('deck_stars').select('user_id')
+          .eq('deck_id', req.params.deckId),
+        auth.supabase.from('cards').select('id, state, due, suspended')
+          .eq('deck_id', req.params.deckId),
+        auth.supabase.from('study_progress').select('card_id, interval_days, ease_factor, repetitions, next_due, last_rating, updated_at')
+          .eq('deck_id', req.params.deckId),
+        auth.supabase.from('study_sessions').select('duration_seconds, cards_studied, cards_correct, started_at')
           .eq('deck_id', req.params.deckId)
+          .then((result) => result, () => ({ data: [], error: null }))
       ]);
 
       const suggestions = suggestionsRes.data || [];
+      const cards = cardsRes.data || [];
+      const progress = progressRes.data || [];
+      const sessions = sessionsRes.error ? [] : (sessionsRes.data || []);
       const total = suggestions.length;
       const accepted = suggestions.filter((s) => s.status === 'accepted').length;
       const rejected = suggestions.filter((s) => s.status === 'rejected').length;
@@ -680,11 +907,57 @@ export function createApp(options = {}) {
         .sort((a, b) => b.accepted - a.accepted)
         .slice(0, 10);
 
+      const byState = {};
+      const byDifficulty = { dueNow: 0, soon: 0, later: 0, suspended: 0, unknown: 0 };
+      for (const card of cards) {
+        const state = card.state || 'Unknown';
+        byState[state] = (byState[state] || 0) + 1;
+        if (card.suspended) byDifficulty.suspended += 1;
+        else if (card.due == null) byDifficulty.unknown += 1;
+        else if (Number(card.due) <= 0) byDifficulty.dueNow += 1;
+        else if (Number(card.due) <= 7) byDifficulty.soon += 1;
+        else byDifficulty.later += 1;
+      }
+
+      const progressByCard = new Map(progress.map((item) => [item.card_id, item]));
+      const strugglingCards = [...progressByCard.entries()]
+        .map(([cardId, item]) => ({
+          cardId,
+          easeFactor: Number(item.ease_factor),
+          repetitions: item.repetitions,
+          lastRating: item.last_rating,
+          nextDue: item.next_due,
+          updatedAt: item.updated_at
+        }))
+        .filter((item) => (item.lastRating != null && Number(item.lastRating) <= 2) || item.easeFactor < 2.2)
+        .sort((a, b) => (a.easeFactor - b.easeFactor) || ((a.lastRating ?? 5) - (b.lastRating ?? 5)))
+        .slice(0, 10);
+
+      const sessionTotals = sessions.reduce((acc, session) => {
+        acc.total += 1;
+        acc.durationSeconds += Number(session.duration_seconds) || 0;
+        acc.cardsStudied += Number(session.cards_studied) || 0;
+        acc.cardsCorrect += Number(session.cards_correct) || 0;
+        return acc;
+      }, { total: 0, durationSeconds: 0, cardsStudied: 0, cardsCorrect: 0 });
+
       res.json({
         analytics: {
           suggestions: { total, accepted, rejected, pending, acceptanceRate: total ? Math.round((accepted / total) * 100) : 0 },
           stars: starsRes.data?.length ?? 0,
           leaderboard,
+          cards: {
+            total: cards.length,
+            byState,
+            byDifficulty
+          },
+          study: {
+            sessions: {
+              ...sessionTotals,
+              accuracyRate: sessionTotals.cardsStudied ? Math.round((sessionTotals.cardsCorrect / sessionTotals.cardsStudied) * 100) : 0
+            },
+            strugglingCards
+          }
         }
       });
     } catch (err) { next(err); }
@@ -792,6 +1065,31 @@ export function createApp(options = {}) {
         if (!error) synced++;
       }
       res.json({ ok: true, synced });
+    } catch (err) { next(err); }
+  });
+
+  app.post('/api/study/sessions', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!repository.createStudySession) fail(501, 'study_sessions_unavailable', 'Study sessions are not available for this repository');
+      const session = await repository.createStudySession(req.user, normalizeStudySessionBody(req.user, req.body));
+      res.status(201).json({ session });
+    } catch (err) { next(err); }
+  });
+
+  app.get('/api/study/sessions', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!repository.listStudySessions) fail(501, 'study_sessions_unavailable', 'Study sessions are not available for this repository');
+      const deckId = typeof req.query.deckId === 'string' && req.query.deckId.trim() ? req.query.deckId.trim() : null;
+      const sessions = await repository.listStudySessions(req.user, deckId, { limit: req.query.limit });
+      res.json({ sessions });
+    } catch (err) { next(err); }
+  });
+
+  app.get('/api/study/sessions/:deckId', auth.requireUser, async (req, res, next) => {
+    try {
+      if (!repository.listStudySessions) fail(501, 'study_sessions_unavailable', 'Study sessions are not available for this repository');
+      const sessions = await repository.listStudySessions(req.user, req.params.deckId, { limit: req.query.limit });
+      res.json({ sessions });
     } catch (err) { next(err); }
   });
 

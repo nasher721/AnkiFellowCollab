@@ -27,9 +27,13 @@ class FakeQuery {
     this.filters = [];
     this.pendingUpdate = null;
     this.pendingDelete = false;
+    this.limitCount = null;
+    this.rangeBounds = null;
+    this.selectOptions = {};
   }
 
-  select() {
+  select(_columns, options = {}) {
+    this.selectOptions = options || {};
     return this;
   }
 
@@ -39,6 +43,22 @@ class FakeQuery {
   }
 
   order() {
+    return this;
+  }
+
+  range(from, to) {
+    this.rangeBounds = { from, to };
+    return this;
+  }
+
+  limit(count) {
+    this.limitCount = count;
+    return this;
+  }
+
+  ilike(field, pattern) {
+    const needle = String(pattern).replaceAll('%', '').toLowerCase();
+    this.filters.push({ field, value: needle, op: 'ilike' });
     return this;
   }
 
@@ -86,7 +106,9 @@ class FakeQuery {
       }
       return { error: null };
     }
-    return { data: this.rows(), error: null };
+    const rows = this.rows();
+    if (this.selectOptions.head) return { data: null, count: rows.length, error: null };
+    return { data: rows, count: this.selectOptions.count ? rows.length : null, error: null };
   }
 
   async maybeSingle() {
@@ -98,11 +120,17 @@ class FakeQuery {
   }
 
   rows() {
-    return this.tables[this.table].filter((row) => this.matches(row));
+    let rows = this.tables[this.table].filter((row) => this.matches(row));
+    if (this.rangeBounds) rows = rows.slice(this.rangeBounds.from, this.rangeBounds.to + 1);
+    if (this.limitCount !== null) rows = rows.slice(0, this.limitCount);
+    return rows;
   }
 
   matches(row) {
-    return this.filters.every(({ field, value }) => row[field] === value);
+    return this.filters.every(({ field, value, op }) => {
+      if (op === 'ilike') return String(row[field] || '').toLowerCase().includes(value);
+      return row[field] === value;
+    });
   }
 }
 
@@ -228,10 +256,11 @@ test('token management gracefully reports unavailable Supabase setup', async () 
 test('add-on endpoints expose manifest version and package download behavior', async () => {
   const { app } = await createTestApp();
   const addonPath = path.resolve(process.cwd(), 'dist', 'deckbridge-sync.ankiaddon');
+  const manifest = JSON.parse(await fs.readFile(path.resolve(process.cwd(), 'addons', 'deckbridge_sync', 'manifest.json'), 'utf8'));
   await fs.rm(addonPath, { force: true });
 
   const version = await request(app).get('/api/addon/version').expect(200);
-  assert.equal(version.body.version, '0.1.0');
+  assert.equal(version.body.version, manifest.version);
   assert.equal(version.body.minVersion, '23.10.0');
   assert.equal(version.body.package, 'deckbridge_sync');
   assert.equal(version.body.downloadUrl, '/api/addon/download');
@@ -340,4 +369,129 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
 
   assert.equal(conflict.body.result.stats.conflicts, 1);
   assert.equal(conflict.body.state.sync.conflicts[0].cardId, 'anki-9001');
+});
+
+test('study session API persists and lists sessions without changing progress contract', async () => {
+  const { app } = await createTestApp();
+
+  const created = await asUser(request(app)
+    .post('/api/study/sessions')
+    .send({
+      deckId: 'deck-demo-zanki',
+      durationSeconds: 420,
+      cardsStudied: 12,
+      cardsCorrect: 9,
+      newCards: 3,
+      reviewCards: 9,
+      metadata: { mode: 'review' }
+    }), 'you', 'You').expect(201);
+
+  assert.equal(created.body.session.deckId, 'deck-demo-zanki');
+  assert.equal(created.body.session.cardsStudied, 12);
+  assert.equal(created.body.session.metadata.mode, 'review');
+
+  const listed = await asUser(request(app).get('/api/study/sessions/deck-demo-zanki'), 'you', 'You').expect(200);
+  assert.equal(listed.body.sessions.length, 1);
+  assert.equal(listed.body.sessions[0].cardsCorrect, 9);
+
+  await asUser(request(app).post('/api/study/progress').send({ updates: [] }), 'you', 'You')
+    .expect(200)
+    .expect((res) => {
+      assert.equal(res.body.ok, true);
+    });
+});
+
+test('share link API creates owner links and redacts password hashes', async () => {
+  const { app } = await createTestApp();
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/share-links')
+    .send({ label: 'Board review group', password: 'study-room' }), 'maya', 'Maya Patel')
+    .expect(403);
+
+  const created = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/share-links')
+    .send({ label: 'Board review group', password: 'study-room' }), 'you', 'You')
+    .expect(201);
+
+  assert.equal(created.body.shareLink.label, 'Board review group');
+  assert.match(created.body.shareLink.token, /^[A-Za-z0-9_-]+$/);
+  assert.equal(created.body.shareLink.passwordProtected, true);
+  assert.equal(Object.hasOwn(created.body.shareLink, 'passwordHash'), false);
+
+  const listed = await asUser(request(app).get('/api/decks/deck-demo-zanki/share-links'), 'you', 'You').expect(200);
+  assert.equal(listed.body.shareLinks.length, 1);
+  assert.equal(listed.body.shareLinks[0].passwordProtected, true);
+  assert.equal(Object.hasOwn(listed.body.shareLinks[0], 'passwordHash'), false);
+});
+
+test('discover API returns real preview fields from public deck cards', async () => {
+  const supabase = new FakeSupabase();
+  supabase.tables.decks = [{
+    id: 'public-deck',
+    name: 'Public Deck',
+    description: 'Visible deck',
+    owner_id: 'you',
+    owner_name: 'You',
+    imported_at: new Date().toISOString(),
+    visibility: 'public',
+    download_count: 4,
+    fork_of: null,
+    deck_stars: [{ count: 2 }]
+  }];
+  supabase.tables.cards = [
+    { id: 'card-1', deck_id: 'public-deck', note_type: 'Basic', fields: { Front: 'Preview front', Back: 'Preview back' }, created_at: '2026-05-06T00:00:00.000Z' },
+    { id: 'card-2', deck_id: 'public-deck', note_type: 'Cloze', fields: { Text: 'Preview {{c1::cloze}}' }, created_at: '2026-05-06T00:01:00.000Z' }
+  ];
+  const { createApp } = await import(`./app.mjs?test=${Date.now()}-${Math.random()}`);
+  const app = createApp({
+    production: false,
+    repositoryMode: 'local',
+    auth: {
+      supabase,
+      requireUser(_req, _res, next) { next(); }
+    }
+  });
+
+  const response = await request(app).get('/api/discover').expect(200);
+  assert.equal(response.body.decks.length, 1);
+  assert.equal(response.body.decks[0].cardCount, 2);
+  assert.deepEqual(response.body.decks[0].noteTypes.sort(), ['Basic', 'Cloze']);
+  assert.deepEqual(response.body.decks[0].sampleCards[0], { Front: 'Preview front', Back: 'Preview back' });
+});
+
+test('activity filtering and summary exports return backend-only artifacts', async () => {
+  const { app } = await createTestApp();
+
+  const activity = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/activity')
+    .query({ kind: 'export', limit: 1 }), 'you', 'You')
+    .expect(200);
+  assert.equal(activity.body.activity.length, 1);
+  assert.equal(activity.body.activity[0].kind, 'export');
+
+  const csv = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/export/activity')
+    .query({ kind: 'export' }), 'you', 'You')
+    .expect(200);
+  assert.match(csv.text, /Kind,Text/);
+  assert.match(csv.text, /export/);
+  assert.doesNotMatch(csv.text, /suggestion/);
+
+  const pdf = await asUser(request(app).get('/api/decks/deck-demo-zanki/export/summary'), 'you', 'You')
+    .buffer(true)
+    .parse((res, callback) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => callback(null, Buffer.concat(chunks)));
+    })
+    .expect(200);
+  assert.equal(pdf.headers['content-type'], 'application/pdf');
+  assert.equal(pdf.body.subarray(0, 8).toString('utf8'), '%PDF-1.4');
+
+  const html = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/export/summary')
+    .query({ format: 'html' }), 'you', 'You')
+    .expect(200);
+  assert.match(html.text, /DeckBridge summary/);
 });

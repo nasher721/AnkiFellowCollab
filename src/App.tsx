@@ -1,7 +1,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { createClient, type Session } from '@supabase/supabase-js';
-import { api, setApiAuthToken } from './api';
-import type { AppState, DeckCard, Suggestion } from './types';
+import { api, setApiAuthToken, type ShareLink } from './api';
+import type { AppState, Deck, DeckCard, DeckSummary, Suggestion } from './types';
 import { useRealtime } from './useRealtime';
 import { ConnectAnkiWizard } from './ConnectAnkiWizard';
 import { CardEditor } from './CardEditor';
@@ -48,6 +48,10 @@ function fieldValue(card: DeckCard | undefined, key: string) {
   return card.fields[key] || card.fields[key.toLowerCase()] || '';
 }
 
+function shareLinkUrl(token: string) {
+  return `${window.location.origin}/share/${encodeURIComponent(token)}`;
+}
+
 function Icon({ name }: { name: 'upload' | 'download' | 'sync' | 'search' | 'filter' | 'cards' | 'users' | 'check' | 'x' | 'spark' }) {
   const paths = {
     upload: 'M12 3v12m0-12 4 4m-4-4-4 4M4 17v3h16v-3',
@@ -92,11 +96,15 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [showConnectWizard, setShowConnectWizard] = useState(false);
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'study' | 'activity' | 'analytics'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'study' | 'cards' | 'stats' | 'analytics' | 'activity' | 'settings'>('overview');
   const [showStudy, setShowStudy] = useState(false);
+  const [studyApprovedOnly, setStudyApprovedOnly] = useState(true);
   const [reviewTab, setReviewTab] = useState<'changes' | 'discussion'>('changes');
+  const [reviewStatusFilter, setReviewStatusFilter] = useState<'pending' | 'accepted' | 'rejected' | 'revision' | 'all'>('pending');
+  const [reviewAuthorFilter, setReviewAuthorFilter] = useState('All');
   const [topView, setTopView] = useState<'workspace' | 'discover' | 'templates'>('workspace');
   const [deckVisibility, setDeckVisibility] = useState<Record<string, string>>({});
+  const [copiedShare, setCopiedShare] = useState('');
   const activeDeck = state?.decks.find((deck) => deck.id === state.activeDeckId) || state?.decks[0];
 
   useEffect(() => {
@@ -174,7 +182,13 @@ export default function App() {
     [state, activeDeck]
   );
   const pendingSuggestions = suggestions.filter((item) => item.status === 'pending');
-  const selectedSuggestion = suggestions.find((item) => item.id === selectedSuggestionId) || pendingSuggestions[0];
+  const reviewAuthors = useMemo(() => ['All', ...Array.from(new Set(suggestions.map((item) => item.authorName))).sort()], [suggestions]);
+  const queueSuggestions = useMemo(() => suggestions.filter((item) => {
+    const statusMatch = reviewStatusFilter === 'all' || item.status === reviewStatusFilter;
+    const authorMatch = reviewAuthorFilter === 'All' || item.authorName === reviewAuthorFilter;
+    return statusMatch && authorMatch;
+  }), [suggestions, reviewStatusFilter, reviewAuthorFilter]);
+  const selectedSuggestion = queueSuggestions.find((item) => item.id === selectedSuggestionId) || queueSuggestions[0];
   const selectedCard = activeDeck?.cards.find((card) => card.id === (selectedSuggestion?.cardId || selectedCardId)) || activeDeck?.cards[0];
   const allTags = useMemo(() => ['All', ...Array.from(new Set(activeDeck?.cards.flatMap((card) => card.tags) || [])).sort()], [activeDeck]);
   const cardStates = useMemo(() => ['All', ...Array.from(new Set(activeDeck?.cards.map((card) => card.state) || [])).sort()], [activeDeck]);
@@ -197,6 +211,27 @@ export default function App() {
   const pagedCards = filteredCards.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
   const currentStart = filteredCards.length ? (safePage - 1) * PAGE_SIZE + 1 : 0;
   const currentEnd = Math.min(safePage * PAGE_SIZE, filteredCards.length);
+  const cardsWithPendingSuggestions = useMemo(() => new Set(pendingSuggestions.map((item) => item.cardId)), [pendingSuggestions]);
+  const approvedStudyCards = useMemo(() => (activeDeck?.cards || []).filter((card) => (
+    !card.suspended && !cardsWithPendingSuggestions.has(card.id)
+  )), [activeDeck, cardsWithPendingSuggestions]);
+  const studyCards = studyApprovedOnly ? approvedStudyCards : (activeDeck?.cards || []);
+  const suggestionStats = useMemo(() => {
+    const total = suggestions.length;
+    const accepted = suggestions.filter((item) => item.status === 'accepted').length;
+    const rejected = suggestions.filter((item) => item.status === 'rejected').length;
+    const pending = suggestions.filter((item) => item.status === 'pending').length;
+    const revision = suggestions.filter((item) => item.status === 'revision').length;
+    return {
+      total,
+      accepted,
+      rejected,
+      pending,
+      revision,
+      acceptanceRate: total ? Math.round((accepted / total) * 100) : 0
+    };
+  }, [suggestions]);
+  const deckEmbedCode = activeDeck ? `<iframe src="${window.location.origin}/embed/decks/${activeDeck.id}" title="${activeDeck.name}" loading="lazy"></iframe>` : '';
 
   async function refreshWith<T extends AppState | unknown>(task: Promise<T>, success: string, map?: (value: T) => AppState) {
     setBusy(true);
@@ -541,14 +576,35 @@ export default function App() {
             <div className="breadcrumb">Decks <span>/</span> {activeDeck.name}</div>
             <div className="tabs">
               <button className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
-              <button className={activeTab === 'study' ? 'active' : ''} onClick={() => { setActiveTab('study'); setShowStudy(true); }}>Study</button>
-              <button disabled>Cards</button>
-              <button disabled>Stats</button>
+              <button className={activeTab === 'study' ? 'active' : ''} onClick={() => setActiveTab('study')}>Study</button>
+              <button className={activeTab === 'cards' ? 'active' : ''} onClick={() => setActiveTab('cards')}>Cards</button>
+              <button className={activeTab === 'stats' ? 'active' : ''} onClick={() => setActiveTab('stats')}>Stats</button>
               <button className={activeTab === 'analytics' ? 'active' : ''} onClick={() => setActiveTab('analytics')}>Analytics</button>
               <button className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab('activity')}>Activity</button>
-              <button disabled>Settings</button>
+              <button className={activeTab === 'settings' ? 'active' : ''} onClick={() => setActiveTab('settings')}>Settings</button>
               <span className="pending-callout">{pendingSuggestions.length} pending suggestions</span>
             </div>
+
+            {activeTab === 'study' && activeDeck ? (
+              <StudyPrepView
+                totalCards={activeDeck.cards.length}
+                studyCards={studyCards.length}
+                approvedCards={approvedStudyCards.length}
+                pendingBlocked={cardsWithPendingSuggestions.size}
+                approvedOnly={studyApprovedOnly}
+                onApprovedOnlyChange={setStudyApprovedOnly}
+                onStart={() => setShowStudy(true)}
+              />
+            ) : null}
+
+            {activeTab === 'stats' && activeDeck ? (
+              <DeckStatsView
+                deck={activeDeck}
+                summary={activeSummary}
+                suggestions={suggestionStats}
+                filteredCount={filteredCards.length}
+              />
+            ) : null}
 
             {activeTab === 'analytics' && activeDeck ? (
               <AnalyticsDashboard
@@ -565,6 +621,24 @@ export default function App() {
                 deckId={activeDeck.id}
                 deckName={activeDeck.name}
                 activities={state.activity}
+                suggestionStats={suggestionStats}
+              />
+            ) : null}
+
+            {activeTab === 'settings' && activeDeck ? (
+              <DeckSettingsView
+                deck={activeDeck}
+                visibility={deckVisibility[activeDeck.id] ?? 'private'}
+                canReview={canReview}
+                embedCode={deckEmbedCode}
+                copiedShare={copiedShare}
+                onCopied={setCopiedShare}
+                onSetVisibility={(v) => {
+                  refreshWith(api.setVisibility(activeDeck.id, v), `Deck visibility set to ${v}`, () => {
+                    setDeckVisibility((prev) => ({ ...prev, [activeDeck.id]: v }));
+                    return state;
+                  });
+                }}
               />
             ) : null}
 
@@ -586,6 +660,7 @@ export default function App() {
               />
             ) : null}
 
+            {(activeTab === 'overview' || activeTab === 'cards') ? (<>
             <div className="summary-band">
               <div>
                 <small>Deck description</small>
@@ -691,12 +766,48 @@ export default function App() {
                 </span>
               </div>
             </div>
+            </>) : null}
           </section>
 
           <aside className="review-panel">
             <div className="review-heading">
               <strong>Review Queue <span>{pendingSuggestions.length}</span></strong>
-              <button disabled>Filter</button>
+              <button
+                type="button"
+                onClick={() => {
+                  setReviewStatusFilter('pending');
+                  setReviewAuthorFilter('All');
+                }}
+                disabled={reviewStatusFilter === 'pending' && reviewAuthorFilter === 'All'}
+              >
+                Reset
+              </button>
+            </div>
+            <div className="review-filter-bar" aria-label="Review queue filters">
+              <label>
+                <span>Status</span>
+                <select
+                  aria-label="Filter review queue by status"
+                  value={reviewStatusFilter}
+                  onChange={(event) => setReviewStatusFilter(event.target.value as typeof reviewStatusFilter)}
+                >
+                  <option value="pending">Pending</option>
+                  <option value="revision">Needs revision</option>
+                  <option value="accepted">Accepted</option>
+                  <option value="rejected">Rejected</option>
+                  <option value="all">All statuses</option>
+                </select>
+              </label>
+              <label>
+                <span>Author</span>
+                <select
+                  aria-label="Filter review queue by author"
+                  value={reviewAuthorFilter}
+                  onChange={(event) => setReviewAuthorFilter(event.target.value)}
+                >
+                  {reviewAuthors.map((author) => <option key={author}>{author}</option>)}
+                </select>
+              </label>
             </div>
 
             {selectedCard ? (
@@ -767,7 +878,7 @@ export default function App() {
             ) : <EmptyState message="Select a card to review changes." />}
 
             <div className="queue-list">
-              {suggestions.map((suggestion) => (
+              {queueSuggestions.length ? queueSuggestions.map((suggestion) => (
                 <button
                   className={`queue-item ${suggestion.id === selectedSuggestion?.id ? 'active' : ''}`}
                   key={suggestion.id}
@@ -780,7 +891,7 @@ export default function App() {
                   </span>
                   <b className={`queue-status ${suggestion.status}`}>{suggestion.status}</b>
                 </button>
-              ))}
+              )) : <EmptyState message="No suggestions match the queue filters." />}
             </div>
 
             <section className="go-to-features">
@@ -810,7 +921,8 @@ export default function App() {
       {showStudy && activeDeck && (
         <StudyView
           deckId={activeDeck.id}
-          cards={activeDeck.cards}
+          cards={studyCards}
+          modeLabel={studyApprovedOnly ? 'Approved cards only' : 'All cards'}
           onClose={() => { setShowStudy(false); setActiveTab('overview'); }}
         />
       )}
@@ -826,6 +938,235 @@ function DiffBlock({ label, before, after }: { label: string; before?: string; a
         <p className="removed">- {before || 'Empty'}</p>
         <p className="added">+ {after || before || 'No suggested change'}</p>
       </div>
+    </div>
+  );
+}
+
+function StudyPrepView({
+  totalCards,
+  studyCards,
+  approvedCards,
+  pendingBlocked,
+  approvedOnly,
+  onApprovedOnlyChange,
+  onStart
+}: {
+  totalCards: number;
+  studyCards: number;
+  approvedCards: number;
+  pendingBlocked: number;
+  approvedOnly: boolean;
+  onApprovedOnlyChange: (value: boolean) => void;
+  onStart: () => void;
+}) {
+  return (
+    <div className="tab-panel study-prep">
+      <div>
+        <h2>Study session</h2>
+        <p>Start a due-card session with local SM-2 progress and server sync when authentication is available.</p>
+      </div>
+      <div className="stat-grid compact">
+        <div><small>Available now</small><strong>{studyCards.toLocaleString()}</strong></div>
+        <div><small>Approved cards</small><strong>{approvedCards.toLocaleString()}</strong></div>
+        <div><small>All cards</small><strong>{totalCards.toLocaleString()}</strong></div>
+        <div><small>Pending review</small><strong>{pendingBlocked.toLocaleString()}</strong></div>
+      </div>
+      <label className="toggle-row">
+        <input
+          type="checkbox"
+          checked={approvedOnly}
+          onChange={(event) => onApprovedOnlyChange(event.target.checked)}
+        />
+        <span>
+          <strong>Study approved cards only</strong>
+          <small>Excludes suspended cards and cards with pending owner-review suggestions.</small>
+        </span>
+      </label>
+      <div className="panel-actions">
+        <button className="button primary" onClick={onStart} disabled={studyCards === 0}>Start study session</button>
+      </div>
+    </div>
+  );
+}
+
+function DeckStatsView({
+  deck,
+  summary,
+  suggestions,
+  filteredCount
+}: {
+  deck: Deck;
+  summary?: DeckSummary;
+  suggestions: { total: number; accepted: number; rejected: number; pending: number; revision: number; acceptanceRate: number };
+  filteredCount: number;
+}) {
+  const stateCounts = deck.cards.reduce<Record<string, number>>((acc, card) => {
+    acc[card.state] = (acc[card.state] || 0) + 1;
+    return acc;
+  }, {});
+  const suspended = deck.cards.filter((card) => card.suspended).length;
+  const noteTypes = summary?.noteTypes?.length ? summary.noteTypes : Array.from(new Set(deck.cards.map((card) => card.type)));
+
+  return (
+    <div className="tab-panel stats-view">
+      <div>
+        <h2>Deck stats</h2>
+        <p>First-pass operational totals from the loaded deck state.</p>
+      </div>
+      <div className="stat-grid">
+        <div><small>Cards</small><strong>{deck.cards.length.toLocaleString()}</strong></div>
+        <div><small>Filtered cards</small><strong>{filteredCount.toLocaleString()}</strong></div>
+        <div><small>Tags</small><strong>{summary?.tagCount.toLocaleString() ?? '0'}</strong></div>
+        <div><small>Note types</small><strong>{noteTypes.length.toLocaleString()}</strong></div>
+        <div><small>Suspended</small><strong>{suspended.toLocaleString()}</strong></div>
+        <div><small>Acceptance rate</small><strong>{suggestions.acceptanceRate}%</strong></div>
+      </div>
+      <div className="stats-columns">
+        <section>
+          <h3>Card states</h3>
+          {Object.entries(stateCounts).map(([state, count]) => (
+            <div className="metric-row" key={state}>
+              <span>{state}</span>
+              <strong>{count.toLocaleString()}</strong>
+            </div>
+          ))}
+        </section>
+        <section>
+          <h3>Suggestion flow</h3>
+          <div className="metric-row"><span>Pending</span><strong>{suggestions.pending}</strong></div>
+          <div className="metric-row"><span>Accepted</span><strong>{suggestions.accepted}</strong></div>
+          <div className="metric-row"><span>Rejected</span><strong>{suggestions.rejected}</strong></div>
+          <div className="metric-row"><span>Needs revision</span><strong>{suggestions.revision}</strong></div>
+        </section>
+        <section>
+          <h3>Note types</h3>
+          <div className="tag-list wide">
+            {noteTypes.map((type) => <em key={type}>{type}</em>)}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function DeckSettingsView({
+  deck,
+  visibility,
+  canReview,
+  embedCode,
+  copiedShare,
+  onCopied,
+  onSetVisibility
+}: {
+  deck: Deck;
+  visibility: string;
+  canReview: boolean;
+  embedCode: string;
+  copiedShare: string;
+  onCopied: (value: string) => void;
+  onSetVisibility: (value: 'public' | 'private' | 'unlisted') => void;
+}) {
+  const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
+  const [shareLoading, setShareLoading] = useState(false);
+  const [shareError, setShareError] = useState('');
+  const primaryShareLink = shareLinks.find((link) => !link.disabledAt) || shareLinks[0] || null;
+  const primaryShareUrl = primaryShareLink ? shareLinkUrl(primaryShareLink.token) : '';
+
+  useEffect(() => {
+    if (!canReview) {
+      setShareLinks([]);
+      setShareError('');
+      return;
+    }
+    let mounted = true;
+    setShareLoading(true);
+    setShareError('');
+    api.shareLinks.list(deck.id)
+      .then(({ shareLinks: links }) => {
+        if (mounted) setShareLinks(links);
+      })
+      .catch((err) => {
+        if (mounted) setShareError(err instanceof Error ? err.message : 'Unable to load share links');
+      })
+      .finally(() => {
+        if (mounted) setShareLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [canReview, deck.id]);
+
+  async function createShareLink() {
+    setShareLoading(true);
+    setShareError('');
+    try {
+      const { shareLink } = await api.shareLinks.create(deck.id, { label: `${deck.name} share link` });
+      setShareLinks((links) => [shareLink, ...links]);
+      const url = shareLinkUrl(shareLink.token);
+      await copy(url, 'Share link created and copied');
+    } catch (err) {
+      setShareError(err instanceof Error ? err.message : 'Unable to create share link');
+    } finally {
+      setShareLoading(false);
+    }
+  }
+
+  async function copy(value: string, label: string) {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      onCopied(label);
+      window.setTimeout(() => onCopied(''), 1800);
+    } catch {
+      onCopied('Copy unavailable');
+    }
+  }
+
+  return (
+    <div className="tab-panel settings-view">
+      <div>
+        <h2>Deck settings</h2>
+        <p>Manage collaboration visibility and prepare share surfaces for this deck.</p>
+      </div>
+      <div className="settings-grid">
+        <section>
+          <h3>Access</h3>
+          <label className="settings-field">
+            <span>Visibility</span>
+            <select
+              value={visibility}
+              onChange={(event) => onSetVisibility(event.target.value as 'public' | 'private' | 'unlisted')}
+              disabled={!canReview}
+              aria-label="Deck visibility"
+            >
+              <option value="private">Private</option>
+              <option value="unlisted">Unlisted</option>
+              <option value="public">Public</option>
+            </select>
+          </label>
+          {!canReview ? <p className="settings-note">Owner access is required to change visibility.</p> : null}
+        </section>
+        <section>
+          <h3>Share link</h3>
+          <div className="copy-row">
+            <input readOnly value={primaryShareUrl} placeholder={shareLoading ? 'Loading share links...' : 'Create a tokenized share link'} aria-label="Deck share link" />
+            <button className="button secondary" onClick={() => copy(primaryShareUrl, 'Share link copied')} disabled={!primaryShareUrl}>Copy</button>
+          </div>
+          <button className="button secondary" onClick={createShareLink} disabled={!canReview || shareLoading}>
+            {primaryShareLink ? 'Create another share link' : 'Create share link'}
+          </button>
+          {shareError ? <p className="settings-note">{shareError}</p> : null}
+          {!canReview ? <p className="settings-note">Owner access is required to create share links.</p> : null}
+          <small>Share URLs use backend-generated tokens. Public access depends on the share route and backend availability.</small>
+        </section>
+        <section>
+          <h3>Embed</h3>
+          <textarea readOnly value={embedCode} aria-label="Deck embed code" rows={3} />
+          <button className="button secondary" onClick={() => copy(embedCode, 'Embed code copied')}>Copy embed code</button>
+          <small>Placeholder code for a future embeddable public preview route.</small>
+        </section>
+      </div>
+      {copiedShare ? <div className="inline-notice">{copiedShare}</div> : null}
     </div>
   );
 }

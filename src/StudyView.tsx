@@ -15,6 +15,7 @@ import {
 interface Props {
   deckId: string;
   cards: DeckCard[];
+  modeLabel?: string;
   onClose: () => void;
 }
 
@@ -35,7 +36,7 @@ const RATING_COLORS: Record<Rating, string> = {
   4: 'rating-easy',
 };
 
-export function StudyView({ deckId, cards, onClose }: Props) {
+export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: Props) {
   const [allProgress, setAllProgress] = useState<Record<string, CardProgress>>(() =>
     loadProgress(deckId)
   );
@@ -165,6 +166,7 @@ export function StudyView({ deckId, cards, onClose }: Props) {
           </div>
           <div className="study-meta">
             <span>{remaining} remaining</span>
+            <span>{modeLabel}</span>
             <span>{accuracy}% accuracy</span>
             <button className="btn btn-ghost study-close" onClick={onClose} aria-label="Exit study mode">✕</button>
           </div>

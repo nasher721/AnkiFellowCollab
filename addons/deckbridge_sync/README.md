@@ -19,6 +19,7 @@ The DeckBridge Connect Anki wizard can also open an auto-config link while Anki 
 `anki://deckbridge?url={platformUrl}&token={token}&deckId={deckId}&localDeck={localDeck}&conflictPolicy={conflictPolicy}`
 
 The add-on validates the token against `/api/me` before saving. If the URL scheme fails or validation is rejected, use Settings to paste the same values manually.
+If the link omits `localDeck`, the mapping is saved with a blank local deck and Settings opens so you can pick a deck from Anki's local deck list.
 
 ## Features
 

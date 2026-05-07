@@ -94,6 +94,23 @@ export interface PublicDeck {
   downloadCount: number;
   starCount: number;
   forkedFrom: string | null;
+  cardCount?: number;
+  noteCount?: number;
+  tagCount?: number;
+  noteTypes?: string[];
+  sampleCards?: Record<string, string>[];
+}
+
+export interface ShareLink {
+  id: string;
+  deckId: string;
+  token: string;
+  label: string;
+  passwordProtected: boolean;
+  expiresAt: string | null;
+  disabledAt: string | null;
+  createdBy: string;
+  createdAt: string;
 }
 
 export interface DeckAnalytics {
@@ -298,6 +315,15 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ visibility })
     }),
+  shareLinks: {
+    list: (deckId: string) =>
+      jsonRequest<{ shareLinks: ShareLink[] }>(`/api/decks/${deckId}/share-links`),
+    create: (deckId: string, payload?: { label?: string; password?: string; expiresAt?: string | null }) =>
+      jsonRequest<{ shareLink: ShareLink }>(`/api/decks/${deckId}/share-links`, {
+        method: 'POST',
+        body: JSON.stringify(payload || {})
+      })
+  },
   forkDeck: (deckId: string) =>
     jsonRequest<{ deckId: string; name: string }>(`/api/decks/${deckId}/fork`, { method: 'POST' }),
   starDeck: (deckId: string) =>

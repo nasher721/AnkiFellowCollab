@@ -68,6 +68,11 @@ export function DiscoverView({ onFork }: Props) {
     }
   }
 
+  function previewEntries(deck: PublicDeck) {
+    const first = deck.sampleCards?.[0];
+    return first ? Object.entries(first).slice(0, 2) : [];
+  }
+
   return (
     <div className="discover-view">
       <div className="discover-header">
@@ -115,6 +120,23 @@ export function DiscoverView({ onFork }: Props) {
               <div className="discover-card-body">
                 <h3 className="discover-card-title">{deck.name}</h3>
                 <p className="discover-card-desc">{deck.description || 'No description.'}</p>
+                {(deck.cardCount || deck.noteTypes?.length) && (
+                  <div className="discover-preview-meta">
+                    {typeof deck.cardCount === 'number' ? <span>{deck.cardCount.toLocaleString()} cards</span> : null}
+                    {deck.noteTypes?.slice(0, 2).map((type) => <span key={type}>{type}</span>)}
+                  </div>
+                )}
+                {previewEntries(deck).length > 0 && (
+                  <div className="discover-preview">
+                    <p>Preview</p>
+                    {previewEntries(deck).map(([field, value]) => (
+                      <div className="preview-row" key={field}>
+                        <span className="preview-field">{field}</span>
+                        <span className="preview-value">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {deck.forkedFrom && (
                   <span className="discover-fork-badge">🍴 Forked</span>
                 )}
