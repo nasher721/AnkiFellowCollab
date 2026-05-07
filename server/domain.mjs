@@ -104,6 +104,27 @@ function cleanFields(fields) {
   );
 }
 
+function normalizeAddonMedia(media) {
+  if (!media || typeof media !== 'object' || Array.isArray(media)) return {};
+  return Object.fromEntries(
+    Object.entries(media)
+      .slice(0, 300)
+      .map(([key, value]) => {
+        const asset = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+        const filename = cleanText(asset.filename || key, '', 240);
+        const mimeType = cleanText(asset.mimeType || asset.mime || 'application/octet-stream', 'application/octet-stream', 120) || 'application/octet-stream';
+        const sha256 = cleanText(asset.sha256 || asset.sha || '', '', 128);
+        const dataBase64 = cleanText(asset.dataBase64 || asset.base64 || '', '', 7_000_000);
+        return [filename, { filename, mimeType, sha256, dataBase64 }];
+      })
+      .filter(([filename, asset]) => (
+        filename
+        && asset.dataBase64
+        && /^[A-Za-z0-9+/]+={0,2}$/.test(asset.dataBase64)
+      ))
+  );
+}
+
 function normalizeAddonCard(card, index) {
   const fields = cleanFields(card.fields);
   if (!Object.keys(fields).length) {
@@ -154,6 +175,7 @@ export function normalizeAddonSyncInput(body = {}) {
 
   return {
     cards: cards.map(normalizeAddonCard),
+    media: normalizeAddonMedia(body.media),
     dryRun: Boolean(body.dryRun),
     allowCreate: body.allowCreate !== false,
     conflictPolicy,
@@ -200,7 +222,7 @@ export function normalizeAddonDeckCreateInput(body = {}, user = {}) {
       importedAt: createdAt,
       lastSyncedAt: createdAt,
       cards,
-      media: {},
+      media: syncInput.media,
       models: [],
       source: {
         filename: null,
@@ -243,6 +265,17 @@ function copySyncedCard(card, actorName, timestamp) {
 
 export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki add-on') {
   const syncedAt = nowIso();
+  deck.media ||= {};
+  const mediaEntries = Object.entries(syncInput.media || {});
+  let mediaChanged = false;
+  if (!syncInput.dryRun) {
+    for (const [filename, asset] of mediaEntries) {
+      if (!sameJson(deck.media[filename], asset)) {
+        deck.media[filename] = asset;
+        mediaChanged = true;
+      }
+    }
+  }
   const byId = new Map(deck.cards.map((card) => [card.id, card]));
   const byNoteId = new Map(deck.cards.filter((card) => card.ankiNoteId).map((card) => [String(card.ankiNoteId), card]));
   const result = {
@@ -322,7 +355,7 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
     if (!syncInput.dryRun) Object.assign(existing, updated);
   }
 
-  if (!syncInput.dryRun && (result.stats.created || result.stats.updated || result.stats.conflicts)) {
+  if (!syncInput.dryRun && (result.stats.created || result.stats.updated || result.stats.conflicts || mediaChanged)) {
     deck.lastSyncedAt = syncedAt;
   }
   return result;

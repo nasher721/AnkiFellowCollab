@@ -4,6 +4,9 @@ import {
   applySuggestion,
   createSeedState,
   deckToCreateDeckJson,
+  mergeAddonCards,
+  normalizeAddonDeckCreateInput,
+  normalizeAddonSyncInput,
   normalizeSuggestionInput,
   normalizeParsedDeck,
   summarizeDeck
@@ -71,4 +74,67 @@ test('normalizes suggestion input and rejects empty no-op suggestions', () => {
   assert.equal(normalized.proposedFields.Extra, '');
 
   assert.throws(() => normalizeSuggestionInput({ proposedFields: {}, proposedTags: card.tags }, card), /Suggestion must/);
+});
+
+test('normalizes add-on sync media payloads and bounds asset count', () => {
+  const dataBase64 = Buffer.from('png-bytes').toString('base64');
+  const input = normalizeAddonSyncInput({
+    cards: [{ id: 'anki-1', fields: { Front: '<img src="image.png">', Back: '[sound:audio.mp3]' } }],
+    media: {
+      'image.png': { filename: ' image.png ', mimeType: 'image/png', sha256: 'a'.repeat(64), dataBase64 },
+      'skip.txt': { filename: 'skip.txt', mimeType: 'text/plain', sha256: '', dataBase64: 'not base64!' },
+      ...Object.fromEntries(Array.from({ length: 310 }, (_, index) => [
+        `extra-${index}.png`,
+        { filename: `extra-${index}.png`, mimeType: 'image/png', sha256: 'b'.repeat(64), dataBase64 }
+      ]))
+    }
+  });
+
+  assert.equal(input.cards[0].fields.Front, '<img src="image.png">');
+  assert.equal(input.media['image.png'].mimeType, 'image/png');
+  assert.equal(input.media['image.png'].dataBase64, dataBase64);
+  assert.equal(input.media['skip.txt'], undefined);
+  assert.equal(Object.keys(input.media).length <= 300, true);
+});
+
+test('add-on deck creation persists normalized sync media on the new deck', () => {
+  const dataBase64 = Buffer.from('audio-bytes').toString('base64');
+  const { deck } = normalizeAddonDeckCreateInput({
+    deckName: 'Media Deck',
+    cards: [{ id: 'anki-1', fields: { Front: '[sound:clip.mp3]' } }],
+    media: {
+      'clip.mp3': { mimeType: 'audio/mpeg', sha256: 'c'.repeat(64), dataBase64 }
+    }
+  }, { name: 'User' });
+
+  assert.equal(deck.media['clip.mp3'].filename, 'clip.mp3');
+  assert.equal(deck.media['clip.mp3'].mimeType, 'audio/mpeg');
+  assert.equal(deck.media['clip.mp3'].dataBase64, dataBase64);
+});
+
+test('add-on sync merges media into deck only when not dry-run', () => {
+  const deck = createSeedState().decks[0];
+  const dataBase64 = Buffer.from('png-bytes').toString('base64');
+
+  const dryRunInput = normalizeAddonSyncInput({
+    dryRun: true,
+    cards: [{ id: 'anki-media-1', fields: { Front: '<img src="image.png">' } }],
+    media: {
+      'image.png': { mimeType: 'image/png', sha256: 'd'.repeat(64), dataBase64 }
+    }
+  });
+  mergeAddonCards(deck, dryRunInput, 'Tester');
+  assert.equal(deck.media['image.png'], undefined);
+
+  const syncInput = normalizeAddonSyncInput({
+    conflictPolicy: 'overwrite-platform',
+    cards: [{ id: 'anki-media-1', fields: { Front: '<img src="image.png">' } }],
+    media: {
+      'image.png': { mimeType: 'image/png', sha256: 'd'.repeat(64), dataBase64 }
+    }
+  });
+  mergeAddonCards(deck, syncInput, 'Tester');
+
+  assert.equal(deck.media['image.png'].mimeType, 'image/png');
+  assert.equal(deck.media['image.png'].dataBase64, dataBase64);
 });

@@ -639,7 +639,8 @@ export function createSupabaseRepository(options = {}) {
         }
         const { error: deckError } = await supabase.from('decks').update({
           last_synced_at: result.syncedAt,
-          last_sync_result: lastAddonSync
+          last_sync_result: lastAddonSync,
+          media: deck.media || {}
         }).eq('id', deck.id);
         if (deckError) throw deckError;
         if (isFinalBatchChunk) {

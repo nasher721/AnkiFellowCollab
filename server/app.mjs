@@ -819,6 +819,26 @@ export function createApp(options = {}) {
     } catch (err) { next(err); }
   });
 
+  app.get('/api/decks/:deckId/media/:filename', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      const rawFilename = typeof req.params.filename === 'string' ? req.params.filename.trim() : '';
+      const filename = cleanShortText(rawFilename, '', 240);
+      if (!filename || rawFilename.length > 240 || filename.includes('/') || filename.includes('\\')) {
+        fail(400, 'invalid_media_filename', 'Media filename is required');
+      }
+      const deckState = await repository.getDeckState(req.user, deckId);
+      const deck = deckState.decks[0];
+      const asset = deck?.media?.[filename];
+      if (!asset?.dataBase64) fail(404, 'media_not_found', 'Media asset not found');
+      res.set({
+        'Content-Type': asset.mimeType || 'application/octet-stream',
+        'Cache-Control': 'private, max-age=3600'
+      });
+      res.send(Buffer.from(asset.dataBase64, 'base64'));
+    } catch (err) { next(err); }
+  });
+
   app.get('/api/decks/:deckId/activity', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
       const deckId = deckIdFromRequest(req);

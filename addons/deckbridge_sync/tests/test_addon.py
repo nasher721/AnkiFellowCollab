@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import tempfile
 import unittest
 import urllib.error
 from io import BytesIO
@@ -23,11 +24,13 @@ from deckbridge_sync import (
     addon_manifest,
     config,
     create_platform_deck_from_anki,
+    collect_media_payload,
     DEFAULT_CONFIG,
     CONFIG_KEY,
     last_autoconfig_error,
     login_to_account,
     local_deck_names,
+    media_refs_from_fields,
     normalize_platform_url,
     open_settings,
     platform_url,
@@ -250,6 +253,35 @@ class TestVersion(unittest.TestCase):
     def test_manifest_is_version_source(self):
         self.assertEqual(addon_manifest()['version'], '0.2.0')
         self.assertEqual(ADDON_VERSION, addon_manifest()['version'])
+
+
+class TestMediaSync(unittest.TestCase):
+    def test_media_refs_from_fields_extracts_images_and_sounds(self):
+        refs = media_refs_from_fields({
+            'Front': '<div><img src="neuro image.png"><img src=https://example.com/remote.png></div>',
+            'Back': '[sound:clip.mp3] <img src="data:image/png;base64,abc"> <img src="../nested/local.svg">',
+            'Extra': '[sound:clip.mp3]',
+        })
+
+        self.assertEqual(refs, ['neuro image.png', 'clip.mp3', 'local.svg'])
+
+    @patch('deckbridge_sync.media_dir')
+    def test_collect_media_payload_reads_local_media_file(self, mock_media_dir):
+        with tempfile.TemporaryDirectory() as media_root:
+            mock_media_dir.return_value = media_root
+            image_path = os.path.join(media_root, 'image.png')
+            with open(image_path, 'wb') as image_file:
+                image_file.write(b'png-bytes')
+
+            payload = collect_media_payload([{
+                'id': 'anki-1',
+                'mediaRefs': ['image.png', 'missing.png', '../image.png'],
+            }])
+
+        self.assertEqual(list(payload.keys()), ['image.png'])
+        self.assertEqual(payload['image.png']['mimeType'], 'image/png')
+        self.assertEqual(payload['image.png']['sha256'], 'ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56')
+        self.assertEqual(payload['image.png']['dataBase64'], 'cG5nLWJ5dGVz')
 
 
 class TestDefaultConfig(unittest.TestCase):

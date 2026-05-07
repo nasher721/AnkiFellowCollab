@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { DeckCard } from './types';
+import { renderMediaHtml } from './media';
 import {
   type CardProgress,
   type Rating,
@@ -183,7 +184,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
           <div className="study-card-face study-card-front">
             <div
               className="study-card-content"
-              dangerouslySetInnerHTML={{ __html: fieldVal(currentCard, 'Front') }}
+              dangerouslySetInnerHTML={{ __html: renderMediaHtml(deckId, fieldVal(currentCard, 'Front')) }}
             />
             {!flipped && <span className="study-flip-hint">Click or press Space to reveal</span>}
           </div>
@@ -192,7 +193,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
               <hr className="study-divider" />
               <div
                 className="study-card-content"
-                dangerouslySetInnerHTML={{ __html: fieldVal(currentCard, 'Back') }}
+                dangerouslySetInnerHTML={{ __html: renderMediaHtml(deckId, fieldVal(currentCard, 'Back')) }}
               />
             </div>
           )}

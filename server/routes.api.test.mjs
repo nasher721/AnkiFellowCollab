@@ -857,6 +857,42 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
   assert.equal(conflictBatch.body.state.sync.lastAddonSync.stats.conflicts, 2);
 });
 
+test('Anki add-on sync persists media and serves it through authenticated route', async () => {
+  const { app } = await createTestApp();
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+  const filename = 'neuro-image.png';
+
+  const synced = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'overwrite-platform',
+      source: 'DeckBridge Sync media test',
+      cards: [{
+        id: 'anki-media-route-1',
+        ankiNoteId: 9901,
+        fields: { Front: `<img src="${filename}">`, Back: 'Image answer' },
+        mediaRefs: [filename]
+      }],
+      media: {
+        [filename]: {
+          mimeType: 'image/png',
+          sha256: 'a'.repeat(64),
+          dataBase64: bytes.toString('base64')
+        }
+      }
+    }), 'you', 'You').expect(200);
+
+  assert.equal(synced.body.state.decks[0].media[filename].mimeType, 'image/png');
+
+  const media = await asUser(request(app)
+    .get(`/api/decks/deck-demo-zanki/media/${encodeURIComponent(filename)}`), 'you', 'You')
+    .expect(200);
+
+  assert.equal(media.headers['content-type'], 'image/png');
+  assert.equal(media.headers['cache-control'], 'private, max-age=3600');
+  assert.deepEqual(media.body, bytes);
+});
+
 test('Anki add-on can create the first DeckBridge workspace from a local deck', async () => {
   const { app } = await createTestApp();
 

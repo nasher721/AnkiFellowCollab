@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import mimetypes
 import os
 import re
 import socket
@@ -10,27 +13,65 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, Iterable, List, Optional
 
-from aqt import gui_hooks, mw
-from aqt.qt import (
-    QAction,
-    QCheckBox,
-    QComboBox,
-    QDesktopServices,
-    QDialog,
-    QDialogButtonBox,
-    QFormLayout,
-    QLabel,
-    QLineEdit,
-    QMenu,
-    QPlainTextEdit,
-    QPushButton,
-    QSpinBox,
-    QTimer,
-    QUrl,
-    QVBoxLayout,
-    QWidget,
-)
-from aqt.utils import showInfo, tooltip
+try:
+    from aqt import gui_hooks, mw
+    from aqt.qt import (
+        QAction,
+        QCheckBox,
+        QComboBox,
+        QDesktopServices,
+        QDialog,
+        QDialogButtonBox,
+        QFormLayout,
+        QLabel,
+        QLineEdit,
+        QMenu,
+        QPlainTextEdit,
+        QPushButton,
+        QSpinBox,
+        QTimer,
+        QUrl,
+        QVBoxLayout,
+        QWidget,
+    )
+    from aqt.utils import showInfo, tooltip
+except ImportError:
+    class _QtStub:
+        class StandardButton:
+            Save = 1
+            Cancel = 2
+
+        class ButtonRole:
+            ActionRole = 1
+
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def __getattr__(self, _name: str) -> "_QtStub":
+            return self
+
+        def __call__(self, *_args: Any, **_kwargs: Any) -> "_QtStub":
+            return self
+
+        def __or__(self, _other: Any) -> int:
+            return 0
+
+        def append(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def connect(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+    gui_hooks = _QtStub()
+    mw = _QtStub()
+    QAction = QCheckBox = QComboBox = QDesktopServices = QDialog = QDialogButtonBox = QFormLayout = _QtStub
+    QLabel = QLineEdit = QMenu = QPlainTextEdit = QPushButton = QSpinBox = QTimer = QUrl = QVBoxLayout = QWidget = _QtStub
+
+    def showInfo(*_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    def tooltip(*_args: Any, **_kwargs: Any) -> None:
+        pass
 
 
 ADDON_NAME = "DeckBridge Sync"
@@ -47,6 +88,10 @@ LEGACY_LOCAL_PLATFORM_URLS = {
     "http://127.0.0.1:5174",
 }
 SUPPORTED_CONFLICT_POLICIES = ("detect", "overwrite-platform")
+MEDIA_REF_RE = re.compile(
+    r"""<img\b[^>]*\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))|\[sound:([^\]]+)\]""",
+    re.IGNORECASE,
+)
 _last_autoconfig_error = ""
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -450,21 +495,66 @@ def note_state(note: Any) -> Dict[str, Any]:
     return {"due": min(due_values) if due_values else None, "state": state, "suspended": suspended}
 
 
+def media_refs_from_fields(fields: Dict[str, str]) -> List[str]:
+    refs: List[str] = []
+    seen = set()
+    for value in fields.values():
+        for match in MEDIA_REF_RE.finditer(str(value or "")):
+            raw = next((group for group in match.groups() if group), "")
+            parsed = urllib.parse.urlsplit(raw.strip())
+            if parsed.scheme.lower() in ("http", "https", "data"):
+                continue
+            filename = os.path.basename(urllib.parse.unquote(raw.strip()))
+            if filename and filename not in seen:
+                refs.append(filename)
+                seen.add(filename)
+    return refs
+
+
+def media_dir() -> str:
+    return str(mw.col.media.dir())
+
+
+def collect_media_payload(cards: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
+    payload: Dict[str, Dict[str, str]] = {}
+    root = media_dir()
+    for card in cards:
+        for ref in card.get("mediaRefs") or []:
+            filename = os.path.basename(str(ref or ""))
+            if not filename or filename in payload:
+                continue
+            try:
+                with open(os.path.join(root, filename), "rb") as media_file:
+                    data = media_file.read()
+            except OSError:
+                continue
+            mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            payload[filename] = {
+                "filename": filename,
+                "mimeType": mime_type,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "dataBase64": base64.b64encode(data).decode("ascii"),
+            }
+    return payload
+
+
 def note_to_card(note: Any) -> Dict[str, Any]:
     model = note.note_type()
     field_names = list(note.keys())
     state = note_state(note)
+    fields = {name: str(note[name]) for name in field_names}
     return {
         "id": f"anki-{note.id}",
         "ankiNoteId": int(note.id),
         "type": model.get("name", "Basic"),
         "modelName": model.get("name", "Basic"),
         "fieldOrder": field_names,
-        "fields": {name: str(note[name]) for name in field_names},
+        "fields": fields,
         "tags": list(note.tags),
         "due": state["due"],
         "state": state["state"],
         "suspended": state["suspended"],
+        "mediaRefs": media_refs_from_fields(fields),
         "modifiedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(getattr(note, "mod", time.time()))),
         "modifiedBy": "Anki",
         "sourceDeckName": active_local_deck(),
@@ -499,6 +589,7 @@ def sync_payload(
             "fingerprint": socket.gethostname(),
         },
     }
+    payload["media"] = collect_media_payload(payload["cards"])
     if batch:
         payload["batch"] = batch
     return payload
