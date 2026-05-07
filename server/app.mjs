@@ -14,6 +14,20 @@ import { createRepository } from './repositories/index.mjs';
 import { ensureDataDirs, loadState, paths, saveState } from './store.mjs';
 import { createUserToken, listUserTokens, revokeUserToken } from './tokens.mjs';
 
+const ADDON_PACKAGE_FILENAME = 'deckbridge-sync.ankiaddon';
+const ADDON_MANIFEST_PATH = path.resolve(process.cwd(), 'addons', 'deckbridge_sync', 'manifest.json');
+
+function resolveManifestMinVersion(manifest) {
+  if (manifest.min_version || manifest.minVersion) return manifest.min_version || manifest.minVersion;
+  if (Number.isInteger(manifest.min_point_version)) {
+    const major = Math.floor(manifest.min_point_version / 10000);
+    const minor = Math.floor((manifest.min_point_version % 10000) / 100);
+    const patch = manifest.min_point_version % 100;
+    return `${major}.${minor}.${patch}`;
+  }
+  return '0.1.0';
+}
+
 function parseMentions(body) {
   const regex = /@(\w[\w.-]*)/g;
   const matches = new Set();
@@ -79,7 +93,11 @@ export function createApp(options = {}) {
 
   app.get('/api/me', auth.requireUser, async (req, res, next) => {
     try {
-      res.json(await repository.getMe(req.user));
+      const me = await repository.getMe(req.user);
+      const decks = typeof repository.listDecks === 'function'
+        ? await repository.listDecks(req.user)
+        : [];
+      res.json({ ...me, decks });
     } catch (error) {
       next(error);
     }
@@ -102,7 +120,7 @@ export function createApp(options = {}) {
       const label = typeof req.body.label === 'string' && req.body.label.trim()
         ? req.body.label.trim()
         : 'Anki Add-on';
-      const token = await createUserToken(auth.supabase, req.user.id, label);
+      const token = await createUserToken(auth.supabase, req.user, label);
       res.status(201).json(token);
     } catch (error) {
       next(error);
@@ -121,13 +139,24 @@ export function createApp(options = {}) {
 
   // --- Add-on distribution ---
 
-  app.get('/api/addon/version', (_req, res) => {
-    res.json({ version: '0.2.0', minVersion: '0.1.0' });
+  app.get('/api/addon/version', async (_req, res, next) => {
+    try {
+      const manifest = JSON.parse(await fs.readFile(ADDON_MANIFEST_PATH, 'utf8'));
+      res.json({
+        version: manifest.version || '0.0.0',
+        minVersion: resolveManifestMinVersion(manifest),
+        package: manifest.package,
+        name: manifest.name,
+        downloadUrl: '/api/addon/download'
+      });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get('/api/addon/download', async (_req, res, next) => {
     try {
-      const addonPath = path.resolve(process.cwd(), 'dist', 'deckbridge-sync.ankiaddon');
+      const addonPath = path.resolve(process.cwd(), 'dist', ADDON_PACKAGE_FILENAME);
       try {
         await fs.access(addonPath);
       } catch {
@@ -135,7 +164,7 @@ export function createApp(options = {}) {
       }
       res.set({
         'Content-Type': 'application/octet-stream',
-        'Content-Disposition': 'attachment; filename="deckbridge-sync.ankiaddon"',
+        'Content-Disposition': `attachment; filename="${ADDON_PACKAGE_FILENAME}"`,
         'Cache-Control': 'public, max-age=3600'
       });
       res.sendFile(addonPath);

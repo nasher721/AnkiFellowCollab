@@ -11,6 +11,32 @@ create index if not exists user_tokens_user_id_idx on public.user_tokens (user_i
 
 alter table public.user_tokens enable row level security;
 
-create policy "tokens read own" on public.user_tokens for select using (auth.uid()::text = user_id);
-create policy "tokens insert own" on public.user_tokens for insert with check (auth.uid()::text = user_id);
-create policy "tokens delete own" on public.user_tokens for delete using (auth.uid()::text = user_id);
+do $$
+begin
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'user_tokens'
+      and policyname = 'tokens read own'
+  ) then
+    create policy "tokens read own" on public.user_tokens for select using (auth.uid()::text = user_id);
+  end if;
+
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'user_tokens'
+      and policyname = 'tokens insert own'
+  ) then
+    create policy "tokens insert own" on public.user_tokens for insert with check (auth.uid()::text = user_id);
+  end if;
+
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'user_tokens'
+      and policyname = 'tokens delete own'
+  ) then
+    create policy "tokens delete own" on public.user_tokens for delete using (auth.uid()::text = user_id);
+  end if;
+end $$;

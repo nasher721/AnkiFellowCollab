@@ -41,6 +41,28 @@ export interface ApiToken {
 
 export interface CreatedToken extends ApiToken {
   raw: string;
+  token?: string;
+}
+
+export interface AddonVersion {
+  version: string;
+  minVersion: string;
+  package?: string;
+  name?: string;
+  downloadUrl?: string;
+}
+
+export interface AddonDownloadAvailability {
+  available: boolean;
+  status: number | null;
+  code?: 'addon_not_built' | 'download_unavailable' | 'network_error';
+  message?: string;
+}
+
+export interface MeResponse {
+  user: User;
+  memberships: DeckMember[];
+  decks?: DeckSummary[];
 }
 
 export interface Comment {
@@ -102,7 +124,34 @@ export interface Template {
 
 export const api = {
   health: () => jsonRequest<{ ok: boolean; dataDir: string }>('/api/health'),
-  addonVersion: () => jsonRequest<{ version: string; minVersion: string }>('/api/addon/version'),
+  addonVersion: () => jsonRequest<AddonVersion>('/api/addon/version'),
+  addonDownloadAvailability: async (downloadUrl = '/api/addon/download'): Promise<AddonDownloadAvailability> => {
+    try {
+      const response = await fetch(downloadUrl, { method: 'HEAD' });
+      if (response.ok) return { available: true, status: response.status };
+      if (response.status === 404) {
+        return {
+          available: false,
+          status: response.status,
+          code: 'addon_not_built',
+          message: 'Add-on package is not built yet. Run npm run package:anki-addon on the server, then retry the download.'
+        };
+      }
+      return {
+        available: false,
+        status: response.status,
+        code: 'download_unavailable',
+        message: `Download endpoint returned ${response.status}.`
+      };
+    } catch (error) {
+      return {
+        available: false,
+        status: null,
+        code: 'network_error',
+        message: error instanceof Error ? error.message : 'Unable to check add-on download availability.'
+      };
+    }
+  },
   tokens: {
     list: () => jsonRequest<{ tokens: ApiToken[] }>('/api/tokens'),
     create: (label?: string) =>
@@ -145,7 +194,11 @@ export const api = {
         headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
       }).then(() => undefined)
   },
-  me: () => jsonRequest<{ user: User; memberships: DeckMember[] }>('/api/me'),
+  me: () => jsonRequest<MeResponse>('/api/me'),
+  meWithToken: (token: string) =>
+    jsonRequest<MeResponse>('/api/me', {
+      headers: { Authorization: `Bearer ${token}` }
+    }),
   decks: () => jsonRequest<{ decks: DeckSummary[] }>('/api/decks'),
   deck: (deckId: string) => jsonRequest<AppState>(`/api/decks/${deckId}`),
   state: () => jsonRequest<AppState>('/api/state'),

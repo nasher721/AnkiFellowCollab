@@ -28,7 +28,7 @@ export async function resolveTokenUser(supabase, rawToken) {
     .from('user_tokens')
     .select('user_id, id')
     .eq('token_hash', hash)
-    .single();
+    .maybeSingle();
   if (error || !data) return null;
   // Touch last_used_at without blocking the request
   supabase
@@ -47,12 +47,21 @@ export async function resolveTokenUser(supabase, rawToken) {
 }
 
 /**
- * Create a token row in Supabase and return { id, raw, label, createdAt }.
+ * Create a token row in Supabase and return { id, raw, token, label, createdAt }.
  * The raw token is only ever returned here — not stored.
  */
-export async function createUserToken(supabase, userId, label = 'Anki Add-on') {
+export async function createUserToken(supabase, user, label = 'Anki Add-on') {
+  const userId = typeof user === 'string' ? user : user.id;
   const { raw, hash } = generateToken();
   const id = crypto.randomUUID();
+  if (typeof user === 'object' && user.email) {
+    const { error: profileError } = await supabase.from('profiles').upsert({
+      id: user.id,
+      email: user.email,
+      name: user.name || user.email
+    });
+    if (profileError) throw new Error(`Failed to prepare token profile: ${profileError.message}`);
+  }
   const { error } = await supabase.from('user_tokens').insert({
     id,
     user_id: userId,
@@ -61,7 +70,8 @@ export async function createUserToken(supabase, userId, label = 'Anki Add-on') {
     created_at: new Date().toISOString()
   });
   if (error) throw new Error(`Failed to create token: ${error.message}`);
-  return { id, raw, label, createdAt: new Date().toISOString() };
+  const createdAt = new Date().toISOString();
+  return { id, raw, token: raw, label, createdAt };
 }
 
 /**

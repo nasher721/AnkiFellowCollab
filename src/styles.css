@@ -1268,6 +1268,59 @@ button:disabled {
   margin-bottom: 16px;
 }
 
+.wizard-status-card,
+.wizard-test-card,
+.wizard-config-summary,
+.wizard-hint-box,
+.wizard-success {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  display: grid;
+  gap: 5px;
+  font-size: 0.84rem;
+  color: #334155;
+}
+
+.wizard-test-card {
+  gap: 8px;
+}
+
+.wizard-test-card p {
+  margin-bottom: 2px;
+}
+
+.wizard-success {
+  border-color: #b7ebcc;
+  background: var(--green-soft);
+  color: #14734f;
+  font-weight: 700;
+}
+
+.wizard-success-inline {
+  color: #14734f;
+  font-weight: 700;
+}
+
+.wizard-error-inline {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.wizard-empty-state {
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-weight: 700;
+  line-height: 1.45;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
 .wizard-hint {
   font-size: 0.82rem;
   color: var(--text-muted, #888);
@@ -1329,7 +1382,8 @@ button:disabled {
   margin-bottom: 16px;
 }
 
-.wizard-select {
+.wizard-select,
+.wizard-input {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--border, #e5e7eb);

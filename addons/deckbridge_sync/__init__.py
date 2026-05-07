@@ -36,6 +36,9 @@ ADDON_NAME = "DeckBridge Sync"
 ADDON_VERSION = "0.2.0"
 TRACKING_MODEL = "DeckBridge Sync"
 TRACKING_TAG_PREFIX = "deckbridge_card_"
+CONFIG_KEY = "deckbridge"
+SUPPORTED_CONFLICT_POLICIES = ("detect", "overwrite-platform")
+_last_autoconfig_error = ""
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "platform_url": "http://localhost:4175",
@@ -54,18 +57,205 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "sync_on_close": False,
 }
 
+DEFAULT_STORED_CONFIG: Dict[str, Any] = {
+    "url": DEFAULT_CONFIG["platform_url"],
+    "token": "",
+    "deckMappings": [],
+    "autoSync": False,
+    "auto_sync_minutes": DEFAULT_CONFIG["auto_sync_minutes"],
+    "timeout_seconds": DEFAULT_CONFIG["timeout_seconds"],
+    "batch_size": DEFAULT_CONFIG["batch_size"],
+    "tag_filter": DEFAULT_CONFIG["tag_filter"],
+    "include_suspended": DEFAULT_CONFIG["include_suspended"],
+    "create_missing_notes": DEFAULT_CONFIG["create_missing_notes"],
+    "pull_overwrites_local": DEFAULT_CONFIG["pull_overwrites_local"],
+    "sync_on_profile_open": DEFAULT_CONFIG["sync_on_profile_open"],
+    "sync_on_close": DEFAULT_CONFIG["sync_on_close"],
+}
+
 _timer: Optional[QTimer] = None
 _sync_running = False
 
 
+def _collection_config() -> Dict[str, Any]:
+    try:
+        stored = mw.col.conf.get(CONFIG_KEY, {})
+        return stored if isinstance(stored, dict) else {}
+    except Exception:
+        return {}
+
+
+def _legacy_addon_config() -> Dict[str, Any]:
+    try:
+        stored = mw.addonManager.getConfig(__name__) or {}
+        return stored if isinstance(stored, dict) else {}
+    except Exception:
+        return {}
+
+
+def _first_mapping(stored: Dict[str, Any]) -> Dict[str, Any]:
+    mappings = stored.get("deckMappings")
+    if isinstance(mappings, list) and mappings and isinstance(mappings[0], dict):
+        return mappings[0]
+    return {}
+
+
+def normalize_platform_url(value: str) -> str:
+    raw = str(value or "").strip()
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        raise RuntimeError("DeckBridge platform URL must be a valid http(s) URL.")
+    if parsed.username or parsed.password:
+        raise RuntimeError("DeckBridge platform URL must not include credentials.")
+    if parsed.query or parsed.fragment:
+        raise RuntimeError("DeckBridge platform URL must not include query parameters or fragments.")
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise RuntimeError("DeckBridge platform URL includes an invalid port.") from error
+
+    host = parsed.hostname or ""
+    if not host:
+        raise RuntimeError("DeckBridge platform URL must include a host.")
+    host = host.lower()
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    path = parsed.path.rstrip("/")
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), netloc, path, "", ""))
+
+
+def normalize_api_token(value: str) -> str:
+    token = str(value or "").strip()
+    if not token:
+        raise RuntimeError("DeckBridge API token is required.")
+    if not token.startswith("db_"):
+        raise RuntimeError("DeckBridge API token must start with db_.")
+    return token
+
+
+def _stored_from_flat(flat: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    base_config = {**DEFAULT_STORED_CONFIG, **(base or {})}
+    mapping = _first_mapping(base_config)
+    local_deck = str(flat.get("local_deck", mapping.get("localDeck", "")) or "").strip()
+    deck_id = str(flat.get("deck_id", mapping.get("deckId", DEFAULT_CONFIG["deck_id"])) or "").strip()
+    conflict_policy = str(flat.get("conflict_policy", mapping.get("conflictPolicy", "detect")) or "detect")
+    if conflict_policy not in SUPPORTED_CONFLICT_POLICIES:
+        conflict_policy = "detect"
+
+    next_config = {
+        **base_config,
+        "url": normalize_platform_url(str(flat.get("platform_url", flat.get("url", base_config.get("url", DEFAULT_CONFIG["platform_url"]))) or "")),
+        "token": str(flat.get("api_token", flat.get("token", base_config.get("token", ""))) or "").strip(),
+        "autoSync": bool(flat.get("autoSync", base_config.get("autoSync", False))),
+        "auto_sync_minutes": int(flat.get("auto_sync_minutes", base_config.get("auto_sync_minutes", 0)) or 0),
+        "timeout_seconds": int(flat.get("timeout_seconds", base_config.get("timeout_seconds", 30)) or 30),
+        "batch_size": int(flat.get("batch_size", base_config.get("batch_size", 250)) or 250),
+        "tag_filter": str(flat.get("tag_filter", base_config.get("tag_filter", "")) or "").strip(),
+        "include_suspended": bool(flat.get("include_suspended", base_config.get("include_suspended", True))),
+        "create_missing_notes": bool(flat.get("create_missing_notes", base_config.get("create_missing_notes", True))),
+        "pull_overwrites_local": bool(flat.get("pull_overwrites_local", base_config.get("pull_overwrites_local", False))),
+        "sync_on_profile_open": bool(flat.get("sync_on_profile_open", base_config.get("sync_on_profile_open", False))),
+        "sync_on_close": bool(flat.get("sync_on_close", base_config.get("sync_on_close", False))),
+    }
+    next_config["deckMappings"] = [{
+        "localDeck": local_deck,
+        "deckId": deck_id,
+        "conflictPolicy": conflict_policy,
+    }]
+    return next_config
+
+
+def _validated_stored_from_flat(flat: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    stored = _stored_from_flat(flat, base)
+    token = str(stored.get("token", "") or "").strip()
+    if token:
+        stored["token"] = normalize_api_token(token)
+    return stored
+
+
+def _flat_from_stored(stored: Dict[str, Any]) -> Dict[str, Any]:
+    mapping = _first_mapping(stored)
+    auto_sync_minutes = int(stored.get("auto_sync_minutes", DEFAULT_CONFIG["auto_sync_minutes"]) or 0)
+    return {
+        **DEFAULT_CONFIG,
+        "platform_url": stored.get("url", stored.get("platform_url", DEFAULT_CONFIG["platform_url"])),
+        "api_token": stored.get("token", stored.get("api_token", "")),
+        "deck_id": mapping.get("deckId", stored.get("deck_id", DEFAULT_CONFIG["deck_id"])),
+        "local_deck": mapping.get("localDeck", stored.get("local_deck", "")),
+        "conflict_policy": mapping.get("conflictPolicy", stored.get("conflict_policy", "detect")),
+        "auto_sync_minutes": auto_sync_minutes,
+        "autoSync": bool(stored.get("autoSync", auto_sync_minutes > 0)),
+        "timeout_seconds": stored.get("timeout_seconds", DEFAULT_CONFIG["timeout_seconds"]),
+        "batch_size": stored.get("batch_size", DEFAULT_CONFIG["batch_size"]),
+        "tag_filter": stored.get("tag_filter", DEFAULT_CONFIG["tag_filter"]),
+        "include_suspended": stored.get("include_suspended", DEFAULT_CONFIG["include_suspended"]),
+        "create_missing_notes": stored.get("create_missing_notes", DEFAULT_CONFIG["create_missing_notes"]),
+        "pull_overwrites_local": stored.get("pull_overwrites_local", DEFAULT_CONFIG["pull_overwrites_local"]),
+        "sync_on_profile_open": stored.get("sync_on_profile_open", DEFAULT_CONFIG["sync_on_profile_open"]),
+        "sync_on_close": stored.get("sync_on_close", DEFAULT_CONFIG["sync_on_close"]),
+    }
+
+
 def config() -> Dict[str, Any]:
-    stored = mw.addonManager.getConfig(__name__) or {}
-    return {**DEFAULT_CONFIG, **stored}
+    stored = _collection_config()
+    if stored:
+        return _flat_from_stored(stored)
+    legacy = _legacy_addon_config()
+    if legacy:
+        return _flat_from_stored(_stored_from_flat({**DEFAULT_CONFIG, **legacy}))
+    return DEFAULT_CONFIG.copy()
+
+
+def _write_config(stored: Dict[str, Any]) -> None:
+    mw.col.conf[CONFIG_KEY] = stored
+    try:
+        mw.col.set_config(CONFIG_KEY, stored)
+    except Exception:
+        pass
 
 
 def save_config(next_config: Dict[str, Any]) -> None:
-    mw.addonManager.writeConfig(__name__, {**DEFAULT_CONFIG, **next_config})
+    stored = _validated_stored_from_flat({**config(), **next_config}, _collection_config())
+    _write_config(stored)
     configure_timer()
+
+
+def _single_query_value(params: Dict[str, List[str]], name: str, *, required: bool = True) -> str:
+    values = params.get(name, [])
+    if len(values) > 1:
+        raise RuntimeError(f"DeckBridge auto-config link has multiple {name} values.")
+    value = values[0].strip() if values else ""
+    if required and not value:
+        raise RuntimeError(f"DeckBridge auto-config link is missing {name}.")
+    return value
+
+
+def _autoconfig_values(url_string: str) -> Dict[str, str]:
+    parsed = urllib.parse.urlparse(str(url_string or ""))
+    if parsed.scheme.lower() != "anki" or parsed.netloc.lower() != "deckbridge":
+        raise RuntimeError("DeckBridge auto-config link must start with anki://deckbridge.")
+    params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    platform = _single_query_value(params, "url")
+    token = _single_query_value(params, "token")
+    deck_id = _single_query_value(params, "deckId")
+    local_deck = _single_query_value(params, "localDeck", required=False)
+    if not local_deck:
+        local_deck = _single_query_value(params, "localDeckName", required=False)
+    conflict_policy = _single_query_value(params, "conflictPolicy", required=False) or "detect"
+    if conflict_policy not in SUPPORTED_CONFLICT_POLICIES:
+        raise RuntimeError("DeckBridge auto-config link has an invalid conflictPolicy.")
+    return {
+        "platform_url": normalize_platform_url(platform),
+        "api_token": normalize_api_token(token),
+        "deck_id": deck_id,
+        "local_deck": local_deck,
+        "conflict_policy": conflict_policy,
+    }
+
+
+def last_autoconfig_error() -> str:
+    return _last_autoconfig_error
 
 
 def apply_autoconfig(url_string: str) -> bool:
@@ -74,33 +264,36 @@ def apply_autoconfig(url_string: str) -> bool:
     as the add-on config. Returns True if the config was applied, False on error.
     Called from the URL scheme handler registered below.
     """
+    global _last_autoconfig_error
+    _last_autoconfig_error = ""
     try:
-        parsed = urllib.parse.urlparse(url_string)
-        if parsed.scheme != "anki" or parsed.netloc != "deckbridge":
-            return False
-        params = urllib.parse.parse_qs(parsed.query)
-        platform = params.get("url", [""])[0].strip()
-        token = params.get("token", [""])[0].strip()
-        deck_id = params.get("deckId", [""])[0].strip()
-        if not platform or not token:
-            return False
+        values = _autoconfig_values(url_string)
         next_config = config()
-        next_config["platform_url"] = platform
-        next_config["api_token"] = token
-        if deck_id:
-            next_config["deck_id"] = deck_id
+        next_config["platform_url"] = values["platform_url"]
+        next_config["api_token"] = values["api_token"]
+        next_config["deck_id"] = values["deck_id"]
+        if values["local_deck"]:
+            next_config["local_deck"] = values["local_deck"]
+        next_config["conflict_policy"] = values["conflict_policy"]
+        validate_token(next_config)
         save_config(next_config)
         return True
-    except Exception:
+    except Exception as error:
+        _last_autoconfig_error = str(error)
         return False
 
 
 def platform_url(cfg: Dict[str, Any], path: str) -> str:
-    return f"{str(cfg['platform_url']).rstrip('/')}{path}"
+    return f"{normalize_platform_url(str(cfg['platform_url']))}{path}"
 
 
-def request_json(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    cfg = config()
+def request_json(
+    method: str,
+    path: str,
+    payload: Optional[Dict[str, Any]] = None,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    cfg = cfg or config()
     body = json.dumps(payload or {}).encode("utf-8") if payload is not None else None
     headers = {"Accept": "application/json"}
     if payload is not None:
@@ -123,6 +316,39 @@ def request_json(method: str, path: str, payload: Optional[Dict[str, Any]] = Non
         raise RuntimeError(f"DeckBridge API {error.code}: {message}") from error
     except (urllib.error.URLError, socket.timeout) as error:
         raise RuntimeError(f"DeckBridge is unreachable: {error}") from error
+
+
+def validate_token(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    active_config = {**(cfg or config())}
+    active_config["platform_url"] = normalize_platform_url(str(active_config.get("platform_url", "")))
+    active_config["api_token"] = normalize_api_token(str(active_config.get("api_token", "")))
+    result = request_json("GET", "/api/me", cfg=active_config)
+    user = result.get("user") or {}
+    if not user.get("email") and not user.get("name"):
+        raise RuntimeError("DeckBridge token validation returned no user.")
+    decks = result.get("decks", [])
+    if decks is not None and not isinstance(decks, list):
+        raise RuntimeError("DeckBridge token validation returned an invalid deck list.")
+    return result
+
+
+def validated_connection_config(next_config: Dict[str, Any]) -> Dict[str, Any]:
+    candidate = {**config(), **next_config}
+    candidate["platform_url"] = normalize_platform_url(str(candidate.get("platform_url", "")))
+    candidate["api_token"] = normalize_api_token(str(candidate.get("api_token", "")))
+    validate_token(candidate)
+    return candidate
+
+
+def local_deck_names() -> List[str]:
+    try:
+        if hasattr(mw.col.decks, "all_names_and_ids"):
+            return sorted(str(deck.name) for deck in mw.col.decks.all_names_and_ids())
+        if hasattr(mw.col.decks, "allNames"):
+            return sorted(str(name) for name in mw.col.decks.allNames())
+    except Exception:
+        pass
+    return []
 
 
 def active_local_deck() -> str:
@@ -349,11 +575,12 @@ def run_guarded(label: str, callback: Any) -> None:
 
 def test_connection() -> None:
     def task() -> None:
-        me = request_json("GET", "/api/me")
-        decks = request_json("GET", "/api/decks")
+        me = validate_token()
+        user = me.get("user", {})
+        decks = me.get("decks", [])
         showInfo(
-            f"Connected as {me.get('user', {}).get('name', 'DeckBridge user')}.\n"
-            f"Visible decks: {len(decks.get('decks', []))}",
+            f"Connected as {user.get('email') or user.get('name') or 'DeckBridge user'}.\n"
+            f"Visible decks: {len(decks)}",
             title=ADDON_NAME,
         )
 
@@ -417,7 +644,11 @@ class SettingsDialog(QDialog):
         self.deck_id = QLineEdit(str(cfg["deck_id"]))
         self.deck_id.setPlaceholderText("deck-id from DeckBridge")
 
-        self.local_deck = QLineEdit(str(cfg["local_deck"]))
+        self.local_deck = QComboBox()
+        self.local_deck.setEditable(True)
+        self.local_deck.addItem("")
+        self.local_deck.addItems(local_deck_names())
+        self.local_deck.setCurrentText(str(cfg["local_deck"]))
         self.local_deck.setPlaceholderText("My Anki Deck (leave blank to use active deck)")
 
         test_btn = QPushButton("Test connection")
@@ -449,6 +680,8 @@ class SettingsDialog(QDialog):
         self.sync_on_profile_open.setChecked(bool(cfg["sync_on_profile_open"]))
         self.sync_on_close = QCheckBox()
         self.sync_on_close.setChecked(bool(cfg["sync_on_close"]))
+        self.pull_after_save = QCheckBox()
+        self.pull_after_save.setChecked(False)
 
         conn_form = QFormLayout()
         conn_form.addRow(setup_label)
@@ -468,6 +701,7 @@ class SettingsDialog(QDialog):
         sync_form.addRow("Include suspended cards", self.include_suspended)
         sync_form.addRow("Create missing Anki notes on pull", self.create_missing_notes)
         sync_form.addRow("Pull overwrites local notes", self.pull_overwrites_local)
+        sync_form.addRow("Pull from DeckBridge after saving", self.pull_after_save)
         sync_form.addRow("Sync on profile open", self.sync_on_profile_open)
         sync_form.addRow("Sync before profile close", self.sync_on_close)
 
@@ -485,25 +719,23 @@ class SettingsDialog(QDialog):
         """Temporarily apply form values and test the connection."""
         original = config()
         try:
-            mw.addonManager.writeConfig(__name__, {**DEFAULT_CONFIG, **self.values()})
-            me = request_json("GET", "/api/me")
-            decks = request_json("GET", "/api/decks")
+            me = validate_token({**original, **self.values()})
+            user = me.get("user", {})
+            decks = me.get("decks", [])
             showInfo(
-                f"Connected as {me.get('user', {}).get('name', 'DeckBridge user')}.\n"
-                f"Visible decks: {len(decks.get('decks', []))}",
+                f"Connected as {user.get('email') or user.get('name') or 'DeckBridge user'}.\n"
+                f"Visible decks: {len(decks)}",
                 title=ADDON_NAME,
             )
         except Exception as error:
             showInfo(str(error), title=f"{ADDON_NAME}: Connection failed")
-        finally:
-            mw.addonManager.writeConfig(__name__, original)
 
     def values(self) -> Dict[str, Any]:
         return {
             "platform_url": self.platform_url.text().strip(),
             "api_token": self.api_token.text().strip(),
             "deck_id": self.deck_id.text().strip(),
-            "local_deck": self.local_deck.text().strip(),
+            "local_deck": self.local_deck.currentText().strip(),
             "conflict_policy": self.conflict_policy.currentText(),
             "auto_sync_minutes": self.auto_sync_minutes.value(),
             "timeout_seconds": self.timeout_seconds.value(),
@@ -520,8 +752,13 @@ class SettingsDialog(QDialog):
 def open_settings() -> None:
     dialog = SettingsDialog(mw)
     if dialog.exec():
-        save_config(dialog.values())
-        tooltip("DeckBridge Sync settings saved")
+        try:
+            save_config(validated_connection_config(dialog.values()))
+            tooltip("DeckBridge Sync settings saved")
+            if dialog.pull_after_save.isChecked():
+                QTimer.singleShot(0, pull_to_anki)
+        except Exception as error:
+            showInfo(str(error), title=f"{ADDON_NAME}: Settings not saved")
 
 
 def configure_timer() -> None:
@@ -585,8 +822,12 @@ def _handle_url_scheme(url: str) -> None:
             title=ADDON_NAME,
         )
     else:
+        detail = last_autoconfig_error()
+        message = "Could not apply auto-config link. Please configure manually via Settings."
+        if detail:
+            message += f"\n\nReason: {detail}"
         showInfo(
-            "Could not apply auto-config link. Please configure manually via Settings.",
+            message,
             title=ADDON_NAME,
         )
 
