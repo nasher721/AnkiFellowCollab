@@ -31,9 +31,11 @@ from deckbridge_sync import (
     normalize_platform_url,
     open_settings,
     platform_url,
+    post_cards,
     pull_to_anki,
     save_config,
     safe_tag,
+    sync_payload_chunks,
     tracking_tag,
     note_query,
     validate_token,
@@ -482,9 +484,10 @@ class TestTokenValidation(unittest.TestCase):
         self.assertNotIn('Authorization', request.headers)
 
     @patch('deckbridge_sync.save_config')
-    @patch('deckbridge_sync.sync_payload', return_value={'cards': [{'id': 'anki-1', 'fields': {'Front': 'A'}}]})
+    @patch('deckbridge_sync.collect_cards', return_value=[{'id': 'anki-1', 'fields': {'Front': 'A'}}])
     @patch('deckbridge_sync.request_json')
-    def test_create_platform_deck_from_anki_saves_returned_deck_id(self, mock_request, _mock_payload, mock_save):
+    @patch('deckbridge_sync.config', return_value={**DEFAULT_CONFIG, 'local_deck': 'Local Deck'})
+    def test_create_platform_deck_from_anki_saves_returned_deck_id(self, _mock_config, mock_request, _mock_collect, mock_save):
         mock_request.return_value = {
             'deck': {'id': 'deck-created', 'name': 'Created'},
             'result': {'stats': {'created': 1}},
@@ -498,6 +501,60 @@ class TestTokenValidation(unittest.TestCase):
         self.assertEqual(result['deck']['id'], 'deck-created')
         saved = mock_save.call_args[0][0]
         self.assertEqual(saved['deck_id'], 'deck-created')
+
+    @patch('deckbridge_sync.config')
+    def test_sync_payload_chunks_honors_batch_size(self, mock_config):
+        cfg = {**DEFAULT_CONFIG, 'local_deck': 'Local Deck', 'batch_size': 2}
+        mock_config.return_value = cfg
+        cards = [{'id': f'anki-{index}', 'fields': {'Front': str(index)}} for index in range(5)]
+
+        payloads = sync_payload_chunks(cards, dry_run=False, cfg=cfg)
+
+        self.assertEqual(len(payloads), 3)
+        self.assertEqual([len(payload['cards']) for payload in payloads], [2, 2, 1])
+        self.assertEqual(payloads[0]['batch']['index'], 0)
+        self.assertEqual(payloads[2]['batch']['total'], 3)
+        self.assertEqual(payloads[2]['batch']['totalCards'], 5)
+
+    @patch('deckbridge_sync.config')
+    def test_sync_payload_chunks_splits_by_request_size(self, mock_config):
+        cfg = {**DEFAULT_CONFIG, 'local_deck': 'Local Deck', 'batch_size': 5000}
+        mock_config.return_value = cfg
+        cards = [
+            {'id': 'anki-1', 'fields': {'Front': 'A' * 1_800_000}},
+            {'id': 'anki-2', 'fields': {'Front': 'B' * 1_800_000}},
+            {'id': 'anki-3', 'fields': {'Front': 'C'}},
+        ]
+
+        payloads = sync_payload_chunks(cards, dry_run=False, cfg=cfg)
+
+        self.assertEqual(len(payloads), 2)
+        self.assertEqual([len(payload['cards']) for payload in payloads], [1, 2])
+
+    @patch('deckbridge_sync.request_json')
+    @patch('deckbridge_sync.validate_token')
+    @patch('deckbridge_sync.collect_cards')
+    @patch('deckbridge_sync.config')
+    def test_post_cards_sends_chunks_and_aggregates_result(self, mock_config, mock_collect, mock_validate, mock_request):
+        cfg = {**DEFAULT_CONFIG, 'platform_url': 'https://deckbridge.example', 'api_token': 'db_token', 'deck_id': 'deck-1', 'local_deck': 'Local Deck', 'batch_size': 1}
+        mock_config.return_value = cfg
+        mock_collect.return_value = [
+            {'id': 'anki-1', 'fields': {'Front': 'A'}},
+            {'id': 'anki-2', 'fields': {'Front': 'B'}},
+        ]
+        mock_validate.return_value = {'decks': [{'id': 'deck-1'}]}
+        mock_request.side_effect = [
+            {'result': {'stats': {'total': 1, 'created': 1, 'updated': 0, 'skipped': 0, 'conflicts': 0, 'dryRun': False}, 'conflicts': []}},
+            {'result': {'stats': {'total': 1, 'created': 0, 'updated': 1, 'skipped': 0, 'conflicts': 0, 'dryRun': False}, 'conflicts': []}},
+        ]
+
+        result = post_cards(dry_run=False)
+
+        self.assertEqual(mock_request.call_count, 2)
+        self.assertEqual(result['result']['stats']['total'], 2)
+        self.assertEqual(result['result']['stats']['created'], 1)
+        self.assertEqual(result['result']['stats']['updated'], 1)
+        self.assertEqual(mock_request.call_args_list[0][0][1], '/api/decks/deck-1/sync/cards')
 
     @patch('deckbridge_sync.urllib.request.urlopen')
     def test_validate_token_rejects_non_db_without_network_call(self, mock_urlopen):

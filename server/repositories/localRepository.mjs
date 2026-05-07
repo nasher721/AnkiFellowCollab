@@ -12,6 +12,39 @@ function ensureCollections(state) {
   state.sync.lastAddonSync ??= null;
 }
 
+function mergeConflicts(existing = [], incoming = []) {
+  const merged = new Map();
+  for (const conflict of [...existing, ...incoming]) {
+    const key = `${conflict.cardId || conflict.id}:${conflict.source || ''}`;
+    merged.set(key, conflict);
+  }
+  return [...merged.values()];
+}
+
+function addonImportSyncResult(deck) {
+  if (deck.source?.format !== 'anki-addon') return null;
+  const syncedAt = deck.lastSyncedAt || deck.importedAt || nowIso();
+  const batch = deck.source.batch ? {
+    ...deck.source.batch,
+    received: deck.source.batch.index + 1,
+    complete: deck.source.batch.index + 1 >= deck.source.batch.total
+  } : null;
+  return {
+    syncedAt,
+    source: deck.source.source || 'DeckBridge Anki add-on',
+    client: deck.source.client || null,
+    stats: {
+      total: deck.cards.length,
+      created: deck.cards.length,
+      updated: 0,
+      skipped: 0,
+      conflicts: 0,
+      dryRun: false
+    },
+    ...(batch ? { batch } : {})
+  };
+}
+
 function collaboratorToUser(person) {
   return {
     id: person.id,
@@ -104,6 +137,12 @@ export function createLocalRepository() {
       }
       state.decks.unshift(deck);
       state.activeDeckId = deck.id;
+      const addonSyncResult = addonImportSyncResult(deck);
+      if (addonSyncResult) {
+        state.sync.lastAddonSync = addonSyncResult;
+        state.sync.lastCheckedAt = addonSyncResult.syncedAt;
+        state.sync.lastPushAt = addonSyncResult.syncedAt;
+      }
       state.activity.unshift({
         id: `act-${randomUUID()}`,
         kind: 'import',
@@ -224,19 +263,25 @@ export function createLocalRepository() {
       ensureCollections(state);
       const { deck } = requireRole(state, user.id, deckId, 'editor');
       const result = mergeAddonCards(deck, syncInput, user.name);
-      const lastAddonSync = buildAddonSyncResult(syncInput, result);
+      const lastAddonSync = buildAddonSyncResult(syncInput, result, state.sync.lastAddonSync);
+      const isFirstBatchChunk = !syncInput.batch || syncInput.batch.index === 0;
+      const isFinalBatchChunk = !syncInput.batch || syncInput.batch.index + 1 >= syncInput.batch.total;
       state.sync.lastAddonSync = lastAddonSync;
       state.sync.lastCheckedAt = result.syncedAt;
-      state.sync.conflicts = result.conflicts;
+      state.sync.conflicts = isFirstBatchChunk
+        ? result.conflicts
+        : mergeConflicts(state.sync.conflicts, result.conflicts);
       if (!syncInput.dryRun) {
         state.sync.lastPullAt = syncInput.conflictPolicy === 'overwrite-platform' ? result.syncedAt : state.sync.lastPullAt;
         state.sync.lastPushAt = result.syncedAt;
-        state.activity.unshift({
-          id: `act-${randomUUID()}`,
-          kind: 'sync',
-          text: `${user.name} synced ${result.stats.total} Anki card(s): ${result.stats.created} new, ${result.stats.updated} updated, ${result.stats.conflicts} conflict(s)`,
-          at: result.syncedAt
-        });
+        if (isFinalBatchChunk) {
+          state.activity.unshift({
+            id: `act-${randomUUID()}`,
+            kind: 'sync',
+            text: `${user.name} synced ${lastAddonSync.stats.total} Anki card(s): ${lastAddonSync.stats.created} new, ${lastAddonSync.stats.updated} updated, ${lastAddonSync.stats.conflicts} conflict(s)`,
+            at: result.syncedAt
+          });
+        }
       }
       await saveState(state);
       return {

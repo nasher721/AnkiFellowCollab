@@ -17,6 +17,30 @@ export function roleMeetsMinimum(role, minimumRole = 'viewer') {
   return roleRank[role] >= roleRank[minimumRole];
 }
 
+function addonImportSyncResult(deck) {
+  if (deck.source?.format !== 'anki-addon') return null;
+  const syncedAt = deck.lastSyncedAt || deck.importedAt || nowIso();
+  const batch = deck.source.batch ? {
+    ...deck.source.batch,
+    received: deck.source.batch.index + 1,
+    complete: deck.source.batch.index + 1 >= deck.source.batch.total
+  } : null;
+  return {
+    syncedAt,
+    source: deck.source.source || 'DeckBridge Anki add-on',
+    client: deck.source.client || null,
+    stats: {
+      total: deck.cards.length,
+      created: deck.cards.length,
+      updated: 0,
+      skipped: 0,
+      conflicts: 0,
+      dryRun: false
+    },
+    ...(batch ? { batch } : {})
+  };
+}
+
 function requireEnv(name, value) {
   if (!value) fail(500, 'missing_config', `${name} is required for Supabase repository`);
   return value;
@@ -265,6 +289,7 @@ export function createSupabaseRepository(options = {}) {
         owner_name: user.name,
         imported_at: deck.importedAt || importedAt,
         last_synced_at: deck.lastSyncedAt,
+        last_sync_result: addonImportSyncResult(deck),
         media: deck.media || {},
         source: deck.source || {},
         models: deck.models || []
@@ -536,7 +561,9 @@ export function createSupabaseRepository(options = {}) {
       const state = await getDeckRows(user, deckId);
       const deck = state.decks[0];
       const result = mergeAddonCards(deck, syncInput, user.name);
-      const lastAddonSync = buildAddonSyncResult(syncInput, result);
+      const lastAddonSync = buildAddonSyncResult(syncInput, result, state.sync.lastAddonSync);
+      const isFirstBatchChunk = !syncInput.batch || syncInput.batch.index === 0;
+      const isFinalBatchChunk = !syncInput.batch || syncInput.batch.index + 1 >= syncInput.batch.total;
 
       if (!syncInput.dryRun) {
         if (result.createdCards.length) {
@@ -579,7 +606,9 @@ export function createSupabaseRepository(options = {}) {
           }).eq('id', card.id).eq('deck_id', deck.id);
           if (error) throw error;
         }
-        await supabase.from('sync_conflicts').delete().eq('deck_id', deck.id);
+        if (isFirstBatchChunk) {
+          await supabase.from('sync_conflicts').delete().eq('deck_id', deck.id);
+        }
         if (result.conflicts.length) {
           const { error } = await supabase.from('sync_conflicts').insert(result.conflicts.map((conflict) => ({
             id: conflict.id,
@@ -597,14 +626,16 @@ export function createSupabaseRepository(options = {}) {
           last_sync_result: lastAddonSync
         }).eq('id', deck.id);
         if (deckError) throw deckError;
-        await supabase.from('activity').insert({
-          id: `act-${randomUUID()}`,
-          deck_id: deck.id,
-          user_id: user.id,
-          kind: 'sync',
-          text: `${user.name} synced ${result.stats.total} Anki card(s): ${result.stats.created} new, ${result.stats.updated} updated, ${result.stats.conflicts} conflict(s)`,
-          created_at: result.syncedAt
-        });
+        if (isFinalBatchChunk) {
+          await supabase.from('activity').insert({
+            id: `act-${randomUUID()}`,
+            deck_id: deck.id,
+            user_id: user.id,
+            kind: 'sync',
+            text: `${user.name} synced ${lastAddonSync.stats.total} Anki card(s): ${lastAddonSync.stats.created} new, ${lastAddonSync.stats.updated} updated, ${lastAddonSync.stats.conflicts} conflict(s)`,
+            created_at: result.syncedAt
+          });
+        }
       } else {
         const { error: deckError } = await supabase.from('decks').update({
           last_sync_result: lastAddonSync

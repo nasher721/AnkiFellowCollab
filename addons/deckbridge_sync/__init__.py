@@ -39,6 +39,7 @@ TRACKING_MODEL = "DeckBridge Sync"
 TRACKING_TAG_PREFIX = "deckbridge_card_"
 CONFIG_KEY = "deckbridge"
 DEFAULT_PLATFORM_URL = "https://anki-collab.vercel.app"
+MAX_SYNC_REQUEST_BYTES = 3_500_000
 LEGACY_LOCAL_PLATFORM_URLS = {
     "http://localhost:4175",
     "http://127.0.0.1:4175",
@@ -476,11 +477,16 @@ def collect_cards() -> List[Dict[str, Any]]:
     return [note_to_card(mw.col.get_note(note_id)) for note_id in note_ids]
 
 
-def sync_payload(*, dry_run: bool = False) -> Dict[str, Any]:
+def sync_payload(
+    *,
+    dry_run: bool = False,
+    cards: Optional[List[Dict[str, Any]]] = None,
+    batch: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     cfg = config()
     deck_name = active_local_deck()
-    return {
-        "cards": collect_cards(),
+    payload = {
+        "cards": collect_cards() if cards is None else cards,
         "deckName": deck_name,
         "deckPath": deck_name,
         "dryRun": dry_run,
@@ -493,20 +499,111 @@ def sync_payload(*, dry_run: bool = False) -> Dict[str, Any]:
             "fingerprint": socket.gethostname(),
         },
     }
+    if batch:
+        payload["batch"] = batch
+    return payload
+
+
+def _payload_size(payload: Dict[str, Any]) -> int:
+    return len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+
+
+def _configured_batch_size(cfg: Dict[str, Any]) -> int:
+    try:
+        return max(1, int(cfg.get("batch_size") or DEFAULT_CONFIG["batch_size"]))
+    except Exception:
+        return DEFAULT_CONFIG["batch_size"]
+
+
+def sync_payload_chunks(cards: List[Dict[str, Any]], *, dry_run: bool, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not cards:
+        raise RuntimeError("No Anki notes matched the selected deck/filter.")
+
+    max_cards = _configured_batch_size(cfg)
+    chunks: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    for card in cards:
+        trial = current + [card]
+        trial_payload = sync_payload(dry_run=dry_run, cards=trial)
+        if current and (len(trial) > max_cards or _payload_size(trial_payload) > MAX_SYNC_REQUEST_BYTES):
+            chunks.append(current)
+            current = [card]
+            single_payload = sync_payload(dry_run=dry_run, cards=current)
+            if _payload_size(single_payload) > MAX_SYNC_REQUEST_BYTES:
+                raise RuntimeError(
+                    "A single Anki note is too large for DeckBridge's hosted API. "
+                    "Shorten very large fields or exclude that note with a tag filter."
+                )
+            continue
+        if not current and _payload_size(trial_payload) > MAX_SYNC_REQUEST_BYTES:
+            raise RuntimeError(
+                "A single Anki note is too large for DeckBridge's hosted API. "
+                "Shorten very large fields or exclude that note with a tag filter."
+            )
+        current = trial
+    if current:
+        chunks.append(current)
+
+    if len(chunks) == 1:
+        return [sync_payload(dry_run=dry_run, cards=chunks[0])]
+
+    batch_id = f"{int(time.time())}-{safe_tag(socket.gethostname())}-{len(cards)}"
+    return [
+        sync_payload(
+            dry_run=dry_run,
+            cards=chunk,
+            batch={
+                "id": batch_id,
+                "index": index,
+                "total": len(chunks),
+                "totalCards": len(cards),
+            },
+        )
+        for index, chunk in enumerate(chunks)
+    ]
+
+
+def combine_sync_responses(responses: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not responses:
+        return {"result": {"stats": {"total": 0, "created": 0, "updated": 0, "skipped": 0, "conflicts": 0, "dryRun": False}, "conflicts": []}}
+    combined = dict(responses[-1])
+    stats = {"total": 0, "created": 0, "updated": 0, "skipped": 0, "conflicts": 0, "dryRun": False}
+    conflicts: List[Dict[str, Any]] = []
+    for response in responses:
+        result = response.get("result", {})
+        response_stats = result.get("stats", {})
+        for key in ("total", "created", "updated", "skipped", "conflicts"):
+            stats[key] += int(response_stats.get(key, 0) or 0)
+        stats["dryRun"] = bool(response_stats.get("dryRun", stats["dryRun"]))
+        conflicts.extend(result.get("conflicts", []) or [])
+    result = dict(combined.get("result", {}))
+    result["stats"] = stats
+    result["conflicts"] = conflicts
+    combined["result"] = result
+    if "deck" in responses[0]:
+        deck = dict(responses[0].get("deck", {}))
+        deck["cardCount"] = stats["total"]
+        combined["deck"] = deck
+    return combined
 
 
 def _visible_deck_ids(me: Dict[str, Any]) -> set[str]:
     return {str(deck.get("id")) for deck in me.get("decks", []) if deck.get("id")}
 
 
-def create_platform_deck_from_anki(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def create_platform_deck_from_anki(cfg: Optional[Dict[str, Any]] = None, cards: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     cfg = cfg or config()
-    created = request_json("POST", "/api/decks/sync/from-anki", sync_payload(dry_run=False), cfg=cfg)
+    payloads = sync_payload_chunks(cards or collect_cards(), dry_run=False, cfg=cfg)
+    created = request_json("POST", "/api/decks/sync/from-anki", payloads[0], cfg=cfg)
     new_deck_id = str((created.get("deck") or {}).get("id") or created.get("state", {}).get("activeDeckId") or "").strip()
     if not new_deck_id:
         raise RuntimeError("DeckBridge created a deck but did not return its deck ID.")
-    save_config({**cfg, "deck_id": new_deck_id, "local_deck": active_local_deck()})
-    return created
+    next_config = {**cfg, "deck_id": new_deck_id, "local_deck": active_local_deck()}
+    save_config(next_config)
+    responses = [created]
+    for payload in payloads[1:]:
+        responses.append(request_json("POST", f"/api/decks/{new_deck_id}/sync/cards", payload, cfg=next_config))
+    return combine_sync_responses(responses)
 
 
 def ensure_platform_deck() -> Dict[str, Any]:
@@ -522,13 +619,18 @@ def ensure_platform_deck() -> Dict[str, Any]:
 def post_cards(*, dry_run: bool = False) -> Dict[str, Any]:
     cfg = config()
     deck_id = str(cfg.get("deck_id", "") or "").strip()
+    cards = collect_cards()
     if not dry_run:
         me = validate_token(cfg)
         if not deck_id or deck_id not in _visible_deck_ids(me):
-            return create_platform_deck_from_anki(cfg)
+            return create_platform_deck_from_anki(cfg, cards)
     elif not deck_id:
         raise RuntimeError("No DeckBridge deck is selected yet. Use Push Anki deck to DeckBridge to create one from Anki first.")
-    return request_json("POST", f"/api/decks/{cfg['deck_id']}/sync/cards", sync_payload(dry_run=dry_run))
+    responses = [
+        request_json("POST", f"/api/decks/{cfg['deck_id']}/sync/cards", payload)
+        for payload in sync_payload_chunks(cards, dry_run=dry_run, cfg=cfg)
+    ]
+    return combine_sync_responses(responses)
 
 
 def ensure_deck(name: str) -> int:

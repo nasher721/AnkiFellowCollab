@@ -434,6 +434,66 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
   assert.equal(dryRun.body.result.stats.dryRun, true);
   assert.equal(dryRun.body.state.sync.lastAddonSync.stats.dryRun, true);
   assert.equal(dryRun.body.state.sync.lastAddonSync.source, 'DeckBridge Sync preview');
+
+  const batchId = 'test-batch-1';
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'overwrite-platform',
+      source: 'DeckBridge Sync batch',
+      batch: { id: batchId, index: 0, total: 2, totalCards: 2 },
+      cards: [{
+        id: 'anki-9101',
+        ankiNoteId: 9101,
+        fields: { Front: 'Batch card one', Back: 'First chunk' }
+      }]
+    }), 'you', 'You').expect(200);
+
+  const batch = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'overwrite-platform',
+      source: 'DeckBridge Sync batch',
+      batch: { id: batchId, index: 1, total: 2, totalCards: 2 },
+      cards: [{
+        id: 'anki-9102',
+        ankiNoteId: 9102,
+        fields: { Front: 'Batch card two', Back: 'Second chunk' }
+      }]
+    }), 'you', 'You').expect(200);
+
+  assert.equal(batch.body.state.sync.lastAddonSync.stats.total, 2);
+  assert.equal(batch.body.state.sync.lastAddonSync.stats.created, 2);
+  assert.equal(batch.body.state.sync.lastAddonSync.batch.complete, true);
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'detect',
+      source: 'DeckBridge Sync conflict batch',
+      batch: { id: 'conflict-batch-1', index: 0, total: 2, totalCards: 2 },
+      cards: [{
+        id: 'anki-9101',
+        ankiNoteId: 9101,
+        fields: { Front: 'Changed batch card one', Back: 'First chunk' }
+      }]
+    }), 'you', 'You').expect(200);
+
+  const conflictBatch = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'detect',
+      source: 'DeckBridge Sync conflict batch',
+      batch: { id: 'conflict-batch-1', index: 1, total: 2, totalCards: 2 },
+      cards: [{
+        id: 'anki-9102',
+        ankiNoteId: 9102,
+        fields: { Front: 'Changed batch card two', Back: 'Second chunk' }
+      }]
+    }), 'you', 'You').expect(200);
+
+  assert.equal(conflictBatch.body.state.sync.conflicts.length, 2);
+  assert.equal(conflictBatch.body.state.sync.lastAddonSync.stats.conflicts, 2);
 });
 
 test('Anki add-on can create the first DeckBridge workspace from a local deck', async () => {

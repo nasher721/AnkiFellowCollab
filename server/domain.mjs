@@ -141,6 +141,16 @@ export function normalizeAddonSyncInput(body = {}) {
   const conflictPolicy = ['detect', 'overwrite-platform'].includes(body.conflictPolicy)
     ? body.conflictPolicy
     : 'detect';
+  const rawBatch = body.batch && typeof body.batch === 'object' && !Array.isArray(body.batch) ? body.batch : null;
+  const batchTotal = rawBatch ? Math.min(Math.max(Math.trunc(Number(rawBatch.total)) || 1, 1), 1000) : 0;
+  const batchIndex = rawBatch ? Math.min(Math.max(Math.trunc(Number(rawBatch.index)) || 0, 0), batchTotal - 1) : 0;
+  const batchTotalCards = rawBatch ? Math.min(Math.max(Math.trunc(Number(rawBatch.totalCards)) || cards.length, cards.length), 50000) : cards.length;
+  const batch = rawBatch ? {
+    id: cleanText(rawBatch.id, `batch-${nowIso()}`, 120),
+    index: batchIndex,
+    total: batchTotal,
+    totalCards: batchTotalCards
+  } : null;
 
   return {
     cards: cards.map(normalizeAddonCard),
@@ -152,7 +162,8 @@ export function normalizeAddonSyncInput(body = {}) {
       name: cleanText(body.client.name, 'DeckBridge Anki add-on', 120),
       version: cleanText(body.client.version, 'unknown', 80),
       fingerprint: cleanText(body.client.fingerprint, '', 200)
-    } : null
+    } : null,
+    batch
   };
 }
 
@@ -196,11 +207,15 @@ export function normalizeAddonDeckCreateInput(body = {}, user = {}) {
         format: 'anki-addon',
         deckName,
         deckPath,
-        client: syncInput.client
+        source: syncInput.source,
+        client: syncInput.client,
+        batch: syncInput.batch
       }
     },
     result: {
       syncedAt: createdAt,
+      source: syncInput.source,
+      client: syncInput.client,
       stats: {
         total: cards.length,
         created: cards.length,
@@ -313,19 +328,42 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
   return result;
 }
 
-export function buildAddonSyncResult(syncInput, result) {
+function addSyncStats(left = {}, right = {}) {
   return {
-    syncedAt: result.syncedAt,
-    source: syncInput.source,
-    client: syncInput.client,
-    stats: {
+    total: Number(left.total || 0) + Number(right.total || 0),
+    created: Number(left.created || 0) + Number(right.created || 0),
+    updated: Number(left.updated || 0) + Number(right.updated || 0),
+    skipped: Number(left.skipped || 0) + Number(right.skipped || 0),
+    conflicts: Number(left.conflicts || 0) + Number(right.conflicts || 0),
+    dryRun: Boolean(right.dryRun)
+  };
+}
+
+export function buildAddonSyncResult(syncInput, result, previousResult = null) {
+  const continuingBatch = syncInput.batch
+    && previousResult?.batch?.id === syncInput.batch.id
+    && syncInput.batch.index > 0;
+  const stats = continuingBatch
+    ? addSyncStats(previousResult.stats, result.stats)
+    : {
       total: result.stats.total,
       created: result.stats.created,
       updated: result.stats.updated,
       skipped: result.stats.skipped,
       conflicts: result.stats.conflicts,
       dryRun: result.stats.dryRun
-    }
+    };
+  const batch = syncInput.batch ? {
+    ...syncInput.batch,
+    received: syncInput.batch.index + 1,
+    complete: syncInput.batch.index + 1 >= syncInput.batch.total
+  } : null;
+  return {
+    syncedAt: result.syncedAt,
+    source: syncInput.source,
+    client: syncInput.client,
+    stats,
+    ...(batch ? { batch } : {})
   };
 }
 
