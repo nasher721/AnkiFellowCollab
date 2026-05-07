@@ -7,7 +7,7 @@ import path from 'node:path';
 import { createClient } from '@supabase/supabase-js';
 import { createAuth } from './auth.mjs';
 import { requireContributor, requireEditor, requireOwner, requireReviewer, resolveSuggestionDeck } from './rbac.mjs';
-import { deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeParsedDeck, normalizeSuggestionInput } from './domain.mjs';
+import { deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeParsedDeck, normalizeSuggestionInput, safeMediaMimeType } from './domain.mjs';
 import { AppError, errorPayload, fail } from './errors.mjs';
 import { checkAnki, pullDeck, pushDeck } from './ankiConnect.mjs';
 import { createApkg, parseApkg } from './ankiPackage.mjs';
@@ -831,9 +831,17 @@ export function createApp(options = {}) {
       const deck = deckState.decks[0];
       const asset = deck?.media?.[filename];
       if (!asset?.dataBase64) fail(404, 'media_not_found', 'Media asset not found');
+      const mimeType = safeMediaMimeType(asset.mimeType);
+      const headers = {
+        'Content-Type': mimeType,
+        'Cache-Control': 'private, max-age=3600',
+        'X-Content-Type-Options': 'nosniff'
+      };
+      if (mimeType === 'application/octet-stream') {
+        headers['Content-Disposition'] = `attachment; filename="${filename.replace(/"/g, '')}"`;
+      }
       res.set({
-        'Content-Type': asset.mimeType || 'application/octet-stream',
-        'Cache-Control': 'private, max-age=3600'
+        ...headers
       });
       res.send(Buffer.from(asset.dataBase64, 'base64'));
     } catch (err) { next(err); }

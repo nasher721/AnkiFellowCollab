@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -242,6 +243,10 @@ function asUser(req, id, name = id) {
     .set('x-deckbridge-user-id', id)
     .set('x-deckbridge-user-email', `${id}@example.com`)
     .set('x-deckbridge-user-name', name);
+}
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 async function seedLocalState(dataDir, mutator) {
@@ -876,7 +881,7 @@ test('Anki add-on sync persists media and serves it through authenticated route'
       media: {
         [filename]: {
           mimeType: 'image/png',
-          sha256: 'a'.repeat(64),
+          sha256: sha256(bytes),
           dataBase64: bytes.toString('base64')
         }
       }
@@ -890,6 +895,42 @@ test('Anki add-on sync persists media and serves it through authenticated route'
 
   assert.equal(media.headers['content-type'], 'image/png');
   assert.equal(media.headers['cache-control'], 'private, max-age=3600');
+  assert.equal(media.headers['x-content-type-options'], 'nosniff');
+  assert.deepEqual(media.body, bytes);
+});
+
+test('Anki add-on sync stores unsafe media mime as octet-stream attachment', async () => {
+  const { app } = await createTestApp();
+  const bytes = Buffer.from('<script>alert(1)</script>');
+  const filename = 'unsafe.html';
+
+  const synced = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'overwrite-platform',
+      cards: [{
+        id: 'anki-media-unsafe-1',
+        ankiNoteId: 9902,
+        fields: { Front: `<img src="${filename}">` },
+        mediaRefs: [filename]
+      }],
+      media: {
+        [filename]: {
+          mimeType: 'text/html',
+          sha256: sha256(bytes),
+          dataBase64: bytes.toString('base64')
+        }
+      }
+    }), 'you', 'You').expect(200);
+
+  assert.equal(synced.body.state.decks[0].media[filename].mimeType, 'application/octet-stream');
+
+  const media = await asUser(request(app)
+    .get(`/api/decks/deck-demo-zanki/media/${encodeURIComponent(filename)}`), 'you', 'You')
+    .expect(200);
+
+  assert.equal(media.headers['content-type'], 'application/octet-stream');
+  assert.equal(media.headers['content-disposition'], 'attachment; filename="unsafe.html"');
   assert.deepEqual(media.body, bytes);
 });
 

@@ -512,12 +512,20 @@ def media_refs_from_fields(fields: Dict[str, str]) -> List[str]:
 
 
 def media_dir() -> str:
-    return str(mw.col.media.dir())
+    try:
+        return str(mw.col.media.dir())
+    except Exception:
+        return ""
 
 
 def collect_media_payload(cards: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
     payload: Dict[str, Dict[str, str]] = {}
-    root = media_dir()
+    try:
+        root = media_dir()
+    except Exception:
+        return payload
+    if not root:
+        return payload
     for card in cards:
         for ref in card.get("mediaRefs") or []:
             filename = os.path.basename(str(ref or ""))
@@ -572,6 +580,7 @@ def sync_payload(
     dry_run: bool = False,
     cards: Optional[List[Dict[str, Any]]] = None,
     batch: Optional[Dict[str, Any]] = None,
+    media: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     cfg = config()
     deck_name = active_local_deck()
@@ -589,7 +598,7 @@ def sync_payload(
             "fingerprint": socket.gethostname(),
         },
     }
-    payload["media"] = collect_media_payload(payload["cards"])
+    payload["media"] = collect_media_payload(payload["cards"]) if media is None else media
     if batch:
         payload["batch"] = batch
     return payload
@@ -611,15 +620,21 @@ def sync_payload_chunks(cards: List[Dict[str, Any]], *, dry_run: bool, cfg: Dict
         raise RuntimeError("No Anki notes matched the selected deck/filter.")
 
     max_cards = _configured_batch_size(cfg)
+    media = collect_media_payload(cards)
+
+    def media_for(chunk: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
+        refs = {ref for card in chunk for ref in (card.get("mediaRefs") or [])}
+        return {filename: asset for filename, asset in media.items() if filename in refs}
+
     chunks: List[List[Dict[str, Any]]] = []
     current: List[Dict[str, Any]] = []
     for card in cards:
         trial = current + [card]
-        trial_payload = sync_payload(dry_run=dry_run, cards=trial)
+        trial_payload = sync_payload(dry_run=dry_run, cards=trial, media=media_for(trial))
         if current and (len(trial) > max_cards or _payload_size(trial_payload) > MAX_SYNC_REQUEST_BYTES):
             chunks.append(current)
             current = [card]
-            single_payload = sync_payload(dry_run=dry_run, cards=current)
+            single_payload = sync_payload(dry_run=dry_run, cards=current, media=media_for(current))
             if _payload_size(single_payload) > MAX_SYNC_REQUEST_BYTES:
                 raise RuntimeError(
                     "A single Anki note is too large for DeckBridge's hosted API. "
@@ -636,13 +651,14 @@ def sync_payload_chunks(cards: List[Dict[str, Any]], *, dry_run: bool, cfg: Dict
         chunks.append(current)
 
     if len(chunks) == 1:
-        return [sync_payload(dry_run=dry_run, cards=chunks[0])]
+        return [sync_payload(dry_run=dry_run, cards=chunks[0], media=media_for(chunks[0]))]
 
     batch_id = f"{int(time.time())}-{safe_tag(socket.gethostname())}-{len(cards)}"
     return [
         sync_payload(
             dry_run=dry_run,
             cards=chunk,
+            media=media_for(chunk),
             batch={
                 "id": batch_id,
                 "index": index,

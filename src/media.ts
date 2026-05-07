@@ -3,7 +3,13 @@ function localFilename(value: string) {
   if (!trimmed) return '';
   if (/^(https?:|data:)/i.test(trimmed)) return '';
   const withoutQuery = trimmed.split(/[?#]/, 1)[0] || trimmed;
-  const parts = withoutQuery.split(/[\\/]/);
+  let decoded = withoutQuery;
+  try {
+    decoded = decodeURIComponent(withoutQuery);
+  } catch {
+    decoded = withoutQuery;
+  }
+  const parts = decoded.split(/[\\/]/);
   return parts[parts.length - 1] || '';
 }
 

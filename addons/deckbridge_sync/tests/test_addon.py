@@ -258,7 +258,7 @@ class TestVersion(unittest.TestCase):
 class TestMediaSync(unittest.TestCase):
     def test_media_refs_from_fields_extracts_images_and_sounds(self):
         refs = media_refs_from_fields({
-            'Front': '<div><img src="neuro image.png"><img src=https://example.com/remote.png></div>',
+            'Front': '<div><img src="neuro%20image.png"><img src=https://example.com/remote.png></div>',
             'Back': '[sound:clip.mp3] <img src="data:image/png;base64,abc"> <img src="../nested/local.svg">',
             'Extra': '[sound:clip.mp3]',
         })
@@ -282,6 +282,10 @@ class TestMediaSync(unittest.TestCase):
         self.assertEqual(payload['image.png']['mimeType'], 'image/png')
         self.assertEqual(payload['image.png']['sha256'], 'ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56')
         self.assertEqual(payload['image.png']['dataBase64'], 'cG5nLWJ5dGVz')
+
+    @patch('deckbridge_sync.media_dir', side_effect=RuntimeError('media unavailable'))
+    def test_collect_media_payload_skips_inaccessible_media_dir(self, _mock_media_dir):
+        self.assertEqual(collect_media_payload([{'id': 'anki-1', 'mediaRefs': ['image.png']}]), {})
 
 
 class TestDefaultConfig(unittest.TestCase):
