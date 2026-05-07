@@ -515,6 +515,24 @@ export function createApp(options = {}) {
     }
   });
 
+  app.post('/api/decks/:deckId/suggestions/bulk-decision', validateDeckIdParam, auth.requireUser, requireReviewer(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!['accepted', 'rejected', 'revision'].includes(req.body.decision)) {
+        fail(400, 'invalid_decision', 'Decision must be accepted, rejected, or revision');
+      }
+      const suggestionIds = (Array.isArray(req.body.suggestionIds) ? req.body.suggestionIds : [])
+        .map((id) => cleanShortText(id, '', 200))
+        .filter(Boolean)
+        .slice(0, 100);
+      if (!suggestionIds.length) fail(400, 'missing_suggestion_ids', 'suggestionIds array is required');
+      if (!repository.bulkDecideSuggestions) fail(501, 'bulk_decision_unavailable', 'Bulk suggestion decisions are unavailable');
+      res.json(await repository.bulkDecideSuggestions(req.user, deckId, suggestionIds, req.body.decision));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   // Bulk delete cards (owner only)
   app.delete('/api/decks/:deckId/cards', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
     try {

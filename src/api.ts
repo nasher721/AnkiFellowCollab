@@ -296,6 +296,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ decision })
     }),
+  bulkDecideSuggestions: (deckId: string, suggestionIds: string[], decision: 'accepted' | 'rejected' | 'revision') =>
+    jsonRequest<AppState>(`/api/decks/${deckId}/suggestions/bulk-decision`, {
+      method: 'POST',
+      body: JSON.stringify({ suggestionIds, decision })
+    }),
   ankiStatus: () => jsonRequest('/api/anki/status'),
   ankiPull: (deckId: string) =>
     jsonRequest<AppState>('/api/anki/pull', {

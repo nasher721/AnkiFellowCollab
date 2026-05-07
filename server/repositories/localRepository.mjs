@@ -214,6 +214,35 @@ export function createLocalRepository() {
       return this.getDeckState(user, deck.id);
     },
 
+    async bulkDecideSuggestions(user, deckId, suggestionIds, decision) {
+      const state = await loadState();
+      ensureCollections(state);
+      const { deck } = requireRole(state, user.id, deckId, 'owner');
+      const selected = suggestionIds.map((suggestionId) => state.suggestions.find((item) => item.id === suggestionId && item.deckId === deck.id));
+      if (selected.some((suggestion) => !suggestion)) fail(404, 'suggestion_not_found', 'Suggestion not found');
+      if (selected.some((suggestion) => suggestion.status !== 'pending')) fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');
+
+      const reviewedAt = nowIso();
+      for (const suggestion of selected) {
+        if (decision === 'accepted') {
+          applySuggestion(deck, suggestion, user.name);
+          const collaborator = state.collaborators.find((item) => item.id === suggestion.authorId);
+          if (collaborator) collaborator.accepted += 1;
+        }
+        suggestion.status = decision;
+        suggestion.reviewedAt = reviewedAt;
+        suggestion.reviewedBy = user.name;
+      }
+      state.activity.unshift({
+        id: `act-${randomUUID()}`,
+        kind: decision,
+        text: `${user.name} ${decision} ${selected.length} suggestion(s)`,
+        at: reviewedAt
+      });
+      await saveState(state);
+      return this.getDeckState(user, deck.id);
+    },
+
     async getExportDeck(user, deckId) {
       const state = await loadState();
       const { deck } = getMembership(state, user.id, deckId);

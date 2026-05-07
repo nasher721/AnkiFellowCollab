@@ -446,6 +446,7 @@ export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
+  const [selectedSuggestionIds, setSelectedSuggestionIds] = useState<Set<string>>(new Set());
   const [queryInput, setQueryInput] = useState('');
   const query = useDebounce(queryInput, 220);
   const [tagFilter, setTagFilter] = useState('All');
@@ -607,7 +608,7 @@ export default function App() {
     () => (state?.suggestions || []).filter((item) => item.deckId === activeDeck?.id),
     [state, activeDeck]
   );
-  const pendingSuggestions = suggestions.filter((item) => item.status === 'pending');
+  const pendingSuggestions = useMemo(() => suggestions.filter((item) => item.status === 'pending'), [suggestions]);
   const reviewAuthors = useMemo(() => ['All', ...Array.from(new Set(suggestions.map((item) => item.authorName))).sort()], [suggestions]);
   const queueSuggestions = useMemo(() => suggestions.filter((item) => {
     const statusMatch = reviewStatusFilter === 'all' || item.status === reviewStatusFilter;
@@ -638,6 +639,14 @@ export default function App() {
   const currentStart = filteredCards.length ? (safePage - 1) * pageSize + 1 : 0;
   const currentEnd = Math.min(safePage * pageSize, filteredCards.length);
   const cardsWithPendingSuggestions = useMemo(() => new Set(pendingSuggestions.map((item) => item.cardId)), [pendingSuggestions]);
+
+  useEffect(() => {
+    const pendingIds = new Set(pendingSuggestions.map((item) => item.id));
+    setSelectedSuggestionIds((prev) => {
+      const next = new Set([...prev].filter((id) => pendingIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [pendingSuggestions]);
   const approvedStudyCards = useMemo(() => (activeDeck?.cards || []).filter((card) => (
     !card.suspended && !cardsWithPendingSuggestions.has(card.id)
   )), [activeDeck, cardsWithPendingSuggestions]);
@@ -734,6 +743,7 @@ export default function App() {
   function switchDeck(deckId: string) {
     setSelectedSuggestionId(null);
     setSelectedCardId(null);
+    setSelectedSuggestionIds(new Set());
     refreshWith(api.session({ activeDeckId: deckId }), 'Deck switched');
   }
 
@@ -868,6 +878,28 @@ export default function App() {
   function decideSuggestion(decision: 'accepted' | 'rejected' | 'revision') {
     if (!selectedSuggestion) return;
     refreshWith(api.decideSuggestion(selectedSuggestion.id, decision), `Suggestion ${decision}`);
+  }
+
+  function toggleSuggestionSelection(suggestionId: string) {
+    setSelectedSuggestionIds((prev) => {
+      const next = new Set(prev);
+      next.has(suggestionId) ? next.delete(suggestionId) : next.add(suggestionId);
+      return next;
+    });
+  }
+
+  function clearSuggestionSelection() {
+    setSelectedSuggestionIds(new Set());
+  }
+
+  function bulkDecideSuggestions(decision: 'accepted' | 'rejected' | 'revision') {
+    if (!activeDeck || selectedSuggestionIds.size === 0) return;
+    const ids = [...selectedSuggestionIds];
+    refreshWith(
+      api.bulkDecideSuggestions(activeDeck.id, ids, decision),
+      `${ids.length} suggestion(s) ${decision}`
+    );
+    clearSuggestionSelection();
   }
 
   async function exportDeck() {
@@ -1549,20 +1581,58 @@ export default function App() {
               </section>
             ) : <EmptyState message="Select a card to review changes." />}
 
+            {canReview && selectedSuggestionIds.size > 0 ? (
+              <div className="suggestion-bulk-toolbar" role="toolbar" aria-label="Bulk suggestion decisions">
+                <span>{selectedSuggestionIds.size} selected</span>
+                <button className="button secondary" onClick={() => bulkDecideSuggestions('rejected')} disabled={busy}>Reject</button>
+                <button className="button secondary" onClick={() => bulkDecideSuggestions('revision')} disabled={busy}>Request revision</button>
+                <button className="button primary" onClick={() => bulkDecideSuggestions('accepted')} disabled={busy}>Accept</button>
+                <button className="button secondary" onClick={clearSuggestionSelection} disabled={busy}>Clear</button>
+              </div>
+            ) : null}
+
             <div className="queue-list">
               {queueSuggestions.length ? queueSuggestions.map((suggestion) => (
-                <button
+                <div
                   className={`queue-item ${suggestion.id === selectedSuggestion?.id ? 'active' : ''}`}
                   key={suggestion.id}
                   onClick={() => setSelectedSuggestionId(suggestion.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      setSelectedSuggestionId(suggestion.id);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
                 >
+                  {canReview && suggestion.status === 'pending' ? (
+                    <span
+                      className={`queue-select${selectedSuggestionIds.has(suggestion.id) ? ' checked' : ''}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleSuggestionSelection(suggestion.id);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          toggleSuggestionSelection(suggestion.id);
+                        }
+                      }}
+                      role="checkbox"
+                      aria-checked={selectedSuggestionIds.has(suggestion.id)}
+                      aria-label={`${selectedSuggestionIds.has(suggestion.id) ? 'Deselect' : 'Select'} ${suggestion.authorName}'s suggestion`}
+                      tabIndex={0}
+                    />
+                  ) : <span className="queue-select-spacer" aria-hidden="true" />}
                   <span className="avatar">{initials(suggestion.authorName)}</span>
                   <span>
                     <strong>{suggestion.authorName}</strong>
                     <small>{relativeTime(suggestion.createdAt)}</small>
                   </span>
                   <b className={`queue-status ${suggestion.status}`}>{suggestion.status}</b>
-                </button>
+                </div>
               )) : <EmptyState message="No suggestions match the queue filters." />}
             </div>
 

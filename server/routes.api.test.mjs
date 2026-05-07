@@ -521,6 +521,38 @@ test('membership roles gate owner decisions and collaborator suggestions', async
     });
 });
 
+test('bulk suggestion decisions accept multiple pending suggestions for a deck', async () => {
+  const { app } = await createTestApp();
+
+  const first = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions')
+    .send({
+      cardId: 'card-hpylori',
+      reason: 'First change',
+      proposedFields: { Front: 'First bulk update?' },
+      proposedTags: ['GI', 'Bulk']
+    }), 'maya', 'Maya Patel').expect(201);
+  const firstId = first.body.suggestions[0].id;
+
+  const second = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions')
+    .send({
+      cardId: 'card-b12',
+      reason: 'Second change',
+      proposedFields: { Front: 'Second bulk update?' },
+      proposedTags: ['Neurology', 'Bulk']
+    }), 'maya', 'Maya Patel').expect(201);
+  const secondId = second.body.suggestions[0].id;
+
+  const decided = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: [firstId, secondId], decision: 'rejected' }), 'you', 'You').expect(200);
+
+  const statuses = new Map(decided.body.suggestions.map((item) => [item.id, item.status]));
+  assert.equal(statuses.get(firstId), 'rejected');
+  assert.equal(statuses.get(secondId), 'rejected');
+});
+
 test('upload, export, and local-bridge conflict APIs use authenticated deck scope', async () => {
   const { app } = await createTestApp();
   const uploadPath = path.join(os.tmpdir(), `deck-${Date.now()}.apkg`);

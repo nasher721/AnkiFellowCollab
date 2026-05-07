@@ -399,6 +399,52 @@ export function createSupabaseRepository(options = {}) {
       return getDeckRows(user, suggestion.deck_id);
     },
 
+    async bulkDecideSuggestions(user, deckId, suggestionIds, decision) {
+      await assertMembership(user.id, deckId, 'reviewer');
+      const { data: suggestions, error } = await supabase
+        .from('suggestions')
+        .select('*')
+        .eq('deck_id', deckId)
+        .in('id', suggestionIds);
+      if (error) throw error;
+      if ((suggestions || []).length !== suggestionIds.length) fail(404, 'suggestion_not_found', 'Suggestion not found');
+      if (suggestions.some((suggestion) => suggestion.status !== 'pending')) {
+        fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');
+      }
+
+      if (decision === 'accepted') {
+        for (const suggestion of suggestions) {
+          const { data: card, error: cardError } = await supabase.from('cards').select('*').eq('id', suggestion.card_id).eq('deck_id', deckId).single();
+          if (cardError || !card) fail(404, 'card_not_found', 'Card not found');
+          const nextCard = applySuggestion(toDeck({ id: deckId, name: '', imported_at: nowIso() }, [toCard(card)]), toSuggestion(suggestion), user.name);
+          const { error: updateCardError } = await supabase.from('cards').update({
+            fields: nextCard.fields,
+            tags: nextCard.tags,
+            modified_at: nextCard.modifiedAt,
+            modified_by: nextCard.modifiedBy
+          }).eq('id', suggestion.card_id).eq('deck_id', deckId);
+          if (updateCardError) throw updateCardError;
+        }
+      }
+
+      const reviewedAt = nowIso();
+      const { error: updateError } = await supabase.from('suggestions').update({
+        status: decision,
+        reviewed_at: reviewedAt,
+        reviewed_by: user.name
+      }).eq('deck_id', deckId).in('id', suggestionIds);
+      if (updateError) throw updateError;
+      await supabase.from('activity').insert({
+        id: `act-${randomUUID()}`,
+        deck_id: deckId,
+        user_id: user.id,
+        kind: decision,
+        text: `${user.name} ${decision} ${suggestions.length} suggestion(s)`,
+        created_at: reviewedAt
+      });
+      return getDeckRows(user, deckId);
+    },
+
     async getExportDeck(user, deckId) {
       const state = await getDeckRows(user, deckId);
       return state.decks[0];
