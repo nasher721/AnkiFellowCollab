@@ -564,6 +564,33 @@ test('suggestion comments can be listed and resolved in local repository mode', 
   assert.equal(unresolved.body.resolvedBy, null);
 });
 
+test('suggestion comment API rejects non-members, missing comments, and invalid parents', async () => {
+  const { app } = await createTestApp();
+
+  await asUser(request(app)
+    .get('/api/suggestions/sugg-anca/comments'), 'outsider', 'Outside User')
+    .expect(403)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'forbidden');
+    });
+
+  await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/comments')
+    .send({ body: 'Reply to a missing parent', parentId: 'comment-missing' }), 'you', 'You')
+    .expect(404)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'comment_not_found');
+    });
+
+  await asUser(request(app)
+    .patch('/api/suggestions/sugg-anca/comments/comment-missing/resolved')
+    .send({ resolved: true }), 'you', 'You')
+    .expect(404)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'comment_not_found');
+    });
+});
+
 test('single suggestion role access allows reviewers and editors but rejects contributors', async () => {
   for (const role of ['reviewer', 'editor']) {
     const { app, dataDir } = await createTestApp();

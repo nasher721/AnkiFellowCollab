@@ -280,7 +280,7 @@ export function createLocalRepository() {
       if (!suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
       const { collaborator } = requireRole(state, user.id, suggestion.deckId, 'contributor');
       const parentId = payload.parentId || null;
-      if (parentId && !state.comments.some((comment) => comment.id === parentId && comment.suggestionId === suggestionId)) {
+      if (parentId && !state.comments.some((comment) => comment.id === parentId && comment.suggestionId === suggestionId && comment.deckId === suggestion.deckId)) {
         fail(404, 'comment_not_found', 'Parent comment not found');
       }
       const createdAt = nowIso();

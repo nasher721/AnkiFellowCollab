@@ -447,6 +447,7 @@ export default function App() {
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
   const [selectedSuggestionIds, setSelectedSuggestionIds] = useState<Set<string>>(new Set());
+  const [commentsVersion, setCommentsVersion] = useState(0);
   const [queryInput, setQueryInput] = useState('');
   const query = useDebounce(queryInput, 220);
   const [tagFilter, setTagFilter] = useState('All');
@@ -585,6 +586,7 @@ export default function App() {
   }, []);
 
   const handleCommentChange = useCallback(() => {
+    setCommentsVersion((version) => version + 1);
     api.state().then(setState).catch(() => undefined);
   }, []);
 
@@ -1578,6 +1580,7 @@ export default function App() {
                       suggestionId={selectedSuggestion.id}
                       currentUserId={state.user?.id || 'you'}
                       currentUserName={state.user?.name || 'You'}
+                      commentsVersion={commentsVersion}
                     />
                   ) : <EmptyState message="Select a suggestion to view its discussion." />
                 )}

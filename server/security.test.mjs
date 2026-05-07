@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import test from 'node:test';
 import {
   assertValidDeckId,
@@ -61,4 +62,15 @@ test('deck id validation accepts safe ids and rejects path-like ids', () => {
   for (const value of ['../state', 'a'.repeat(65), 'deck demo zanki']) {
     assert.throws(() => assertValidDeckId(value), { code: 'invalid_deck_id' });
   }
+});
+
+test('comment resolution migration limits client updates to resolution fields', async () => {
+  const sql = await fs.readFile(new URL('../supabase/migrations/20260507120000_comment_resolution.sql', import.meta.url), 'utf8');
+
+  assert.match(sql, /create or replace function public\.enforce_comment_resolution_update/i);
+  assert.match(sql, /new\.body is distinct from old\.body/i);
+  assert.match(sql, /raise exception 'Only comment resolution fields may be updated'/i);
+  assert.match(sql, /new\.resolved_by := auth\.uid\(\)::text/i);
+  assert.match(sql, /revoke update on public\.comments from anon, authenticated/i);
+  assert.match(sql, /grant update \(resolved_at, resolved_by, updated_at\) on public\.comments to authenticated/i);
 });

@@ -456,6 +456,16 @@ export function createSupabaseRepository(options = {}) {
         .single();
       if (suggestionError || !suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
       await assertMembership(user.id, suggestion.deck_id, 'contributor');
+      if (payload.parentId) {
+        const { data: parent, error: parentError } = await supabase
+          .from('comments')
+          .select('id')
+          .eq('id', payload.parentId)
+          .eq('suggestion_id', suggestionId)
+          .eq('deck_id', suggestion.deck_id)
+          .single();
+        if (parentError || !parent) fail(404, 'comment_not_found', 'Parent comment not found');
+      }
       const createdAt = nowIso();
       const id = `comment-${randomUUID()}`;
       const { data, error } = await supabase.from('comments').insert({

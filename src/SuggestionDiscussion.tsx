@@ -5,11 +5,12 @@ interface Props {
   suggestionId: string;
   currentUserId: string;
   currentUserName: string;
+  commentsVersion?: number;
 }
 
 const EMOJIS = ['👍', '❓', '✅'] as const;
 
-export function SuggestionDiscussion({ suggestionId, currentUserId, currentUserName }: Props) {
+export function SuggestionDiscussion({ suggestionId, currentUserId, currentUserName, commentsVersion = 0 }: Props) {
   const [comments, setComments] = useState<Comment[]>([]);
   const [reactions, setReactions] = useState<Record<string, number>>({});
   const [myReactions, setMyReactions] = useState<Set<string>>(new Set());
@@ -33,7 +34,7 @@ export function SuggestionDiscussion({ suggestionId, currentUserId, currentUserN
     }
   }, [suggestionId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, commentsVersion]);
 
   async function submitComment() {
     const trimmed = body.trim();
