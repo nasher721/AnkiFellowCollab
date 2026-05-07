@@ -136,7 +136,7 @@ export interface DeckAnalytics {
       accuracyRate: number;
     };
     weeklyTrend: { date: string; count: number }[];
-    strugglingCards: { cardId: string; easeFactor: number; repetitions: number; nextDue: string }[];
+    strugglingCards: { cardId: string; easeFactor: number; repetitions: number; lastRating?: number; nextDue: string; front?: string; back?: string }[];
   };
 }
 

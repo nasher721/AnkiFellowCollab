@@ -1062,25 +1062,37 @@ export function createApp(options = {}) {
     } catch (err) { next(err); }
   });
 
-  // Deck analytics
+  // Deck analytics — 60-second in-memory cache keyed by deckId
+  const analyticsCache = new Map();
+  const ANALYTICS_CACHE_TTL_MS = 60_000;
+
   app.get('/api/decks/:deckId/analytics', auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
     try {
+      const cacheKey = req.params.deckId;
+
       if (repository.getAnalytics) {
-        return res.json({ analytics: await repository.getAnalytics(req.user, req.params.deckId) });
+        const cached = analyticsCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) return res.json({ analytics: cached.data });
+        const data = await repository.getAnalytics(req.user, cacheKey);
+        analyticsCache.set(cacheKey, { data, expiresAt: Date.now() + ANALYTICS_CACHE_TTL_MS });
+        return res.json({ analytics: data });
       }
       if (!auth.supabase) return res.json({ analytics: null });
 
+      const cached = analyticsCache.get(cacheKey);
+      if (cached && cached.expiresAt > Date.now()) return res.json({ analytics: cached.data });
+
       const [suggestionsRes, starsRes, cardsRes, progressRes, sessionsRes] = await Promise.all([
         auth.supabase.from('suggestions').select('status, author_id, author_name, created_at')
-          .eq('deck_id', req.params.deckId),
+          .eq('deck_id', cacheKey),
         auth.supabase.from('deck_stars').select('user_id')
-          .eq('deck_id', req.params.deckId),
-        auth.supabase.from('cards').select('id, state, due, suspended')
-          .eq('deck_id', req.params.deckId),
+          .eq('deck_id', cacheKey),
+        auth.supabase.from('cards').select('id, state, due, suspended, fields')
+          .eq('deck_id', cacheKey),
         auth.supabase.from('study_progress').select('card_id, interval_days, ease_factor, repetitions, next_due, last_rating, updated_at')
-          .eq('deck_id', req.params.deckId),
+          .eq('deck_id', cacheKey),
         auth.supabase.from('study_sessions').select('duration_seconds, cards_studied, cards_correct, started_at')
-          .eq('deck_id', req.params.deckId)
+          .eq('deck_id', cacheKey)
           .then((result) => result, () => ({ data: [], error: null }))
       ]);
 
@@ -1106,6 +1118,7 @@ export function createApp(options = {}) {
 
       const byState = {};
       const byDifficulty = { dueNow: 0, soon: 0, later: 0, suspended: 0, unknown: 0 };
+      const cardFieldsMap = new Map(cards.map((c) => [c.id, c.fields || {}]));
       for (const card of cards) {
         const state = card.state || 'Unknown';
         byState[state] = (byState[state] || 0) + 1;
@@ -1118,14 +1131,21 @@ export function createApp(options = {}) {
 
       const progressByCard = new Map(progress.map((item) => [item.card_id, item]));
       const strugglingCards = [...progressByCard.entries()]
-        .map(([cardId, item]) => ({
-          cardId,
-          easeFactor: Number(item.ease_factor),
-          repetitions: item.repetitions,
-          lastRating: item.last_rating,
-          nextDue: item.next_due,
-          updatedAt: item.updated_at
-        }))
+        .map(([cardId, item]) => {
+          const fields = cardFieldsMap.get(cardId) || {};
+          const rawFront = fields.Front || fields.front || Object.values(fields)[0] || '';
+          const rawBack = fields.Back || fields.back || Object.values(fields)[1] || '';
+          return {
+            cardId,
+            easeFactor: Number(item.ease_factor),
+            repetitions: item.repetitions,
+            lastRating: item.last_rating,
+            nextDue: item.next_due,
+            updatedAt: item.updated_at,
+            front: String(rawFront).slice(0, 120),
+            back: String(rawBack).slice(0, 120),
+          };
+        })
         .filter((item) => (item.lastRating != null && Number(item.lastRating) <= 2) || item.easeFactor < 2.2)
         .sort((a, b) => (a.easeFactor - b.easeFactor) || ((a.lastRating ?? 5) - (b.lastRating ?? 5)))
         .slice(0, 10);
@@ -1138,25 +1158,37 @@ export function createApp(options = {}) {
         return acc;
       }, { total: 0, durationSeconds: 0, cardsStudied: 0, cardsCorrect: 0 });
 
-      res.json({
-        analytics: {
-          suggestions: { total, accepted, rejected, pending, acceptanceRate: total ? Math.round((accepted / total) * 100) : 0 },
-          stars: starsRes.data?.length ?? 0,
-          leaderboard,
-          cards: {
-            total: cards.length,
-            byState,
-            byDifficulty
+      const dayMap = {};
+      for (const s of sessions) {
+        const day = String(s.started_at || '').slice(0, 10);
+        if (day) dayMap[day] = (dayMap[day] || 0) + (Number(s.cards_studied) || 0);
+      }
+      const weeklyTrend = Object.entries(dayMap)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .slice(-8)
+        .map(([date, count]) => ({ date, count }));
+
+      const analyticsResult = {
+        suggestions: { total, accepted, rejected, pending, acceptanceRate: total ? Math.round((accepted / total) * 100) : 0 },
+        stars: starsRes.data?.length ?? 0,
+        leaderboard,
+        cards: {
+          total: cards.length,
+          byState,
+          byDifficulty
+        },
+        study: {
+          sessions: {
+            ...sessionTotals,
+            accuracyRate: sessionTotals.cardsStudied ? Math.round((sessionTotals.cardsCorrect / sessionTotals.cardsStudied) * 100) : 0
           },
-          study: {
-            sessions: {
-              ...sessionTotals,
-              accuracyRate: sessionTotals.cardsStudied ? Math.round((sessionTotals.cardsCorrect / sessionTotals.cardsStudied) * 100) : 0
-            },
-            strugglingCards
-          }
+          weeklyTrend,
+          strugglingCards
         }
-      });
+      };
+
+      analyticsCache.set(cacheKey, { data: analyticsResult, expiresAt: Date.now() + ANALYTICS_CACHE_TTL_MS });
+      res.json({ analytics: analyticsResult });
     } catch (err) { next(err); }
   });
 
