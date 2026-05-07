@@ -600,14 +600,23 @@ export function createApp(options = {}) {
 
   app.get('/api/notifications', auth.requireUser, async (req, res, next) => {
     try {
-      if (!auth.supabase) return res.json({ notifications: [], unread: 0 });
-      const { data } = await auth.supabase.from('notifications')
+      if (!auth.supabase) return res.json({ notifications: [], unread: 0, nextCursor: null });
+      const parsedLimit = Number(req.query.limit);
+      const limit = Number.isFinite(parsedLimit)
+        ? Math.min(Math.max(Math.trunc(parsedLimit), 1), 100)
+        : 50;
+      const cursor = cleanIsoOrNull(req.query.cursor);
+      let query = auth.supabase.from('notifications')
         .select('id, deck_id, kind, body, ref_id, read, created_at')
         .eq('user_id', req.user.id)
-        .order('created_at', { ascending: false })
-        .limit(50);
-      const unread = (data || []).filter((n) => !n.read).length;
-      res.json({ notifications: data || [], unread });
+        .order('created_at', { ascending: false });
+      if (cursor) query = query.lt('created_at', cursor);
+      const { data } = await query.limit(limit + 1);
+      const rows = data || [];
+      const page = rows.slice(0, limit);
+      const unread = rows.filter((n) => !n.read).length;
+      const nextCursor = rows.length > limit ? page[page.length - 1].created_at : null;
+      res.json({ notifications: page, unread, nextCursor });
     } catch (err) { next(err); }
   });
 

@@ -8,14 +8,17 @@ interface Props {
 export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [unread, setUnread] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
     try {
-      const { notifications: data, unread: count } = await api.notifications.list();
+      const { notifications: data, unread: count, nextCursor: cursor } = await api.notifications.list({ limit: 20 });
       setNotifications(data);
       setUnread(count);
+      setNextCursor(cursor);
     } catch {
       // not available in local dev — silently degrade
     }
@@ -43,6 +46,20 @@ export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
       setUnread(0);
       setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
       await api.notifications.readAll().catch(() => undefined);
+    }
+  }
+
+  async function loadMore() {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const { notifications: data, nextCursor: cursor } = await api.notifications.list({ limit: 20, cursor: nextCursor });
+      setNotifications((prev) => [...prev, ...data]);
+      setNextCursor(cursor);
+    } catch {
+      // keep existing notifications visible if pagination is temporarily unavailable
+    } finally {
+      setLoadingMore(false);
     }
   }
 
@@ -89,15 +106,22 @@ export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
             {notifications.length === 0 ? (
               <p className="notif-empty">No notifications yet.</p>
             ) : (
-              notifications.slice(0, 20).map((n) => (
-                <div key={n.id} className={`notif-item ${n.read ? '' : 'unread'}`}>
-                  <span className="notif-icon">{kindIcon[n.kind] ?? '🔔'}</span>
-                  <div className="notif-content">
-                    <p>{n.body}</p>
-                    <small>{relTime(n.createdAt)}</small>
+              <>
+                {notifications.map((n) => (
+                  <div key={n.id} className={`notif-item ${n.read ? '' : 'unread'}`}>
+                    <span className="notif-icon">{kindIcon[n.kind] ?? '🔔'}</span>
+                    <div className="notif-content">
+                      <p>{n.body}</p>
+                      <small>{relTime(n.createdAt)}</small>
+                    </div>
                   </div>
-                </div>
-              ))
+                ))}
+                {nextCursor && (
+                  <button className="notif-load-more" onClick={loadMore} disabled={loadingMore}>
+                    {loadingMore ? 'Loading...' : 'Load more'}
+                  </button>
+                )}
+              </>
             )}
           </div>
         </div>

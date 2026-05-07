@@ -42,6 +42,11 @@ class FakeQuery {
     return this;
   }
 
+  lt(field, value) {
+    this.filters.push({ field, value, op: 'lt' });
+    return this;
+  }
+
   order() {
     return this;
   }
@@ -129,6 +134,7 @@ class FakeQuery {
   matches(row) {
     return this.filters.every(({ field, value, op }) => {
       if (op === 'ilike') return String(row[field] || '').toLowerCase().includes(value);
+      if (op === 'lt') return row[field] < value;
       return row[field] === value;
     });
   }
@@ -753,6 +759,39 @@ test('invite API rejects malformed email before storing invite', async () => {
 
   const invites = await asUser(request(app).get('/api/decks/deck-demo-zanki/invites'), 'you', 'You').expect(200);
   assert.equal(invites.body.invites.length, 0);
+});
+
+test('notifications API supports limit and created_at cursor pagination', async () => {
+  const supabase = new FakeSupabase();
+  supabase.tables.notifications = [
+    { id: 'n3', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'comment', body: 'Newest', ref_id: null, read: false, created_at: '2026-05-07T12:03:00.000Z' },
+    { id: 'n2', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'reaction', body: 'Middle', ref_id: null, read: false, created_at: '2026-05-07T12:02:00.000Z' },
+    { id: 'n1', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'decision', body: 'Oldest', ref_id: null, read: true, created_at: '2026-05-07T12:01:00.000Z' }
+  ];
+  const { app } = await createTestApp({
+    auth: {
+      supabase,
+      requireUser(req, _res, next) {
+        req.user = { id: 'you', email: 'you@example.com', name: 'You' };
+        next();
+      }
+    }
+  });
+
+  const first = await request(app)
+    .get('/api/notifications')
+    .query({ limit: 2 })
+    .expect(200);
+  assert.deepEqual(first.body.notifications.map((notification) => notification.id), ['n3', 'n2']);
+  assert.equal(first.body.unread, 2);
+  assert.equal(first.body.nextCursor, '2026-05-07T12:02:00.000Z');
+
+  const second = await request(app)
+    .get('/api/notifications')
+    .query({ limit: 2, cursor: first.body.nextCursor })
+    .expect(200);
+  assert.deepEqual(second.body.notifications.map((notification) => notification.id), ['n1']);
+  assert.equal(second.body.nextCursor, null);
 });
 
 test('discover API returns real preview fields from public deck cards', async () => {

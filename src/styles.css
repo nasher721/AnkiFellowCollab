@@ -2709,6 +2709,9 @@ button:disabled {
 .notif-icon { font-size: 1rem; flex-shrink: 0; margin-top: 2px; }
 .notif-content p { font-size: 0.85rem; margin: 0 0 2px; line-height: 1.4; }
 .notif-content small { font-size: 0.75rem; color: var(--text-muted, #888); }
+.notif-load-more { width: 100%; padding: 10px 16px; border: 0; border-top: 1px solid var(--border, #f0f0f0); background: var(--bg-card, #fff); color: var(--accent, var(--color-primary, #4f46e5)); font-size: 0.85rem; font-weight: 600; cursor: pointer; }
+.notif-load-more:hover:not(:disabled) { background: var(--bg-hover, #f0f0f0); }
+.notif-load-more:disabled { color: var(--text-muted, #888); cursor: wait; }
 
 /* ─── Sidebar Nav (Phase 4) ───────────────────────────────────────────────── */
 

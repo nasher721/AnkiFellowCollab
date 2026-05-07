@@ -85,6 +85,12 @@ export interface Notification {
   createdAt: string;
 }
 
+export interface NotificationPage {
+  notifications: Notification[];
+  unread: number;
+  nextCursor: string | null;
+}
+
 export interface PublicDeck {
   id: string;
   name: string;
@@ -239,7 +245,13 @@ export const api = {
       }).then((r) => { if (!r.ok && r.status !== 204) throw new Error('Remove reaction failed'); })
   },
   notifications: {
-    list: () => jsonRequest<{ notifications: Notification[]; unread: number }>('/api/notifications'),
+    list: (params: { limit?: number; cursor?: string | null } = {}) => {
+      const query = new URLSearchParams();
+      if (params.limit !== undefined) query.set('limit', String(params.limit));
+      if (params.cursor) query.set('cursor', params.cursor);
+      const suffix = query.toString() ? `?${query.toString()}` : '';
+      return jsonRequest<NotificationPage>(`/api/notifications${suffix}`);
+    },
     readAll: () =>
       fetch('/api/notifications/read-all', {
         method: 'POST',
