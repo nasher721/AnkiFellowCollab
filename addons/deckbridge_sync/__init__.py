@@ -38,11 +38,18 @@ DEFAULT_ADDON_VERSION = "0.2.0"
 TRACKING_MODEL = "DeckBridge Sync"
 TRACKING_TAG_PREFIX = "deckbridge_card_"
 CONFIG_KEY = "deckbridge"
+DEFAULT_PLATFORM_URL = "https://anki-collab.vercel.app"
+LEGACY_LOCAL_PLATFORM_URLS = {
+    "http://localhost:4175",
+    "http://127.0.0.1:4175",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+}
 SUPPORTED_CONFLICT_POLICIES = ("detect", "overwrite-platform")
 _last_autoconfig_error = ""
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "platform_url": "http://localhost:4175",
+    "platform_url": DEFAULT_PLATFORM_URL,
     "api_token": "",
     "deck_id": "",
     "email": "",
@@ -198,9 +205,12 @@ def _validated_stored_from_flat(flat: Dict[str, Any], base: Optional[Dict[str, A
 def _flat_from_stored(stored: Dict[str, Any]) -> Dict[str, Any]:
     mapping = _first_mapping(stored)
     auto_sync_minutes = int(stored.get("auto_sync_minutes", DEFAULT_CONFIG["auto_sync_minutes"]) or 0)
+    platform = stored.get("url", stored.get("platform_url", DEFAULT_CONFIG["platform_url"]))
+    if str(platform or "").strip().rstrip("/") in LEGACY_LOCAL_PLATFORM_URLS:
+        platform = DEFAULT_PLATFORM_URL
     return {
         **DEFAULT_CONFIG,
-        "platform_url": stored.get("url", stored.get("platform_url", DEFAULT_CONFIG["platform_url"])),
+        "platform_url": platform,
         "api_token": stored.get("token", stored.get("api_token", "")),
         "email": stored.get("email", stored.get("email", "")),
         "deck_id": mapping.get("deckId", stored.get("deck_id", DEFAULT_CONFIG["deck_id"])),

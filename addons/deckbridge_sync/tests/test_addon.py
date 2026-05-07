@@ -38,6 +38,7 @@ from deckbridge_sync import (
     note_query,
     validate_token,
     TRACKING_TAG_PREFIX,
+    _flat_from_stored,
     _handle_url_scheme,
 )
 
@@ -262,7 +263,7 @@ class TestDefaultConfig(unittest.TestCase):
             self.assertIn(field, DEFAULT_CONFIG, f"Missing field: {field}")
 
     def test_defaults(self):
-        self.assertEqual(DEFAULT_CONFIG['platform_url'], 'http://localhost:4175')
+        self.assertEqual(DEFAULT_CONFIG['platform_url'], 'https://anki-collab.vercel.app')
         self.assertEqual(DEFAULT_CONFIG['api_token'], '')
         self.assertEqual(DEFAULT_CONFIG['deck_id'], '')
         self.assertEqual(DEFAULT_CONFIG['local_deck'], '')
@@ -270,6 +271,10 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertEqual(DEFAULT_CONFIG['auto_sync_minutes'], 0)
         self.assertEqual(DEFAULT_CONFIG['sync_on_profile_open'], False)
         self.assertEqual(DEFAULT_CONFIG['sync_on_close'], False)
+
+    def test_legacy_local_default_is_migrated_to_hosted_url(self):
+        flat = _flat_from_stored({'url': 'http://localhost:4175', 'deckMappings': []})
+        self.assertEqual(flat['platform_url'], 'https://anki-collab.vercel.app')
 
 
 class TestPlatformUrl(unittest.TestCase):

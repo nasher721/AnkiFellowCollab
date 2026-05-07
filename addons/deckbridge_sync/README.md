@@ -6,7 +6,7 @@ DeckBridge Sync turns Anki into the local bridge for DeckBridge. It can push the
 
 In Anki, open `Tools > DeckBridge Sync > Settings`.
 
-- `Platform URL`: the DeckBridge API origin, for example `https://your-app.vercel.app` or `http://localhost:4175`.
+- `Platform URL`: the DeckBridge API origin, normally `https://anki-collab.vercel.app`. Use a local URL such as `http://localhost:4175` only when running DeckBridge locally.
 - `Email` and `Password`: click `Log in to DeckBridge` to create and save an add-on token from your DeckBridge account.
 - `API token`: a DeckBridge add-on token. This is filled automatically after login, or can still be pasted manually.
 - `DeckBridge deck ID`: optional on first setup. If blank, the first push creates a DeckBridge workspace from the selected Anki deck and saves the returned deck ID.
