@@ -217,7 +217,8 @@ export function createLocalRepository() {
     async bulkDecideSuggestions(user, deckId, suggestionIds, decision) {
       const state = await loadState();
       ensureCollections(state);
-      const { deck } = requireRole(state, user.id, deckId, 'owner');
+      if (new Set(suggestionIds).size !== suggestionIds.length) fail(400, 'duplicate_suggestion_ids', 'suggestionIds must be unique');
+      const { deck } = requireRole(state, user.id, deckId, 'reviewer');
       const selected = suggestionIds.map((suggestionId) => state.suggestions.find((item) => item.id === suggestionId && item.deckId === deck.id));
       if (selected.some((suggestion) => !suggestion)) fail(404, 'suggestion_not_found', 'Suggestion not found');
       if (selected.some((suggestion) => suggestion.status !== 'pending')) fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');

@@ -279,7 +279,7 @@ function deriveOwnerAttentionItems({
     items.push({
       id: 'suggestions',
       label: `${pendingSuggestions} suggestion${pendingSuggestions === 1 ? '' : 's'} pending`,
-      detail: canReview ? 'Owner decisions are waiting.' : 'Owner review is still in progress.',
+      detail: canReview ? 'Review decisions are waiting.' : 'Reviewer access is needed.',
       tone: 'warning',
       action: 'suggestions',
       actionLabel: 'Review'
@@ -309,7 +309,7 @@ function deriveOwnerAttentionItems({
     items.push({
       id: 'visibility',
       label: 'Deck is private',
-      detail: canReview ? 'Create a share link when the group is ready.' : 'Owner access controls sharing.',
+      detail: 'Owner access controls sharing.',
       tone: 'neutral',
       action: 'settings',
       actionLabel: 'Settings'
@@ -600,9 +600,10 @@ export default function App() {
   const currentMembership = state?.memberships?.find((item) => item.deckId === activeDeck?.id);
   const isDevDemo = import.meta.env.DEV;
   const membershipRole = isDevDemo
-    ? (state?.role === 'owner' ? 'owner' : 'contributor')
+    ? (state?.role || 'contributor')
     : currentMembership?.role || (state?.role === 'owner' ? 'owner' : 'contributor');
-  const canReview = membershipRole === 'owner';
+  const canReview = ['owner', 'editor', 'reviewer'].includes(membershipRole);
+  const canManageDeck = membershipRole === 'owner';
   const canSuggest = ['owner', 'editor', 'reviewer', 'contributor'].includes(membershipRole);
   const suggestions = useMemo(
     () => (state?.suggestions || []).filter((item) => item.deckId === activeDeck?.id),
@@ -747,9 +748,9 @@ export default function App() {
     refreshWith(api.session({ activeDeckId: deckId }), 'Deck switched');
   }
 
-  function switchRole(role: 'owner' | 'contributor') {
+  function switchRole(role: AppState['role']) {
     if (!isDevDemo) return;
-    refreshWith(api.session({ role }), role === 'owner' ? 'Owner review controls enabled' : 'Contributor suggestion mode enabled');
+    refreshWith(api.session({ role }), ['owner', 'editor', 'reviewer'].includes(role) ? 'Review controls updated' : 'Contributor suggestion mode enabled');
   }
 
   function toggleCardSelection(cardId: string) {
@@ -1131,7 +1132,9 @@ export default function App() {
             {isDevDemo ? (
               <div className="role-toggle" aria-label="Role selector">
                 <button className={membershipRole === 'owner' ? 'selected' : ''} onClick={() => switchRole('owner')}>Owner</button>
-                <button className={membershipRole !== 'owner' ? 'selected' : ''} onClick={() => switchRole('contributor')}>Contributor</button>
+                <button className={membershipRole === 'editor' ? 'selected' : ''} onClick={() => switchRole('editor')}>Editor</button>
+                <button className={membershipRole === 'reviewer' ? 'selected' : ''} onClick={() => switchRole('reviewer')}>Reviewer</button>
+                <button className={membershipRole === 'contributor' ? 'selected' : ''} onClick={() => switchRole('contributor')}>Contributor</button>
               </div>
             ) : null}
             <NotificationsBell />
@@ -1219,7 +1222,7 @@ export default function App() {
               <AnalyticsDashboard
                 deckId={activeDeck.id}
                 deckName={activeDeck.name}
-                isOwner={canReview}
+                isOwner={canManageDeck}
                 currentVisibility={activeDeckVisibility}
                 onSetVisibility={(v) => setDeckVisibility((prev) => ({ ...prev, [activeDeck.id]: v }))}
               />
@@ -1238,7 +1241,7 @@ export default function App() {
               <DeckSettingsView
                 deck={activeDeck}
                 visibility={activeDeckVisibility}
-                canReview={canReview}
+                canReview={canManageDeck}
                 embedCode={deckEmbedCode}
                 copiedShare={copiedShare}
                 onCopied={setCopiedShare}
@@ -1351,7 +1354,7 @@ export default function App() {
                     <>
                       <button className="button secondary" onClick={() => setBulkAction('tag-add')}>+ Add tag</button>
                       <button className="button secondary" onClick={() => setBulkAction('tag-remove')}>- Remove tag</button>
-                      {canReview && <button className="button danger-outline" onClick={() => setBulkAction('delete')}>Delete</button>}
+                      {canManageDeck && <button className="button danger-outline" onClick={() => setBulkAction('delete')}>Delete</button>}
                     </>
                   )}
                   <button className="button secondary" onClick={() => { setSelectedCardIds(new Set()); setBulkAction(null); }}>Clear selection</button>
@@ -1597,33 +1600,20 @@ export default function App() {
                   className={`queue-item ${suggestion.id === selectedSuggestion?.id ? 'active' : ''}`}
                   key={suggestion.id}
                   onClick={() => setSelectedSuggestionId(suggestion.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      setSelectedSuggestionId(suggestion.id);
-                    }
-                  }}
-                  role="button"
-                  tabIndex={0}
                 >
                   {canReview && suggestion.status === 'pending' ? (
-                    <span
-                      className={`queue-select${selectedSuggestionIds.has(suggestion.id) ? ' checked' : ''}`}
+                    <input
+                      type="checkbox"
+                      className="queue-select"
+                      checked={selectedSuggestionIds.has(suggestion.id)}
                       onClick={(event) => {
+                        event.stopPropagation();
+                      }}
+                      onChange={(event) => {
                         event.stopPropagation();
                         toggleSuggestionSelection(suggestion.id);
                       }}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          toggleSuggestionSelection(suggestion.id);
-                        }
-                      }}
-                      role="checkbox"
-                      aria-checked={selectedSuggestionIds.has(suggestion.id)}
                       aria-label={`${selectedSuggestionIds.has(suggestion.id) ? 'Deselect' : 'Select'} ${suggestion.authorName}'s suggestion`}
-                      tabIndex={0}
                     />
                   ) : <span className="queue-select-spacer" aria-hidden="true" />}
                   <span className="avatar">{initials(suggestion.authorName)}</span>

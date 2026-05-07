@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import request from 'supertest';
+import { createSeedState } from './domain.mjs';
 import { fail } from './errors.mjs';
 import { resolveTokenUser } from './tokens.mjs';
 
@@ -241,6 +242,14 @@ function asUser(req, id, name = id) {
     .set('x-deckbridge-user-id', id)
     .set('x-deckbridge-user-email', `${id}@example.com`)
     .set('x-deckbridge-user-name', name);
+}
+
+async function seedLocalState(dataDir, mutator) {
+  const state = createSeedState();
+  mutator(state);
+  await fs.mkdir(dataDir, { recursive: true });
+  await fs.writeFile(path.join(dataDir, 'state.json'), `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  return state;
 }
 
 test('authenticated API returns current user and visible decks', async () => {
@@ -551,6 +560,99 @@ test('bulk suggestion decisions accept multiple pending suggestions for a deck',
   const statuses = new Map(decided.body.suggestions.map((item) => [item.id, item.status]));
   assert.equal(statuses.get(firstId), 'rejected');
   assert.equal(statuses.get(secondId), 'rejected');
+});
+
+test('bulk suggestion validation rejects duplicate and oversized id lists', async () => {
+  const { app } = await createTestApp();
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: 'sugg-anca', decision: 'rejected' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'missing_suggestion_ids');
+    });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: ['sugg-anca', 'sugg-anca'], decision: 'rejected' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'duplicate_suggestion_ids');
+    });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: Array.from({ length: 101 }, (_, index) => `sugg-${index}`), decision: 'rejected' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'too_many_suggestion_ids');
+    });
+});
+
+test('bulk suggestion role access allows reviewers and editors but rejects contributors', async () => {
+  for (const role of ['reviewer', 'editor']) {
+    const { app, dataDir } = await createTestApp();
+    await seedLocalState(dataDir, (state) => {
+      state.collaborators.find((person) => person.id === 'you').role = role;
+    });
+
+    await asUser(request(app)
+      .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+      .send({ suggestionIds: ['sugg-anca'], decision: 'rejected' }), 'you', 'You')
+      .expect(200)
+      .expect((res) => {
+        assert.equal(res.body.suggestions.find((item) => item.id === 'sugg-anca').status, 'rejected');
+      });
+  }
+
+  const { app, dataDir } = await createTestApp();
+  await seedLocalState(dataDir, (state) => {
+    state.collaborators.find((person) => person.id === 'you').role = 'contributor';
+  });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: ['sugg-anca'], decision: 'rejected' }), 'you', 'You')
+    .expect(403)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'forbidden');
+    });
+});
+
+test('bulk suggestion decisions apply accepted suggestions in request order', async () => {
+  const { app } = await createTestApp();
+
+  const first = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions')
+    .send({
+      cardId: 'card-hpylori',
+      reason: 'First accepted change',
+      proposedFields: { Front: 'First accepted bulk update?' },
+      proposedTags: ['GI', 'Bulk', 'First']
+    }), 'maya', 'Maya Patel').expect(201);
+  const firstId = first.body.suggestions[0].id;
+
+  const second = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions')
+    .send({
+      cardId: 'card-hpylori',
+      reason: 'Second accepted change',
+      proposedFields: { Front: 'Second accepted bulk update?' },
+      proposedTags: ['GI', 'Bulk', 'Second']
+    }), 'maya', 'Maya Patel').expect(201);
+  const secondId = second.body.suggestions[0].id;
+
+  const decided = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: [firstId, secondId], decision: 'accepted' }), 'you', 'You').expect(200);
+
+  const card = decided.body.decks[0].cards.find((item) => item.id === 'card-hpylori');
+  const statuses = new Map(decided.body.suggestions.map((item) => [item.id, item.status]));
+  assert.equal(card.fields.Front, 'Second accepted bulk update?');
+  assert.deepEqual(card.tags, ['GI', 'Bulk', 'Second']);
+  assert.equal(statuses.get(firstId), 'accepted');
+  assert.equal(statuses.get(secondId), 'accepted');
 });
 
 test('upload, export, and local-bridge conflict APIs use authenticated deck scope', async () => {

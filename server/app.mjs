@@ -521,11 +521,15 @@ export function createApp(options = {}) {
       if (!['accepted', 'rejected', 'revision'].includes(req.body.decision)) {
         fail(400, 'invalid_decision', 'Decision must be accepted, rejected, or revision');
       }
-      const suggestionIds = (Array.isArray(req.body.suggestionIds) ? req.body.suggestionIds : [])
+      if (!Array.isArray(req.body.suggestionIds)) {
+        fail(400, 'missing_suggestion_ids', 'suggestionIds array is required');
+      }
+      const suggestionIds = req.body.suggestionIds
         .map((id) => cleanShortText(id, '', 200))
-        .filter(Boolean)
-        .slice(0, 100);
+        .filter(Boolean);
       if (!suggestionIds.length) fail(400, 'missing_suggestion_ids', 'suggestionIds array is required');
+      if (suggestionIds.length > 100) fail(400, 'too_many_suggestion_ids', 'Bulk decisions support up to 100 suggestions');
+      if (new Set(suggestionIds).size !== suggestionIds.length) fail(400, 'duplicate_suggestion_ids', 'suggestionIds must be unique');
       if (!repository.bulkDecideSuggestions) fail(501, 'bulk_decision_unavailable', 'Bulk suggestion decisions are unavailable');
       res.json(await repository.bulkDecideSuggestions(req.user, deckId, suggestionIds, req.body.decision));
     } catch (error) {

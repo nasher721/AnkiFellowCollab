@@ -1851,18 +1851,21 @@ button:disabled {
 }
 
 .queue-select {
+  appearance: none;
+  flex: none;
   border: 1.5px solid #aeb8c7;
   border-radius: 5px;
   background: #fff;
   box-shadow: inset 0 0 0 2px #fff;
+  cursor: pointer;
 }
 
-.queue-select.checked {
+.queue-select:checked {
   border-color: var(--blue);
   background: var(--blue);
 }
 
-.queue-select.checked::after {
+.queue-select:checked::after {
   content: "";
   display: block;
   width: 8px;
@@ -1871,6 +1874,11 @@ button:disabled {
   border-left: 2px solid #fff;
   border-bottom: 2px solid #fff;
   transform: rotate(-45deg);
+}
+
+.queue-select:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .queue-item.active,

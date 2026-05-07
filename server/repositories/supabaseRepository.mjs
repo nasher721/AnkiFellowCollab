@@ -400,6 +400,7 @@ export function createSupabaseRepository(options = {}) {
     },
 
     async bulkDecideSuggestions(user, deckId, suggestionIds, decision) {
+      if (new Set(suggestionIds).size !== suggestionIds.length) fail(400, 'duplicate_suggestion_ids', 'suggestionIds must be unique');
       await assertMembership(user.id, deckId, 'reviewer');
       const { data: suggestions, error } = await supabase
         .from('suggestions')
@@ -411,9 +412,11 @@ export function createSupabaseRepository(options = {}) {
       if (suggestions.some((suggestion) => suggestion.status !== 'pending')) {
         fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');
       }
+      const byId = new Map(suggestions.map((suggestion) => [suggestion.id, suggestion]));
+      const orderedSuggestions = suggestionIds.map((suggestionId) => byId.get(suggestionId));
 
       if (decision === 'accepted') {
-        for (const suggestion of suggestions) {
+        for (const suggestion of orderedSuggestions) {
           const { data: card, error: cardError } = await supabase.from('cards').select('*').eq('id', suggestion.card_id).eq('deck_id', deckId).single();
           if (cardError || !card) fail(404, 'card_not_found', 'Card not found');
           const nextCard = applySuggestion(toDeck({ id: deckId, name: '', imported_at: nowIso() }, [toCard(card)]), toSuggestion(suggestion), user.name);
@@ -428,20 +431,24 @@ export function createSupabaseRepository(options = {}) {
       }
 
       const reviewedAt = nowIso();
-      const { error: updateError } = await supabase.from('suggestions').update({
+      const { data: updatedSuggestions, error: updateError } = await supabase.from('suggestions').update({
         status: decision,
         reviewed_at: reviewedAt,
         reviewed_by: user.name
-      }).eq('deck_id', deckId).in('id', suggestionIds);
+      }).eq('deck_id', deckId).eq('status', 'pending').in('id', suggestionIds).select('id');
       if (updateError) throw updateError;
-      await supabase.from('activity').insert({
+      if (Array.isArray(updatedSuggestions) && updatedSuggestions.length !== suggestionIds.length) {
+        fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');
+      }
+      const { error: activityError } = await supabase.from('activity').insert({
         id: `act-${randomUUID()}`,
         deck_id: deckId,
         user_id: user.id,
         kind: decision,
-        text: `${user.name} ${decision} ${suggestions.length} suggestion(s)`,
+        text: `${user.name} ${decision} ${orderedSuggestions.length} suggestion(s)`,
         created_at: reviewedAt
       });
+      if (activityError) throw activityError;
       return getDeckRows(user, deckId);
     },
 
