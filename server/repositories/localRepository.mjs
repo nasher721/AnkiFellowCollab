@@ -3,13 +3,18 @@ import { applySuggestion, buildAddonSyncResult, mergeAddonCards, nowIso, summari
 import { fail } from '../errors.mjs';
 import { loadState, saveState } from '../store.mjs';
 
-const roleRank = { viewer: 0, editor: 1, owner: 2 };
+const roleRank = { viewer: 0, contributor: 1, reviewer: 2, editor: 3, owner: 4 };
 
 function ensureCollections(state) {
   state.studySessions ||= [];
   state.shareLinks ||= [];
+  state.invites ||= [];
   state.sync ||= {};
   state.sync.lastAddonSync ??= null;
+  // Migrate legacy 'collaborator' role to 'contributor'
+  for (const c of (state.collaborators || [])) {
+    if (c.role === 'collaborator') c.role = 'contributor';
+  }
 }
 
 function mergeConflicts(existing = [], incoming = []) {
@@ -54,10 +59,12 @@ function collaboratorToUser(person) {
 }
 
 function membershipFor(deck, person) {
+  // Migrate legacy 'collaborator' role string to 'contributor'
+  const role = person.role === 'collaborator' ? 'contributor' : (person.role || 'viewer');
   return {
     deckId: deck.id,
     userId: person.id,
-    role: person.role === 'owner' ? 'owner' : 'editor',
+    role,
     createdAt: deck.importedAt
   };
 }
@@ -156,7 +163,7 @@ export function createLocalRepository() {
     async createSuggestion(user, payload) {
       const state = await loadState();
       ensureCollections(state);
-      const { deck, collaborator } = requireRole(state, user.id, payload.deckId, 'editor');
+      const { deck, collaborator } = requireRole(state, user.id, payload.deckId, 'contributor');
       const card = deck.cards.find((item) => item.id === payload.cardId);
       if (!card) fail(404, 'card_not_found', 'Card not found');
       const suggestion = {
@@ -238,7 +245,7 @@ export function createLocalRepository() {
     async recordSyncConflicts(user, deckId, conflicts) {
       const state = await loadState();
       ensureCollections(state);
-      const { deck } = requireRole(state, user.id, deckId, 'editor');
+      const { deck } = requireRole(state, user.id, deckId, 'contributor');
       state.sync.conflicts = conflicts.map((conflict) => ({
         id: conflict.id || `conflict-${randomUUID()}`,
         deckId,
@@ -261,7 +268,7 @@ export function createLocalRepository() {
     async syncCardsFromAddon(user, deckId, syncInput) {
       const state = await loadState();
       ensureCollections(state);
-      const { deck } = requireRole(state, user.id, deckId, 'editor');
+      const { deck } = requireRole(state, user.id, deckId, 'contributor');
       const result = mergeAddonCards(deck, syncInput, user.name);
       const lastAddonSync = buildAddonSyncResult(syncInput, result, state.sync.lastAddonSync);
       const isFirstBatchChunk = !syncInput.batch || syncInput.batch.index === 0;
@@ -354,6 +361,169 @@ export function createLocalRepository() {
         .filter((session) => session.userId === user.id && (!deckId || session.deckId === deckId))
         .sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))
         .slice(0, limit);
+    },
+
+    async getAnalytics(user, deckId) {
+      const state = await loadState();
+      ensureCollections(state);
+      const { deck } = getMembership(state, user.id, deckId);
+      const suggestions = state.suggestions.filter((s) => s.deckId === deckId);
+      const total = suggestions.length;
+      const accepted = suggestions.filter((s) => s.status === 'accepted').length;
+      const rejected = suggestions.filter((s) => s.status === 'rejected').length;
+      const pending = suggestions.filter((s) => s.status === 'pending').length;
+
+      const byAuthor = {};
+      for (const s of suggestions) {
+        if (!byAuthor[s.authorId]) byAuthor[s.authorId] = { name: s.authorName, total: 0, accepted: 0 };
+        byAuthor[s.authorId].total++;
+        if (s.status === 'accepted') byAuthor[s.authorId].accepted++;
+      }
+      const leaderboard = Object.values(byAuthor)
+        .sort((a, b) => b.accepted - a.accepted)
+        .slice(0, 10);
+
+      const byState = {};
+      for (const card of deck.cards) {
+        const cardState = card.state || 'Unknown';
+        byState[cardState] = (byState[cardState] || 0) + 1;
+      }
+
+      const sessions = state.studySessions.filter((s) => s.deckId === deckId);
+      const sessionTotals = sessions.reduce((acc, s) => {
+        acc.total += 1;
+        acc.durationSeconds += Number(s.durationSeconds) || 0;
+        acc.cardsStudied += Number(s.cardsStudied) || 0;
+        acc.cardsCorrect += Number(s.cardsCorrect) || 0;
+        return acc;
+      }, { total: 0, durationSeconds: 0, cardsStudied: 0, cardsCorrect: 0 });
+
+      // Group sessions by date (last 8 calendar days with data)
+      const dayMap = {};
+      for (const s of sessions) {
+        const day = String(s.startedAt || s.createdAt || '').slice(0, 10);
+        if (day) dayMap[day] = (dayMap[day] || 0) + (Number(s.cardsStudied) || 0);
+      }
+      const weeklyTrend = Object.entries(dayMap)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .slice(-8)
+        .map(([date, count]) => ({ date, count }));
+
+      return {
+        suggestions: { total, accepted, rejected, pending, acceptanceRate: total ? Math.round((accepted / total) * 100) : 0 },
+        stars: 0,
+        leaderboard,
+        cards: { total: deck.cards.length, byState },
+        study: {
+          sessions: {
+            ...sessionTotals,
+            accuracyRate: sessionTotals.cardsStudied ? Math.round((sessionTotals.cardsCorrect / sessionTotals.cardsStudied) * 100) : 0
+          },
+          weeklyTrend,
+          strugglingCards: []
+        }
+      };
+    },
+
+    async deleteCards(user, deckId, cardIds) {
+      const state = await loadState();
+      ensureCollections(state);
+      requireRole(state, user.id, deckId, 'owner');
+      const deck = state.decks.find((d) => d.id === deckId);
+      const idSet = new Set(cardIds);
+      const before = deck.cards.length;
+      deck.cards = deck.cards.filter((c) => !idSet.has(c.id));
+      const deleted = before - deck.cards.length;
+      await saveState(state);
+      return { deleted };
+    },
+
+    async createInvite(user, deckId, { email, role }) {
+      const state = await loadState();
+      ensureCollections(state);
+      requireRole(state, user.id, deckId, 'editor');
+      const token = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
+      const now = nowIso();
+      const invite = {
+        id: `inv-${randomUUID()}`,
+        deckId,
+        invitedBy: user.id,
+        email: email.toLowerCase(),
+        role,
+        token,
+        status: 'pending',
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+        createdAt: now,
+        respondedAt: null
+      };
+      state.invites.unshift(invite);
+      await saveState(state);
+      return invite;
+    },
+
+    async listInvites(user, deckId) {
+      const state = await loadState();
+      ensureCollections(state);
+      requireRole(state, user.id, deckId, 'editor');
+      return state.invites
+        .filter((inv) => inv.deckId === deckId)
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    },
+
+    async revokeInvite(user, deckId, inviteId) {
+      const state = await loadState();
+      ensureCollections(state);
+      requireRole(state, user.id, deckId, 'owner');
+      state.invites = state.invites.filter((inv) => !(inv.id === inviteId && inv.deckId === deckId));
+      await saveState(state);
+    },
+
+    async previewInvite(token) {
+      const state = await loadState();
+      ensureCollections(state);
+      const invite = state.invites.find((inv) => inv.token === token);
+      if (!invite) fail(404, 'invite_not_found', 'Invite not found');
+      const deck = state.decks.find((d) => d.id === invite.deckId);
+      return {
+        deckId: invite.deckId,
+        deckName: deck?.name || null,
+        role: invite.role,
+        email: invite.email,
+        status: invite.status,
+        expiresAt: invite.expiresAt
+      };
+    },
+
+    async acceptInvite(user, token) {
+      const state = await loadState();
+      ensureCollections(state);
+      const invite = state.invites.find((inv) => inv.token === token);
+      if (!invite) fail(404, 'invite_not_found', 'Invite not found');
+      if (invite.status !== 'pending') fail(409, 'invite_used', `Invite has already been ${invite.status}`);
+      if (invite.expiresAt && new Date(invite.expiresAt) < new Date()) {
+        invite.status = 'expired';
+        await saveState(state);
+        fail(410, 'invite_expired', 'This invite link has expired');
+      }
+      if (invite.email.toLowerCase() !== (user.email || '').toLowerCase()) {
+        fail(403, 'invite_email_mismatch', 'This invite was sent to a different email address');
+      }
+      const existing = state.collaborators.find((c) => c.id === user.id);
+      if (!existing) {
+        state.collaborators.push({
+          id: user.id,
+          name: user.name || user.email,
+          email: user.email,
+          role: invite.role,
+          accepted: 1
+        });
+      } else {
+        existing.role = invite.role;
+      }
+      invite.status = 'accepted';
+      invite.respondedAt = nowIso();
+      await saveState(state);
+      return { deckId: invite.deckId, role: invite.role };
     },
 
     async createShareLink(user, deckId, link) {

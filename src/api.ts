@@ -1,4 +1,4 @@
-import type { ApiError, AppState, Role, StorageAsset, User, DeckMember, DeckSummary } from './types';
+import type { ApiError, AppState, DemoRole, StorageAsset, User, DeckMember, DeckSummary } from './types';
 
 let authToken: string | null = null;
 
@@ -123,6 +123,41 @@ export interface DeckAnalytics {
   };
   stars: number;
   leaderboard: { name: string; total: number; accepted: number }[];
+  cards?: {
+    total: number;
+    byState: Record<string, number>;
+  };
+  study?: {
+    sessions: {
+      total: number;
+      durationSeconds: number;
+      cardsStudied: number;
+      cardsCorrect: number;
+      accuracyRate: number;
+    };
+    weeklyTrend: { date: string; count: number }[];
+    strugglingCards: { cardId: string; easeFactor: number; repetitions: number; nextDue: string }[];
+  };
+}
+
+export interface DeckInvite {
+  id: string;
+  deckId: string;
+  email: string;
+  role: 'viewer' | 'contributor' | 'reviewer' | 'editor';
+  status: 'pending' | 'accepted' | 'declined' | 'expired';
+  expiresAt: string | null;
+  createdAt: string;
+  respondedAt: string | null;
+}
+
+export interface InvitePreview {
+  deckId: string;
+  deckName: string | null;
+  role: string;
+  email: string;
+  status: string;
+  expiresAt: string | null;
 }
 
 export interface Template {
@@ -219,7 +254,7 @@ export const api = {
   decks: () => jsonRequest<{ decks: DeckSummary[] }>('/api/decks'),
   deck: (deckId: string) => jsonRequest<AppState>(`/api/decks/${deckId}`),
   state: () => jsonRequest<AppState>('/api/state'),
-  session: (payload: { role?: Role; activeDeckId?: string }) =>
+  session: (payload: { role?: DemoRole; activeDeckId?: string }) =>
     jsonRequest<AppState>('/api/session', {
       method: 'PATCH',
       body: JSON.stringify(payload)
@@ -341,11 +376,34 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name })
     }),
+  bulkDeleteCards: (deckId: string, cardIds: string[]) =>
+    jsonRequest<{ deleted: number }>(`/api/decks/${deckId}/cards`, {
+      method: 'DELETE',
+      body: JSON.stringify({ cardIds })
+    }),
   syncStudyProgress: (updates: Array<{ deckId: string; cardId: string; intervalDays: number; easeFactor: number; repetitions: number; nextDue: string; lastRating: number | null }>) =>
     jsonRequest<{ ok: boolean; synced: number }>('/api/study/progress', {
       method: 'POST',
       body: JSON.stringify({ updates })
     }),
   fetchStudyProgress: (deckId: string) =>
-    jsonRequest<{ progress: Array<{ cardId: string; intervalDays: number; easeFactor: number; repetitions: number; nextDue: string; lastRating: number | null; updatedAt: string }> }>(`/api/study/progress/${deckId}`)
+    jsonRequest<{ progress: Array<{ cardId: string; intervalDays: number; easeFactor: number; repetitions: number; nextDue: string; lastRating: number | null; updatedAt: string }> }>(`/api/study/progress/${deckId}`),
+  invites: {
+    list: (deckId: string) =>
+      jsonRequest<{ invites: DeckInvite[] }>(`/api/decks/${deckId}/invites`),
+    create: (deckId: string, email: string, role: DeckInvite['role']) =>
+      jsonRequest<{ invite: DeckInvite }>(`/api/decks/${deckId}/invites`, {
+        method: 'POST',
+        body: JSON.stringify({ email, role })
+      }),
+    revoke: (deckId: string, inviteId: string) =>
+      fetch(`/api/decks/${deckId}/invites/${inviteId}`, {
+        method: 'DELETE',
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
+      }).then((r) => { if (!r.ok && r.status !== 204) throw new Error('Revoke failed'); }),
+    accept: (token: string) =>
+      jsonRequest<{ deckId: string; role: string }>(`/api/invites/${token}/accept`, { method: 'POST' }),
+    preview: (token: string) =>
+      jsonRequest<{ invite: InvitePreview }>(`/api/invites/${token}`)
+  }
 };

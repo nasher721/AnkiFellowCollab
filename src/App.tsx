@@ -1,6 +1,6 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Session } from '@supabase/supabase-js';
-import { api, setApiAuthToken, type AddonDownloadAvailability, type AddonVersion, type ShareLink } from './api';
+import { api, setApiAuthToken, type AddonDownloadAvailability, type AddonVersion, type DeckInvite, type ShareLink } from './api';
 import type { AddonSyncResult, AppState, Deck, DeckCard, DeckSummary, Suggestion } from './types';
 import { useRealtime } from './useRealtime';
 import { ConnectAnkiWizard } from './ConnectAnkiWizard';
@@ -465,6 +465,9 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [showConnectWizard, setShowConnectWizard] = useState(false);
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
+  const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(new Set());
+  const [bulkAction, setBulkAction] = useState<'tag-add' | 'tag-remove' | 'delete' | null>(null);
+  const [bulkTagInput, setBulkTagInput] = useState('');
   const [activeTab, setActiveTab] = useState<'overview' | 'study' | 'cards' | 'stats' | 'analytics' | 'activity' | 'settings'>('overview');
   const [showStudy, setShowStudy] = useState(false);
   const [studyApprovedOnly, setStudyApprovedOnly] = useState(true);
@@ -739,6 +742,73 @@ export default function App() {
     refreshWith(api.session({ role }), role === 'owner' ? 'Owner review controls enabled' : 'Collaborator suggestion mode enabled');
   }
 
+  function toggleCardSelection(cardId: string) {
+    setSelectedCardIds((prev) => {
+      const next = new Set(prev);
+      next.has(cardId) ? next.delete(cardId) : next.add(cardId);
+      return next;
+    });
+  }
+
+  function handleBulkTagAdd(tag: string) {
+    if (!tag.trim() || !activeDeck || !state) return;
+    const trimmed = tag.trim();
+    const cards = activeDeck.cards.filter((c) => selectedCardIds.has(c.id));
+    const tasks = cards
+      .filter((c) => !c.tags.includes(trimmed))
+      .map((c) => api.createSuggestion({
+        deckId: activeDeck.id,
+        cardId: c.id,
+        authorId: state.user?.id || 'you',
+        reason: `Bulk: add tag "${trimmed}"`,
+        proposedFields: c.fields,
+        proposedTags: [...c.tags, trimmed],
+      }));
+    if (tasks.length === 0) { setBulkAction(null); setBulkTagInput(''); return; }
+    refreshWith(
+      Promise.all(tasks).then(() => api.deck(activeDeck.id)),
+      `Tag "${trimmed}" suggested for ${tasks.length} card(s)`
+    );
+    setBulkAction(null);
+    setBulkTagInput('');
+    setSelectedCardIds(new Set());
+  }
+
+  function handleBulkTagRemove(tag: string) {
+    if (!tag.trim() || !activeDeck || !state) return;
+    const trimmed = tag.trim();
+    const cards = activeDeck.cards.filter((c) => selectedCardIds.has(c.id));
+    const tasks = cards
+      .filter((c) => c.tags.includes(trimmed))
+      .map((c) => api.createSuggestion({
+        deckId: activeDeck.id,
+        cardId: c.id,
+        authorId: state.user?.id || 'you',
+        reason: `Bulk: remove tag "${trimmed}"`,
+        proposedFields: c.fields,
+        proposedTags: c.tags.filter((t) => t !== trimmed),
+      }));
+    if (tasks.length === 0) { setBulkAction(null); setBulkTagInput(''); return; }
+    refreshWith(
+      Promise.all(tasks).then(() => api.deck(activeDeck.id)),
+      `Tag removal suggested for ${tasks.length} card(s)`
+    );
+    setBulkAction(null);
+    setBulkTagInput('');
+    setSelectedCardIds(new Set());
+  }
+
+  function handleBulkDelete() {
+    if (!activeDeck || selectedCardIds.size === 0) return;
+    const ids = [...selectedCardIds];
+    refreshWith(
+      api.bulkDeleteCards(activeDeck.id, ids).then(() => api.deck(activeDeck.id)),
+      `${ids.length} card(s) deleted`
+    );
+    setBulkAction(null);
+    setSelectedCardIds(new Set());
+  }
+
   function handleSyncAction(action: SyncHealth['primaryAction']) {
     if (action === 'check') {
       refreshWith(api.ankiStatus().then(() => api.state()), 'Sync status refreshed');
@@ -778,7 +848,7 @@ export default function App() {
 
   function createSuggestion() {
     if (!activeDeck || !selectedCard || !state || !canSuggest) return;
-    const author = state.collaborators.find((item) => item.role === 'collaborator') || state.collaborators[0];
+    const author = state.collaborators.find((item) => item.role !== 'owner') || state.collaborators[0];
     const front = fieldValue(selectedCard, 'Front');
     const back = fieldValue(selectedCard, 'Back');
     refreshWith(api.createSuggestion({
@@ -1201,9 +1271,71 @@ export default function App() {
                 </button>
               </div>
 
+              {selectedCardIds.size > 0 && (
+                <div className="bulk-toolbar">
+                  <span className="bulk-count">{selectedCardIds.size} selected</span>
+                  {bulkAction === 'tag-add' && (
+                    <span className="bulk-tag-form">
+                      <input
+                        className="bulk-tag-input"
+                        placeholder="Tag name…"
+                        value={bulkTagInput}
+                        onChange={(e) => setBulkTagInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleBulkTagAdd(bulkTagInput); if (e.key === 'Escape') setBulkAction(null); }}
+                        autoFocus
+                      />
+                      <button className="button primary" onClick={() => handleBulkTagAdd(bulkTagInput)}>Apply</button>
+                      <button className="button secondary" onClick={() => { setBulkAction(null); setBulkTagInput(''); }}>Cancel</button>
+                    </span>
+                  )}
+                  {bulkAction === 'tag-remove' && (
+                    <span className="bulk-tag-form">
+                      <input
+                        className="bulk-tag-input"
+                        placeholder="Tag to remove…"
+                        value={bulkTagInput}
+                        onChange={(e) => setBulkTagInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleBulkTagRemove(bulkTagInput); if (e.key === 'Escape') setBulkAction(null); }}
+                        autoFocus
+                      />
+                      <button className="button primary" onClick={() => handleBulkTagRemove(bulkTagInput)}>Apply</button>
+                      <button className="button secondary" onClick={() => { setBulkAction(null); setBulkTagInput(''); }}>Cancel</button>
+                    </span>
+                  )}
+                  {bulkAction === 'delete' && (
+                    <span className="bulk-confirm">
+                      <span>Delete {selectedCardIds.size} card(s)? This cannot be undone.</span>
+                      <button className="button danger" onClick={handleBulkDelete}>Confirm delete</button>
+                      <button className="button secondary" onClick={() => setBulkAction(null)}>Cancel</button>
+                    </span>
+                  )}
+                  {bulkAction === null && canSuggest && (
+                    <>
+                      <button className="button secondary" onClick={() => setBulkAction('tag-add')}>+ Add tag</button>
+                      <button className="button secondary" onClick={() => setBulkAction('tag-remove')}>- Remove tag</button>
+                      {canReview && <button className="button danger-outline" onClick={() => setBulkAction('delete')}>Delete</button>}
+                    </>
+                  )}
+                  <button className="button secondary" onClick={() => { setSelectedCardIds(new Set()); setBulkAction(null); }}>Clear selection</button>
+                </div>
+              )}
+
               <div className="card-table" role="table">
                 <div className="table-header" role="row">
-                  <span />
+                  <span>
+                    <input
+                      type="checkbox"
+                      aria-label="Select all on page"
+                      checked={pagedCards.length > 0 && pagedCards.every((c) => selectedCardIds.has(c.id))}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedCardIds((prev) => { const next = new Set(prev); pagedCards.forEach((c) => next.add(c.id)); return next; });
+                        } else {
+                          setSelectedCardIds((prev) => { const next = new Set(prev); pagedCards.forEach((c) => next.delete(c.id)); return next; });
+                        }
+                      }}
+                    />
+                  </span>
                   <span>Card</span>
                   <span>Note Type</span>
                   <span>Tags</span>
@@ -1233,26 +1365,39 @@ export default function App() {
                       />
                     </div>
                   ) : (
-                  <button
-                    className={`table-row ${card.id === selectedCard?.id ? 'selected' : ''}`}
+                  <div
+                    className={`table-row ${card.id === selectedCard?.id ? 'selected' : ''} ${selectedCardIds.has(card.id) ? 'checked' : ''}`}
                     key={card.id}
-                    onClick={() => {
+                    onClick={(e) => {
+                      if (selectedCardIds.size > 0 || e.shiftKey) {
+                        toggleCardSelection(card.id);
+                        return;
+                      }
                       setSelectedCardId(card.id);
                       const linked = suggestions.find((item) => item.cardId === card.id && item.status === 'pending');
                       if (linked) setSelectedSuggestionId(linked.id);
                     }}
-                    onDoubleClick={() => canSuggest && setEditingCardId(card.id)}
-                    title={canSuggest ? 'Double-click to edit' : undefined}
+                    onDoubleClick={() => canSuggest && selectedCardIds.size === 0 && setEditingCardId(card.id)}
+                    title={canSuggest ? 'Double-click to edit / Shift-click to select' : 'Shift-click to select'}
                     role="row"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCardSelection(card.id); } }}
                   >
-                    <span className="checkbox" />
+                    <span
+                      className={`checkbox${selectedCardIds.has(card.id) ? ' checked' : ''}`}
+                      onClick={(e) => { e.stopPropagation(); toggleCardSelection(card.id); }}
+                      aria-label={selectedCardIds.has(card.id) ? 'Deselect card' : 'Select card'}
+                      role="checkbox"
+                      aria-checked={selectedCardIds.has(card.id)}
+                      tabIndex={-1}
+                    />
                     <span className="card-front">{fieldValue(card, 'Front') || Object.values(card.fields)[0]}</span>
                     <span>{card.type}</span>
                     <span className="tag-list">{card.tags.slice(0, 2).map((tag) => <em key={tag}>{tag}</em>)}</span>
                     <span>{card.due ?? '-'}</span>
                     <span><b className={`state-chip ${statusColors[card.state] || 'neutral'}`}>{card.state}</b></span>
                     <span><small>{relativeTime(card.modifiedAt)}<br />{card.modifiedBy}</small></span>
-                  </button>
+                  </div>
                   )
                 )) : <EmptyState message="No cards match the current filters." />}
               </div>
@@ -1616,6 +1761,11 @@ function DeckSettingsView({
   const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
   const [shareLoading, setShareLoading] = useState(false);
   const [shareError, setShareError] = useState('');
+  const [invites, setInvites] = useState<DeckInvite[]>([]);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<DeckInvite['role']>('contributor');
+  const [inviteLoading, setInviteLoading] = useState(false);
+  const [inviteError, setInviteError] = useState('');
   const primaryShareLink = shareLinks.find((link) => !link.disabledAt) || shareLinks[0] || null;
   const primaryShareUrl = primaryShareLink ? shareLinkUrl(primaryShareLink.token) : '';
 
@@ -1642,6 +1792,40 @@ function DeckSettingsView({
       mounted = false;
     };
   }, [canReview, deck.id]);
+
+  useEffect(() => {
+    if (!canReview) { setInvites([]); return; }
+    let mounted = true;
+    api.invites.list(deck.id)
+      .then(({ invites: list }) => { if (mounted) setInvites(list); })
+      .catch(() => { /* invites not available in this mode */ });
+    return () => { mounted = false; };
+  }, [canReview, deck.id]);
+
+  async function sendInvite(e: FormEvent) {
+    e.preventDefault();
+    if (!inviteEmail.trim()) return;
+    setInviteLoading(true);
+    setInviteError('');
+    try {
+      const { invite } = await api.invites.create(deck.id, inviteEmail.trim(), inviteRole);
+      setInvites((prev) => [invite, ...prev]);
+      setInviteEmail('');
+    } catch (err) {
+      setInviteError(err instanceof Error ? err.message : 'Unable to send invite');
+    } finally {
+      setInviteLoading(false);
+    }
+  }
+
+  async function revokeInvite(inviteId: string) {
+    try {
+      await api.invites.revoke(deck.id, inviteId);
+      setInvites((prev) => prev.filter((inv) => inv.id !== inviteId));
+    } catch (err) {
+      setInviteError(err instanceof Error ? err.message : 'Unable to revoke invite');
+    }
+  }
 
   async function createShareLink() {
     setShareLoading(true);
@@ -1712,6 +1896,64 @@ function DeckSettingsView({
           <button className="button secondary" onClick={() => copy(embedCode, 'Embed code copied')}>Copy embed code</button>
           <small>Placeholder code for a future embeddable public preview route.</small>
         </section>
+        {canReview && (
+          <section>
+            <h3>Invite collaborators</h3>
+            <form className="invite-form" onSubmit={sendInvite}>
+              <input
+                type="email"
+                className="invite-email-input"
+                placeholder="colleague@example.com"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                disabled={inviteLoading}
+                aria-label="Invite email address"
+                required
+              />
+              <select
+                className="invite-role-select"
+                value={inviteRole}
+                onChange={(e) => setInviteRole(e.target.value as DeckInvite['role'])}
+                disabled={inviteLoading}
+                aria-label="Invite role"
+              >
+                <option value="viewer">Viewer</option>
+                <option value="contributor">Contributor</option>
+                <option value="reviewer">Reviewer</option>
+                <option value="editor">Editor</option>
+              </select>
+              <button className="button primary" type="submit" disabled={inviteLoading || !inviteEmail.trim()}>
+                {inviteLoading ? 'Sending…' : 'Send invite'}
+              </button>
+            </form>
+            {inviteError && <p className="settings-note error">{inviteError}</p>}
+            <small>
+              Roles: Viewer (read-only) · Contributor (suggest edits) · Reviewer (decide suggestions) · Editor (manage deck)
+            </small>
+            {invites.length > 0 && (
+              <div className="invite-list">
+                <h4>Pending invites</h4>
+                {invites.map((inv) => (
+                  <div key={inv.id} className="invite-row">
+                    <span className="invite-email">{inv.email}</span>
+                    <span className={`role-badge role-${inv.role}`}>{inv.role}</span>
+                    <span className={`invite-status status-${inv.status}`}>{inv.status}</span>
+                    {inv.expiresAt && <span className="invite-expiry">exp. {inv.expiresAt.slice(0, 10)}</span>}
+                    {inv.status === 'pending' && (
+                      <button
+                        className="button danger-outline invite-revoke"
+                        onClick={() => revokeInvite(inv.id)}
+                        aria-label={`Revoke invite for ${inv.email}`}
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
       </div>
       {copiedShare ? <div className="inline-notice">{copiedShare}</div> : null}
     </div>
