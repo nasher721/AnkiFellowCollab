@@ -20,12 +20,14 @@ function mergeNotificationRefresh(
     return { notifications: refreshedNotifications, nextCursor: refreshedNextCursor };
   }
   const refreshedIds = new Set(refreshedNotifications.map((notification) => notification.id));
+  const preservedNotifications = prev.notifications.filter((notification) => !refreshedIds.has(notification.id));
+  const hasLoadedBeyondRefreshedPage = preservedNotifications.length > 0;
   return {
     notifications: [
       ...refreshedNotifications,
-      ...prev.notifications.filter((notification) => !refreshedIds.has(notification.id))
+      ...preservedNotifications
     ],
-    nextCursor: prev.nextCursor ?? refreshedNextCursor
+    nextCursor: hasLoadedBeyondRefreshedPage ? prev.nextCursor : refreshedNextCursor
   };
 }
 
@@ -102,7 +104,10 @@ export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
     try {
       const { notifications: data, nextCursor: cursor } = await api.notifications.list({ limit: 20, cursor: nextCursor });
       setNotificationPage((prev) => ({
-        notifications: [...prev.notifications, ...data],
+        notifications: [
+          ...prev.notifications,
+          ...data.filter((notification) => !prev.notifications.some((existing) => existing.id === notification.id))
+        ],
         nextCursor: cursor
       }));
     } catch {
