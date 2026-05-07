@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { DeckCard } from './types';
+import { api } from './api';
 import { renderMediaHtml } from './media';
 import {
   type CardProgress,
@@ -37,6 +38,22 @@ const RATING_COLORS: Record<Rating, string> = {
   4: 'rating-easy',
 };
 
+interface SessionStats {
+  again: number;
+  hard: number;
+  good: number;
+  easy: number;
+  skipped: number;
+}
+
+const initialSessionStats: SessionStats = {
+  again: 0,
+  hard: 0,
+  good: 0,
+  easy: 0,
+  skipped: 0,
+};
+
 export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: Props) {
   const [allProgress, setAllProgress] = useState<Record<string, CardProgress>>(() =>
     loadProgress(deckId)
@@ -46,8 +63,11 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
   );
   const [queueIndex, setQueueIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
-  const [sessionStats, setSessionStats] = useState({ again: 0, hard: 0, good: 0, easy: 0 });
+  const [sessionStats, setSessionStats] = useState<SessionStats>(initialSessionStats);
   const [done, setDone] = useState(false);
+  const [sessionSaved, setSessionSaved] = useState(false);
+  const sessionSavedRef = useRef(false);
+  const startedAtRef = useRef(new Date().toISOString());
   const startTime = useRef(Date.now());
 
   useEffect(() => {
@@ -66,11 +86,28 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
     saveProgress(deckId, allProgress);
   }, [deckId, allProgress]);
 
+  const advanceQueue = useCallback((currentQueue: string[], currentIndex: number, updatedProgress?: Record<string, CardProgress>) => {
+    const nextIndex = currentIndex + 1;
+    if (nextIndex >= currentQueue.length) {
+      const sourceProgress = updatedProgress ?? allProgress;
+      const newQueue = buildStudyQueue(cards.map((c) => c.id), sourceProgress);
+      if (newQueue.length === 0) {
+        setDone(true);
+        setQueueIndex(nextIndex);
+        setFlipped(false);
+        return;
+      }
+    }
+    setQueueIndex(nextIndex);
+    setFlipped(false);
+  }, [allProgress, cards]);
+
   const rate = useCallback((rating: Rating) => {
     if (!currentCardId) return;
     const prev = allProgress[currentCardId] ?? initialProgress(currentCardId);
     const next = applyRating(prev, rating);
     const updated = { ...allProgress, [currentCardId]: next };
+    const activeQueue = queue;
     setAllProgress(updated);
     syncProgressToServer(deckId, currentCardId, next);
     setSessionStats((s) => ({
@@ -86,17 +123,17 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
       setQueue((q) => [...q, currentCardId]);
     }
 
-    const nextIndex = queueIndex + 1;
-    if (nextIndex >= queue.length || (rating !== 1 && nextIndex >= queue.length)) {
-      const newQueue = buildStudyQueue(cards.map((c) => c.id), updated);
-      if (newQueue.length === 0) {
-        setDone(true);
-        return;
-      }
-    }
-    setQueueIndex(nextIndex);
-    setFlipped(false);
-  }, [currentCardId, allProgress, queueIndex, queue, cards]);
+    advanceQueue(activeQueue, queueIndex, updated);
+  }, [currentCardId, allProgress, queue, deckId, advanceQueue, queueIndex]);
+
+  const skipCard = useCallback(() => {
+    if (!currentCardId) return;
+    setSessionStats((s) => ({
+      ...s,
+      skipped: s.skipped + 1,
+    }));
+    advanceQueue(queue, queueIndex);
+  }, [currentCardId, advanceQueue, queue, queueIndex]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -110,16 +147,47 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
         else if (e.key === '3') rate(3);
         else if (e.key === '4') rate(4);
       }
+      if (e.key.toLowerCase() === 's') skipCard();
       if (e.key === 'Escape') onClose();
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [flipped, rate, onClose]);
+  }, [flipped, rate, skipCard, onClose]);
 
   const elapsed = Math.round((Date.now() - startTime.current) / 1000);
   const totalRated = sessionStats.again + sessionStats.hard + sessionStats.good + sessionStats.easy;
   const accuracy = totalRated ? Math.round(((sessionStats.good + sessionStats.easy) / totalRated) * 100) : 0;
   const remaining = queue.length - queueIndex;
+  const progressCurrent = queue.length === 0 ? 0 : Math.min(queueIndex + 1, queue.length);
+  const progressPercent = queue.length === 0 ? 100 : Math.round((Math.min(queueIndex, queue.length) / queue.length) * 100);
+
+  const persistSessionSummary = useCallback(() => {
+    if (sessionSavedRef.current) return;
+    sessionSavedRef.current = true;
+    setSessionSaved(true);
+    const endedAt = new Date().toISOString();
+    const cardsStudied = sessionStats.again + sessionStats.hard + sessionStats.good + sessionStats.easy;
+    api.createStudySession({
+      deckId,
+      startedAt: startedAtRef.current,
+      endedAt,
+      durationSeconds: Math.round((Date.now() - startTime.current) / 1000),
+      cardsStudied,
+      cardsCorrect: sessionStats.good + sessionStats.easy,
+      newCards: 0,
+      reviewCards: cardsStudied,
+      metadata: {
+        ratings: sessionStats,
+        modeLabel,
+      },
+    }).catch(() => undefined);
+  }, [deckId, modeLabel, sessionStats]);
+
+  useEffect(() => {
+    if (done || queue.length === 0) {
+      persistSessionSummary();
+    }
+  }, [done, queue.length, persistSessionSummary]);
 
   if (queue.length === 0 || done) {
     return (
@@ -136,6 +204,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
             <span className="rating-hard">Hard: {sessionStats.hard}</span>
             <span className="rating-good">Good: {sessionStats.good}</span>
             <span className="rating-easy">Easy: {sessionStats.easy}</span>
+            <span className="rating-skipped">Skipped: {sessionStats.skipped}</span>
           </div>
           {queue.length === 0 && <p className="study-empty-msg">No cards are due right now. Come back tomorrow!</p>}
           <button className="btn btn-primary" onClick={onClose}>Done</button>
@@ -159,16 +228,25 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
     <div className="study-overlay" role="dialog" aria-modal="true" aria-label="Study mode">
       <div className="study-panel">
         <div className="study-header">
-          <div className="study-progress-bar">
+          <div
+            className="study-progress-bar"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={queue.length}
+            aria-valuenow={Math.min(queueIndex, queue.length)}
+            aria-label="Study progress"
+          >
             <div
               className="study-progress-fill"
-              style={{ width: `${Math.round((queueIndex / queue.length) * 100)}%` }}
+              style={{ width: `${progressPercent}%` }}
             />
           </div>
-          <div className="study-meta">
+          <div className="study-meta" aria-live="polite">
+            <span>Card {progressCurrent} of {queue.length}</span>
             <span>{remaining} remaining</span>
             <span>{modeLabel}</span>
             <span>{accuracy}% accuracy</span>
+            {sessionSaved && <span>Session saved</span>}
             <button className="btn btn-ghost study-close" onClick={onClose} aria-label="Exit study mode">✕</button>
           </div>
         </div>
@@ -201,6 +279,14 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
 
         {flipped ? (
           <div className="study-rating-row">
+            <button
+              className="btn study-rate-btn study-skip rating-skipped"
+              onClick={skipCard}
+              aria-label="Skip card"
+            >
+              <span className="rate-label">Skip</span>
+              <kbd>S</kbd>
+            </button>
             {([1, 2, 3, 4] as Rating[]).map((r) => (
               <button
                 key={r}
@@ -215,6 +301,14 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
           </div>
         ) : (
           <div className="study-rating-row study-rating-placeholder">
+            <button
+              className="btn study-rate-btn study-skip rating-skipped"
+              onClick={skipCard}
+              aria-label="Skip card"
+            >
+              <span className="rate-label">Skip</span>
+              <kbd>S</kbd>
+            </button>
             <span>Rate yourself after reviewing the answer</span>
           </div>
         )}

@@ -1,4 +1,4 @@
-import type { ApiError, AppState, DemoRole, StorageAsset, User, DeckMember, DeckSummary } from './types';
+import type { ApiError, AppState, DemoRole, StorageAsset, User, DeckMember, DeckSummary, StudySession } from './types';
 
 let authToken: string | null = null;
 
@@ -144,6 +144,18 @@ export interface DeckAnalytics {
     weeklyTrend: { date: string; count: number }[];
     strugglingCards: { cardId: string; easeFactor: number; repetitions: number; lastRating?: number; nextDue: string; front?: string; back?: string }[];
   };
+}
+
+export interface CreateStudySessionPayload {
+  deckId: string;
+  startedAt: string;
+  endedAt: string;
+  durationSeconds: number;
+  cardsStudied: number;
+  cardsCorrect: number;
+  newCards: number;
+  reviewCards: number;
+  metadata: Record<string, unknown>;
 }
 
 export interface DeckInvite {
@@ -405,6 +417,11 @@ export const api = {
     }),
   fetchStudyProgress: (deckId: string) =>
     jsonRequest<{ progress: Array<{ cardId: string; intervalDays: number; easeFactor: number; repetitions: number; nextDue: string; lastRating: number | null; updatedAt: string }> }>(`/api/study/progress/${deckId}`),
+  createStudySession: (payload: CreateStudySessionPayload) =>
+    jsonRequest<{ session: StudySession }>('/api/study/sessions', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
   invites: {
     list: (deckId: string) =>
       jsonRequest<{ invites: DeckInvite[] }>(`/api/decks/${deckId}/invites`),

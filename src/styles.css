@@ -2673,16 +2673,16 @@ button:disabled {
 
 /* ─── Study View ──────────────────────────────────────────────────────────── */
 
-.study-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1100; padding: 16px; }
+.study-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1100; padding: 16px; overflow-y: auto; }
 
-.study-panel { background: var(--bg-card, #fff); border-radius: 14px; box-shadow: 0 32px 80px rgba(0,0,0,0.25); width: 100%; max-width: 640px; padding: 28px; display: flex; flex-direction: column; gap: 20px; }
+.study-panel { background: var(--bg-card, #fff); border-radius: 14px; box-shadow: 0 32px 80px rgba(0,0,0,0.25); width: min(100%, 640px); max-width: 640px; max-height: calc(100vh - 32px); padding: 28px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; }
 
 .study-header { display: flex; flex-direction: column; gap: 6px; }
 
 .study-progress-bar { height: 4px; background: var(--bg-secondary, #f0f0f0); border-radius: 99px; overflow: hidden; }
 .study-progress-fill { height: 100%; background: var(--color-primary, #4f46e5); border-radius: 99px; transition: width 0.3s; }
 
-.study-meta { display: flex; align-items: center; gap: 12px; font-size: 0.82rem; color: var(--text-muted, #888); }
+.study-meta { display: flex; align-items: center; gap: 12px; font-size: 0.82rem; color: var(--text-muted, #888); flex-wrap: wrap; }
 .study-close { margin-left: auto; font-size: 1rem; }
 
 .study-card {
@@ -2704,11 +2704,12 @@ button:disabled {
 .study-flip-hint { font-size: 0.78rem; color: var(--text-muted, #aaa); margin-top: auto; }
 .study-divider { border: none; border-top: 1px solid var(--border, #e5e7eb); margin: 0; }
 
-.study-rating-row { display: flex; gap: 10px; justify-content: center; }
-.study-rating-placeholder { color: var(--text-muted, #aaa); font-size: 0.85rem; justify-content: center; align-items: center; height: 48px; }
+.study-rating-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.study-rating-placeholder { color: var(--text-muted, #aaa); font-size: 0.85rem; justify-content: center; align-items: center; min-height: 48px; }
 
-.study-rate-btn { flex: 1; flex-direction: column; gap: 2px; padding: 10px; border-radius: 9px; border: 2px solid transparent; font-size: 0.85rem; }
+.study-rate-btn { flex: 1 1 86px; flex-direction: column; gap: 2px; padding: 10px; border-radius: 9px; border: 2px solid transparent; font-size: 0.85rem; min-width: 0; }
 .study-rate-btn kbd { font-size: 0.72rem; opacity: 0.6; }
+.study-skip { flex: 0 1 86px; }
 .rating-again { border-color: #fca5a5; background: #fef2f2; color: #dc2626; }
 .rating-again:hover { background: #fee2e2; }
 .rating-hard { border-color: #fcd34d; background: #fffbeb; color: #d97706; }
@@ -2717,6 +2718,8 @@ button:disabled {
 .rating-good:hover { background: #dcfce7; }
 .rating-easy { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
 .rating-easy:hover { background: #dbeafe; }
+.rating-skipped { border-color: #c4b5fd; background: #f5f3ff; color: #6d28d9; }
+.rating-skipped:hover { background: #ede9fe; }
 
 .study-done { align-items: center; text-align: center; gap: 20px; }
 .study-done h2 { font-size: 1.4rem; margin: 0; }
@@ -2726,6 +2729,19 @@ button:disabled {
 .stat-label { font-size: 0.78rem; color: var(--text-muted, #888); }
 .study-rating-breakdown { display: flex; gap: 12px; font-size: 0.82rem; flex-wrap: wrap; justify-content: center; }
 .study-empty-msg { font-size: 0.88rem; color: var(--text-muted, #888); }
+
+@media (max-width: 640px) {
+  .study-overlay { align-items: stretch; justify-content: stretch; padding: 0; }
+  .study-panel { width: 100%; max-width: none; max-height: none; min-height: 100vh; border-radius: 0; padding: 18px; gap: 16px; }
+  .study-meta { gap: 8px; font-size: 0.78rem; }
+  .study-close { margin-left: 0; }
+  .study-card { min-height: 180px; padding: 20px; }
+  .study-card-content { font-size: 1rem; line-height: 1.5; overflow-wrap: anywhere; }
+  .study-rating-row { gap: 8px; justify-content: stretch; }
+  .study-rate-btn { flex-basis: calc(50% - 4px); }
+  .study-skip { flex-basis: 100%; }
+  .study-stats-grid { grid-template-columns: 1fr; }
+}
 
 /* ─── Suggestion Discussion ───────────────────────────────────────────────── */
 
