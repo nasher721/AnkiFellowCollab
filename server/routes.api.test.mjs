@@ -30,6 +30,7 @@ class FakeQuery {
     this.limitCount = null;
     this.rangeBounds = null;
     this.selectOptions = {};
+    this.orderClauses = [];
   }
 
   select(_columns, options = {}) {
@@ -47,7 +48,13 @@ class FakeQuery {
     return this;
   }
 
-  order() {
+  order(field, options = {}) {
+    this.orderClauses.push({ field, ascending: options.ascending !== false });
+    return this;
+  }
+
+  or(expression) {
+    this.filters.push({ op: 'or', expression });
     return this;
   }
 
@@ -126,17 +133,40 @@ class FakeQuery {
 
   rows() {
     let rows = this.tables[this.table].filter((row) => this.matches(row));
+    rows = this.applyOrder(rows);
     if (this.rangeBounds) rows = rows.slice(this.rangeBounds.from, this.rangeBounds.to + 1);
     if (this.limitCount !== null) rows = rows.slice(0, this.limitCount);
     return rows;
   }
 
+  applyOrder(rows) {
+    if (!this.orderClauses.length) return rows;
+    return [...rows].sort((a, b) => {
+      for (const { field, ascending } of this.orderClauses) {
+        const left = a[field];
+        const right = b[field];
+        if (left === right) continue;
+        const comparison = left > right ? 1 : -1;
+        return ascending ? comparison : -comparison;
+      }
+      return 0;
+    });
+  }
+
   matches(row) {
-    return this.filters.every(({ field, value, op }) => {
+    return this.filters.every(({ field, value, op, expression }) => {
       if (op === 'ilike') return String(row[field] || '').toLowerCase().includes(value);
       if (op === 'lt') return row[field] < value;
+      if (op === 'or') return this.matchesOr(row, expression);
       return row[field] === value;
     });
+  }
+
+  matchesOr(row, expression) {
+    const match = String(expression).match(/^created_at\.lt\.(.+),and\(created_at\.eq\.(.+),id\.lt\.(.+)\)$/);
+    if (!match) throw new Error(`Unsupported fake Supabase or expression: ${expression}`);
+    const [, olderThan, tiedAt, afterId] = match;
+    return row.created_at < olderThan || (row.created_at === tiedAt && row.id < afterId);
   }
 }
 
@@ -764,9 +794,10 @@ test('invite API rejects malformed email before storing invite', async () => {
 test('notifications API supports limit and created_at cursor pagination', async () => {
   const supabase = new FakeSupabase();
   supabase.tables.notifications = [
-    { id: 'n3', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'comment', body: 'Newest', ref_id: null, read: false, created_at: '2026-05-07T12:03:00.000Z' },
+    { id: 'n1', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'decision', body: 'Oldest', ref_id: null, read: true, created_at: '2026-05-07T12:01:00.000Z' },
+    { id: 'n3', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'comment', body: 'Tied newer', ref_id: null, read: false, created_at: '2026-05-07T12:03:00.000Z' },
     { id: 'n2', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'reaction', body: 'Middle', ref_id: null, read: false, created_at: '2026-05-07T12:02:00.000Z' },
-    { id: 'n1', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'decision', body: 'Oldest', ref_id: null, read: true, created_at: '2026-05-07T12:01:00.000Z' }
+    { id: 'n4', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'comment', body: 'Newest tie', ref_id: null, read: false, created_at: '2026-05-07T12:03:00.000Z' }
   ];
   const { app } = await createTestApp({
     auth: {
@@ -782,16 +813,38 @@ test('notifications API supports limit and created_at cursor pagination', async 
     .get('/api/notifications')
     .query({ limit: 2 })
     .expect(200);
-  assert.deepEqual(first.body.notifications.map((notification) => notification.id), ['n3', 'n2']);
-  assert.equal(first.body.unread, 2);
-  assert.equal(first.body.nextCursor, '2026-05-07T12:02:00.000Z');
+  assert.deepEqual(first.body.notifications.map((notification) => notification.id), ['n4', 'n3']);
+  assert.equal(first.body.unread, 3);
+  assert.ok(first.body.nextCursor);
 
   const second = await request(app)
     .get('/api/notifications')
     .query({ limit: 2, cursor: first.body.nextCursor })
     .expect(200);
-  assert.deepEqual(second.body.notifications.map((notification) => notification.id), ['n1']);
+  assert.deepEqual(second.body.notifications.map((notification) => notification.id), ['n2', 'n1']);
   assert.equal(second.body.nextCursor, null);
+});
+
+test('notifications API rejects malformed cursors', async () => {
+  const supabase = new FakeSupabase();
+  supabase.tables.notifications = [];
+  const { app } = await createTestApp({
+    auth: {
+      supabase,
+      requireUser(req, _res, next) {
+        req.user = { id: 'you', email: 'you@example.com', name: 'You' };
+        next();
+      }
+    }
+  });
+
+  await request(app)
+    .get('/api/notifications')
+    .query({ cursor: 'not-a-valid-cursor' })
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'invalid_cursor');
+    });
 });
 
 test('discover API returns real preview fields from public deck cards', async () => {

@@ -62,6 +62,35 @@ function cleanIsoOrNull(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function encodeNotificationCursor(row) {
+  return Buffer.from(JSON.stringify({ created_at: row.created_at, id: row.id })).toString('base64url');
+}
+
+function parseNotificationCursor(value) {
+  if (value === undefined) return null;
+  if (typeof value !== 'string' || !value.trim()) fail(400, 'invalid_cursor', 'Invalid notification cursor');
+  const cursor = value.trim();
+  const legacyIso = cleanIsoOrNull(cursor);
+  if (legacyIso) return { createdAt: legacyIso, id: null };
+  if (cursor.includes('|')) {
+    const [createdAtValue, id] = cursor.split('|');
+    const createdAt = cleanIsoOrNull(createdAtValue);
+    if (createdAt && id) return { createdAt, id };
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    const createdAt = cleanIsoOrNull(parsed?.created_at || parsed?.createdAt);
+    if (createdAt && typeof parsed?.id === 'string' && parsed.id) return { createdAt, id: parsed.id };
+  } catch {
+    // fall through to a typed API error below
+  }
+  fail(400, 'invalid_cursor', 'Invalid notification cursor');
+}
+
+function encodePostgrestValue(value) {
+  return String(value).replaceAll('\\', '\\\\').replaceAll(',', '\\,').replaceAll('(', '\\(').replaceAll(')', '\\)');
+}
+
 async function loadDiscoverPreview(supabase, deckId) {
   const [{ count, error: countError }, { data: noteRows, error: noteError }, { data: sampleRows, error: sampleError }] = await Promise.all([
     supabase.from('cards').select('id', { count: 'exact', head: true }).eq('deck_id', deckId),
@@ -605,17 +634,28 @@ export function createApp(options = {}) {
       const limit = Number.isFinite(parsedLimit)
         ? Math.min(Math.max(Math.trunc(parsedLimit), 1), 100)
         : 50;
-      const cursor = cleanIsoOrNull(req.query.cursor);
+      const cursor = parseNotificationCursor(req.query.cursor);
       let query = auth.supabase.from('notifications')
         .select('id, deck_id, kind, body, ref_id, read, created_at')
         .eq('user_id', req.user.id)
-        .order('created_at', { ascending: false });
-      if (cursor) query = query.lt('created_at', cursor);
-      const { data } = await query.limit(limit + 1);
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false });
+      if (cursor?.id) {
+        const createdAt = encodePostgrestValue(cursor.createdAt);
+        const id = encodePostgrestValue(cursor.id);
+        query = query.or(`created_at.lt.${createdAt},and(created_at.eq.${createdAt},id.lt.${id})`);
+      } else if (cursor) {
+        query = query.lt('created_at', cursor.createdAt);
+      }
+      const unreadQuery = auth.supabase.from('notifications')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', req.user.id)
+        .eq('read', false);
+      const [{ data }, { count }] = await Promise.all([query.limit(limit + 1), unreadQuery]);
       const rows = data || [];
       const page = rows.slice(0, limit);
-      const unread = rows.filter((n) => !n.read).length;
-      const nextCursor = rows.length > limit ? page[page.length - 1].created_at : null;
+      const unread = count ?? rows.filter((n) => !n.read).length;
+      const nextCursor = rows.length > limit ? encodeNotificationCursor(page[page.length - 1]) : null;
       res.json({ notifications: page, unread, nextCursor });
     } catch (err) { next(err); }
   });
