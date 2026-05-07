@@ -52,6 +52,28 @@ function shareLinkUrl(token: string) {
   return `${window.location.origin}/share/${encodeURIComponent(token)}`;
 }
 
+function authMessage(message: string, mode: 'sign-in' | 'sign-up') {
+  const lower = message.toLowerCase();
+  if (lower.includes('invalid login credentials')) {
+    return 'That email and password did not match a DeckBridge account. Create an account here, or check the password and try again.';
+  }
+  if (lower.includes('email not confirmed') || lower.includes('confirm')) {
+    return 'This account is waiting for email confirmation. If you just created it, try signing in again; hosted DeckBridge is configured for immediate access.';
+  }
+  if (lower.includes('rate limit')) {
+    return 'The auth provider is rate limiting email messages. Try signing in with an existing account, or wait a few minutes before creating another account.';
+  }
+  if (lower.includes('already registered') || lower.includes('user already registered')) {
+    return 'That email already has an account. Switch to sign in and use the same password.';
+  }
+  if (lower.includes('password')) {
+    return mode === 'sign-up'
+      ? 'Use a password with at least 6 characters.'
+      : 'Check the password and try again.';
+  }
+  return message;
+}
+
 function Icon({ name }: { name: 'upload' | 'download' | 'sync' | 'search' | 'filter' | 'cards' | 'users' | 'check' | 'x' | 'spark' }) {
   const paths = {
     upload: 'M12 3v12m0-12 4 4m-4-4-4 4M4 17v3h16v-3',
@@ -264,7 +286,11 @@ export default function App() {
     const { error } = authMode === 'sign-in'
       ? await supabase.auth.signInWithPassword(credentials)
       : await supabase.auth.signUp({ ...credentials, options: { data: { name: authEmail } } });
-    if (error) setNotice(error.message);
+    if (error) {
+      setNotice(authMessage(error.message, authMode));
+    } else if (authMode === 'sign-up') {
+      setNotice('Account created. DeckBridge will sign you in automatically.');
+    }
     setAuthBusy(false);
   }
 
@@ -331,6 +357,9 @@ export default function App() {
         <section className="auth-panel">
           <div className="brand-mark"><Icon name="cards" /></div>
           <h1>DeckBridge</h1>
+          <p className="auth-subtitle">
+            Sign in once. The Anki add-on can create its own connection token from your account.
+          </p>
           <form className="auth-form" onSubmit={submitAuth}>
             <input
               aria-label="Email"
@@ -352,7 +381,7 @@ export default function App() {
               required
             />
             <button className="button primary" type="submit" disabled={authBusy}>
-              {authMode === 'sign-in' ? 'Sign in' : 'Create account'}
+              {authBusy ? 'Working...' : authMode === 'sign-in' ? 'Sign in' : 'Create account'}
             </button>
           </form>
           <button

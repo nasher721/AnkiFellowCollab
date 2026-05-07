@@ -252,7 +252,7 @@ test.describe('Connect Anki Wizard', () => {
   test('navigates wizard steps', async ({ page }) => {
     await page.getByRole('button', { name: /Connect Anki/ }).click();
     await page.getByRole('button', { name: /Already installed/ }).click();
-    await expect(page.getByText('Step 2: Generate Your Token')).toBeVisible();
+    await expect(page.getByText('Step 2: Authorize Anki')).toBeVisible();
   });
 
   test('closes wizard', async ({ page }) => {
@@ -302,27 +302,23 @@ test.describe('Connect Anki Wizard', () => {
 
     await page.getByRole('button', { name: /Connect Anki/ }).click();
     await page.getByRole('button', { name: /Already installed/ }).click();
-    await page.getByRole('button', { name: 'Generate Token' }).click();
+    await page.getByRole('button', { name: 'Create connection link' }).click();
 
-    await expect(page.getByText('Step 3: Connect the Add-on')).toBeVisible();
-    await expect(page.getByText('db_test_token')).toBeVisible();
-    await expect(page.getByRole('link', { name: /Auto-Configure/ })).toHaveCount(0);
-
-    await page.getByRole('button', { name: 'Test / Refresh' }).click();
+    await expect(page.getByText('Step 3: Map Your Deck')).toBeVisible();
     await expect(page.getByText(/Connected as You/)).toBeVisible();
-
-    await page.getByRole('button', { name: 'Next →' }).click();
     await expect(page.getByLabel('DeckBridge Deck')).toHaveValue('deck-visible');
-    await expect(page.getByRole('link', { name: /Auto-Configure with Mapping/ })).toHaveAttribute(
+    await expect(page.getByRole('link', { name: /Open connection link/ })).toHaveAttribute(
       'href',
       'anki://deckbridge?url=http%3A%2F%2F127.0.0.1%3A5174&token=db_test_token&deckId=deck-visible&conflictPolicy=detect'
     );
+    await page.getByRole('button', { name: 'Show manual token fallback' }).click();
+    await expect(page.getByText('db_test_token')).toBeVisible();
     await page.getByLabel('Conflict Policy').selectOption('overwrite-platform');
     await page.getByLabel('Local Anki Deck').fill('Zanki Step 2 CK::Cardiology');
     await expect(page.getByText('DeckBridge deck ID: deck-visible')).toBeVisible();
     await expect(page.getByText('Local Anki deck: Zanki Step 2 CK::Cardiology')).toBeVisible();
     await expect(page.getByText('Conflict policy: overwrite-platform')).toBeVisible();
-    await expect(page.getByRole('link', { name: /Auto-Configure with Mapping/ })).toHaveAttribute(
+    await expect(page.getByRole('link', { name: /Open connection link/ })).toHaveAttribute(
       'href',
       'anki://deckbridge?url=http%3A%2F%2F127.0.0.1%3A5174&token=db_test_token&deckId=deck-visible&localDeck=Zanki%20Step%202%20CK%3A%3ACardiology&conflictPolicy=overwrite-platform'
     );
@@ -358,11 +354,9 @@ test.describe('Connect Anki Wizard', () => {
 
     await page.getByRole('button', { name: /Connect Anki/ }).click();
     await page.getByRole('button', { name: /Already installed/ }).click();
-    await page.getByRole('button', { name: 'Generate Token' }).click();
-    await page.getByRole('button', { name: 'Test / Refresh' }).click();
+    await page.getByRole('button', { name: 'Create connection link' }).click();
     await expect(page.getByText(/0 DeckBridge decks visible/)).toBeVisible();
 
-    await page.getByRole('button', { name: 'Next →' }).click();
     const wizard = page.getByRole('dialog', { name: 'Connect Anki Add-on' });
     await expect(wizard.getByText('No DeckBridge decks are visible to this token.')).toBeVisible();
     await expect(wizard.getByLabel('DeckBridge Deck')).toHaveCount(0);

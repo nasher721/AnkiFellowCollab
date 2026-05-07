@@ -16,9 +16,9 @@ interface StepIndicatorProps {
 
 const STEPS: { id: Step; label: string }[] = [
   { id: 'download', label: 'Download' },
-  { id: 'token', label: 'Get Token' },
-  { id: 'connect', label: 'Connect' },
+  { id: 'token', label: 'Authorize' },
   { id: 'map', label: 'Map Deck' },
+  { id: 'connect', label: 'Connect' },
 ];
 
 function StepIndicator({ current }: StepIndicatorProps) {
@@ -56,6 +56,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<MeResponse | null>(null);
   const [testError, setTestError] = useState('');
+  const [showManualToken, setShowManualToken] = useState(false);
   const localDeckNameForConfig = localDeckName.trim();
 
   const availableDecks = useMemo(() => {
@@ -118,10 +119,13 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
     setTestError('');
     try {
       const token = await api.tokens.create('Anki Add-on');
-      setCreatedToken({ ...token, raw: token.raw || token.token || '' });
-      setStep('connect');
+      const nextToken = { ...token, raw: token.raw || token.token || '' };
+      setCreatedToken(nextToken);
+      const me = await api.meWithToken(nextToken.raw);
+      setTestResult(me);
+      setStep('map');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to generate token');
+      setError(err instanceof Error ? err.message : 'Failed to prepare the Anki connection');
     } finally {
       setGenerating(false);
     }
@@ -229,13 +233,27 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
 
           {step === 'token' && (
             <div className="wizard-step-content">
-              <h3>Step 2: Generate Your Token</h3>
-              <p>Generate a secure API token. You'll paste this into the add-on once.</p>
+              <h3>Step 2: Authorize Anki</h3>
+              <p>
+                DeckBridge will create and test the add-on credential for you. You will
+                use a connection link instead of copying an API token by hand.
+              </p>
               {error && <div className="wizard-error">{error}</div>}
+              {testError ? <div className="wizard-error">{testError}</div> : null}
               <div className="wizard-actions">
                 <button className="btn btn-primary" onClick={generateToken} disabled={generating}>
-                  {generating ? 'Generating…' : 'Generate Token'}
+                  {generating ? 'Preparing connection...' : 'Create connection link'}
                 </button>
+                {createdToken ? (
+                  <button className="btn btn-secondary" onClick={() => setStep('map')}>
+                    Use existing link
+                  </button>
+                ) : null}
+              </div>
+              <div className="wizard-hint-box">
+                If you prefer to log in from Anki, open Tools → DeckBridge Sync → Settings
+                and use your DeckBridge email and password. The add-on will create its own
+                token after login.
               </div>
               <div className="wizard-nav">
                 <button className="btn btn-ghost" onClick={() => setStep('download')}>← Back</button>
@@ -245,10 +263,11 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
 
           {step === 'connect' && createdToken && (
             <div className="wizard-step-content">
-              <h3>Step 3: Connect the Add-on</h3>
+              <h3>Manual setup</h3>
               <p>
+                Manual setup is available if your browser cannot open the connection link.
                 In Anki, open <strong>Tools → DeckBridge Sync → Settings</strong> and paste
-                these values:
+                these values.
               </p>
               {error && <div className="wizard-error">{error}</div>}
               <div className="wizard-field-row">
@@ -289,7 +308,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
                 {testError ? <div className="wizard-error">{testError}</div> : null}
               </div>
               <div className="wizard-nav">
-                <button className="btn btn-ghost" onClick={() => setStep('token')}>← Back</button>
+                <button className="btn btn-ghost" onClick={() => setStep('map')}>← Back</button>
                 <button className="btn btn-primary" onClick={() => setStep('map')}>Next →</button>
               </div>
             </div>
@@ -297,11 +316,10 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
 
           {step === 'map' && (
             <div className="wizard-step-content">
-              <h3>Step 4: Map Your Deck</h3>
+              <h3>Step 3: Map Your Deck</h3>
               <p>
                 Choose the DeckBridge target and enter the local Anki deck name you want
-                the add-on to sync. Step 3 will replace the manual local-deck field with
-                a live Anki deck picker.
+                the add-on to sync. Then open the connection link to save everything in Anki.
               </p>
               {testResult ? (
                 <div className="wizard-success">
@@ -309,7 +327,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
                 </div>
               ) : (
                 <div className="wizard-hint-box">
-                  Use Test / Refresh on the previous step to confirm token access and refresh this deck list from <code>/api/me</code>.
+                  DeckBridge has not refreshed this token yet. Use Test / Refresh below if the deck list looks wrong.
                 </div>
               )}
               {availableDecks.length ? (
@@ -374,17 +392,53 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
                 <span>Conflict policy: {conflictPolicy}</span>
               </div>
               {autoConfigUrl && (
-                <div className="wizard-autoconfig">
-                  <p className="wizard-hint">Open this link after mapping to save these settings in Anki:</p>
-                  <a href={autoConfigUrl} className="btn btn-outline">⚡ Auto-Configure with Mapping</a>
+                <div className="wizard-autoconfig wizard-primary-action">
+                  <p className="wizard-hint">This saves the platform URL, credential, deck, and conflict policy in Anki.</p>
+                  <a href={autoConfigUrl} className="btn btn-primary">Open connection link</a>
+                  <button className="btn btn-secondary" onClick={() => copyText(autoConfigUrl)}>
+                    Copy link
+                  </button>
                 </div>
               )}
+              {createdToken ? (
+                <div className="wizard-test-card">
+                  <strong>Connection check</strong>
+                  <p>
+                    DeckBridge can retest the add-on credential without changing your browser login.
+                  </p>
+                  <button className="btn btn-secondary" onClick={testConnection} disabled={testing || !createdToken.raw}>
+                    {testing ? 'Testing...' : 'Test / Refresh'}
+                  </button>
+                  {testResult ? (
+                    <div className="wizard-success">
+                      Connected as {testResult.user.name || testResult.user.email}. {testResult.decks?.length || 0} DeckBridge decks visible.
+                    </div>
+                  ) : null}
+                  {testError ? <div className="wizard-error">{testError}</div> : null}
+                </div>
+              ) : null}
+              {createdToken ? (
+                <div className="wizard-manual-fallback">
+                  <button className="auth-switch" type="button" onClick={() => setShowManualToken((value) => !value)}>
+                    {showManualToken ? 'Hide manual token' : 'Show manual token fallback'}
+                  </button>
+                  {showManualToken ? (
+                    <div className="wizard-copy-row wizard-manual-token">
+                      <code className="wizard-token-display">{createdToken.raw}</code>
+                      <button className="btn btn-secondary btn-sm" onClick={copyToken}>
+                        {copied ? '✓ Copied' : 'Copy'}
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <p className="wizard-hint">
                 After saving add-on settings, click <strong>Test connection</strong> in the
                 DeckBridge Sync menu to verify everything works.
               </p>
               <div className="wizard-nav">
-                <button className="btn btn-ghost" onClick={() => setStep('connect')}>← Back</button>
+                <button className="btn btn-ghost" onClick={() => setStep('token')}>← Back</button>
+                {createdToken ? <button className="btn btn-secondary" onClick={() => setStep('connect')}>Manual setup</button> : null}
                 <button className="btn btn-primary" onClick={onClose}>Done ✓</button>
               </div>
             </div>

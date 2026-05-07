@@ -1201,6 +1201,14 @@ button:disabled {
   line-height: 1.15;
 }
 
+.auth-subtitle {
+  margin: -6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
 .auth-form {
   width: 100%;
   display: grid;
@@ -1568,6 +1576,32 @@ button:disabled {
 
 .wizard-autoconfig {
   margin-bottom: 16px;
+}
+
+.wizard-primary-action {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid #c7d7fe;
+  border-radius: 8px;
+  background: #f5f8ff;
+  padding: 12px;
+}
+
+.wizard-primary-action .wizard-hint {
+  flex-basis: 100%;
+  margin: 0 0 2px;
+}
+
+.wizard-manual-fallback {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+
+.wizard-manual-token {
+  width: 100%;
 }
 
 .wizard-select,
