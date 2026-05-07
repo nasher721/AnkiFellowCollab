@@ -130,6 +130,7 @@ export interface StudySession {
   cardsCorrect: number;
   newCards: number;
   reviewCards: number;
+  metadata: Record<string, unknown>;
   createdAt: string;
 }
 

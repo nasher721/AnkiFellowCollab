@@ -54,6 +54,12 @@ const initialSessionStats: SessionStats = {
   skipped: 0,
 };
 
+function isEditableShortcutTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return tagName === 'input' || tagName === 'textarea' || tagName === 'select' || target.isContentEditable;
+}
+
 export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: Props) {
   const [allProgress, setAllProgress] = useState<Record<string, CardProgress>>(() =>
     loadProgress(deckId)
@@ -65,17 +71,26 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
   const [flipped, setFlipped] = useState(false);
   const [sessionStats, setSessionStats] = useState<SessionStats>(initialSessionStats);
   const [done, setDone] = useState(false);
+  const [serverProgressLoaded, setServerProgressLoaded] = useState(false);
   const [sessionSaved, setSessionSaved] = useState(false);
   const sessionSavedRef = useRef(false);
   const startedAtRef = useRef(new Date().toISOString());
   const startTime = useRef(Date.now());
 
   useEffect(() => {
+    let cancelled = false;
+    setServerProgressLoaded(false);
     loadServerProgress(deckId).then(() => {
+      if (cancelled) return;
       const fresh = loadProgress(deckId);
       setAllProgress(fresh);
       setQueue(buildStudyQueue(cards.map((c) => c.id), fresh));
+    }).finally(() => {
+      if (!cancelled) setServerProgressLoaded(true);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [deckId, cards]);
 
   const currentCardId = queue[queueIndex];
@@ -86,28 +101,24 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
     saveProgress(deckId, allProgress);
   }, [deckId, allProgress]);
 
-  const advanceQueue = useCallback((currentQueue: string[], currentIndex: number, updatedProgress?: Record<string, CardProgress>) => {
+  const advanceQueue = useCallback((currentQueue: string[], currentIndex: number) => {
     const nextIndex = currentIndex + 1;
     if (nextIndex >= currentQueue.length) {
-      const sourceProgress = updatedProgress ?? allProgress;
-      const newQueue = buildStudyQueue(cards.map((c) => c.id), sourceProgress);
-      if (newQueue.length === 0) {
-        setDone(true);
-        setQueueIndex(nextIndex);
-        setFlipped(false);
-        return;
-      }
+      setDone(true);
+      setQueueIndex(nextIndex);
+      setFlipped(false);
+      return;
     }
     setQueueIndex(nextIndex);
     setFlipped(false);
-  }, [allProgress, cards]);
+  }, []);
 
   const rate = useCallback((rating: Rating) => {
     if (!currentCardId) return;
     const prev = allProgress[currentCardId] ?? initialProgress(currentCardId);
     const next = applyRating(prev, rating);
     const updated = { ...allProgress, [currentCardId]: next };
-    const activeQueue = queue;
+    const nextQueue = rating === 1 ? [...queue, currentCardId] : queue;
     setAllProgress(updated);
     syncProgressToServer(deckId, currentCardId, next);
     setSessionStats((s) => ({
@@ -120,10 +131,10 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
 
     // If "Again", push card to end of queue
     if (rating === 1) {
-      setQueue((q) => [...q, currentCardId]);
+      setQueue(nextQueue);
     }
 
-    advanceQueue(activeQueue, queueIndex, updated);
+    advanceQueue(nextQueue, queueIndex);
   }, [currentCardId, allProgress, queue, deckId, advanceQueue, queueIndex]);
 
   const skipCard = useCallback(() => {
@@ -138,6 +149,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
   // Keyboard shortcuts
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey || isEditableShortcutTarget(e.target)) return;
       if (e.key === ' ' || e.key === 'Enter') {
         if (!flipped) setFlipped(true);
         else rate(3);
@@ -157,11 +169,13 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
   const elapsed = Math.round((Date.now() - startTime.current) / 1000);
   const totalRated = sessionStats.again + sessionStats.hard + sessionStats.good + sessionStats.easy;
   const accuracy = totalRated ? Math.round(((sessionStats.good + sessionStats.easy) / totalRated) * 100) : 0;
-  const remaining = queue.length - queueIndex;
+  const totalActivity = totalRated + sessionStats.skipped;
+  const remaining = Math.max(queue.length - queueIndex, 0);
   const progressCurrent = queue.length === 0 ? 0 : Math.min(queueIndex + 1, queue.length);
-  const progressPercent = queue.length === 0 ? 100 : Math.round((Math.min(queueIndex, queue.length) / queue.length) * 100);
+  const progressPercent = queue.length === 0 ? 100 : Math.round((progressCurrent / queue.length) * 100);
 
   const persistSessionSummary = useCallback(() => {
+    if (!serverProgressLoaded || totalActivity === 0) return;
     if (sessionSavedRef.current) return;
     sessionSavedRef.current = true;
     setSessionSaved(true);
@@ -181,13 +195,13 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
         modeLabel,
       },
     }).catch(() => undefined);
-  }, [deckId, modeLabel, sessionStats]);
+  }, [deckId, modeLabel, serverProgressLoaded, sessionStats, totalActivity]);
 
   useEffect(() => {
-    if (done || queue.length === 0) {
+    if (serverProgressLoaded && done) {
       persistSessionSummary();
     }
-  }, [done, queue.length, persistSessionSummary]);
+  }, [done, persistSessionSummary, serverProgressLoaded]);
 
   if (queue.length === 0 || done) {
     return (
@@ -233,7 +247,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
             role="progressbar"
             aria-valuemin={0}
             aria-valuemax={queue.length}
-            aria-valuenow={Math.min(queueIndex, queue.length)}
+            aria-valuenow={progressCurrent}
             aria-label="Study progress"
           >
             <div
