@@ -67,6 +67,11 @@ test('deck id validation accepts safe ids and rejects path-like ids', () => {
 test('comment resolution migration limits client updates to resolution fields', async () => {
   const sql = await fs.readFile(new URL('../supabase/migrations/20260507120000_comment_resolution.sql', import.meta.url), 'utf8');
 
+  assert.match(sql, /create or replace function public\.enforce_comment_insert_scope/i);
+  assert.match(sql, /where s\.id = new\.suggestion_id\s+and s\.deck_id = new\.deck_id/i);
+  assert.match(sql, /parent\.suggestion_id = new\.suggestion_id\s+and parent\.deck_id = new\.deck_id/i);
+  assert.match(sql, /new\.resolved_at := null/i);
+  assert.match(sql, /create trigger enforce_comment_insert_scope/i);
   assert.match(sql, /create or replace function public\.enforce_comment_resolution_update/i);
   assert.match(sql, /new\.body is distinct from old\.body/i);
   assert.match(sql, /raise exception 'Only comment resolution fields may be updated'/i);

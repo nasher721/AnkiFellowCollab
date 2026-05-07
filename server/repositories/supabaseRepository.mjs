@@ -443,6 +443,7 @@ export function createSupabaseRepository(options = {}) {
         .from('comments')
         .select('id, suggestion_id, deck_id, author_id, author_name, body, parent_id, created_at, updated_at, resolved_at, resolved_by')
         .eq('suggestion_id', suggestionId)
+        .eq('deck_id', suggestion.deck_id)
         .order('created_at', { ascending: true });
       if (error) throw error;
       return (data || []).map(toComment);
@@ -493,11 +494,18 @@ export function createSupabaseRepository(options = {}) {
     },
 
     async setSuggestionCommentResolved(user, suggestionId, commentId, resolved) {
+      const { data: suggestion, error: suggestionError } = await supabase
+        .from('suggestions')
+        .select('deck_id')
+        .eq('id', suggestionId)
+        .single();
+      if (suggestionError || !suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
       const { data: comment, error: commentError } = await supabase
         .from('comments')
         .select('id, suggestion_id, deck_id, resolved_at')
         .eq('id', commentId)
         .eq('suggestion_id', suggestionId)
+        .eq('deck_id', suggestion.deck_id)
         .single();
       if (commentError || !comment) fail(404, 'comment_not_found', 'Comment not found');
       await assertMembership(user.id, comment.deck_id, 'contributor');
@@ -511,6 +519,7 @@ export function createSupabaseRepository(options = {}) {
         })
         .eq('id', commentId)
         .eq('suggestion_id', suggestionId)
+        .eq('deck_id', suggestion.deck_id)
         .select('id, suggestion_id, deck_id, author_id, author_name, body, parent_id, created_at, updated_at, resolved_at, resolved_by')
         .single();
       if (error) throw error;

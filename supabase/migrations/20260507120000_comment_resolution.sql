@@ -25,6 +25,46 @@ create index if not exists comments_resolved_by_idx
   on public.comments (resolved_by)
   where resolved_by is not null;
 
+create or replace function public.enforce_comment_insert_scope()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not exists (
+    select 1
+    from public.suggestions s
+    where s.id = new.suggestion_id
+      and s.deck_id = new.deck_id
+  ) then
+    raise exception 'Comment suggestion must belong to the same deck'
+      using errcode = '23503';
+  end if;
+
+  if new.parent_id is not null and not exists (
+    select 1
+    from public.comments parent
+    where parent.id = new.parent_id
+      and parent.suggestion_id = new.suggestion_id
+      and parent.deck_id = new.deck_id
+  ) then
+    raise exception 'Parent comment must belong to the same suggestion and deck'
+      using errcode = '23503';
+  end if;
+
+  new.resolved_at := null;
+  new.resolved_by := null;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists enforce_comment_insert_scope on public.comments;
+create trigger enforce_comment_insert_scope
+before insert on public.comments
+for each row execute function public.enforce_comment_insert_scope();
+
 create or replace function public.enforce_comment_resolution_update()
 returns trigger
 language plpgsql
