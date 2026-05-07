@@ -6,29 +6,34 @@ interface Props {
 }
 
 export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
-  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [notificationPage, setNotificationPage] = useState<{ notifications: Notification[]; nextCursor: string | null }>({
+    notifications: [],
+    nextCursor: null
+  });
   const [unread, setUnread] = useState(0);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
+  const { notifications, nextCursor } = notificationPage;
 
   const load = useCallback(async () => {
     try {
       const { notifications: data, unread: count, nextCursor: cursor } = await api.notifications.list({ limit: 20 });
-      const preserveLoadedHistory = open && notifications.length > data.length;
-      setNotifications((prev) => {
-        if (!preserveLoadedHistory) return data;
+      setNotificationPage((prev) => {
+        const preserveLoadedHistory = open && prev.notifications.length > data.length;
+        if (!preserveLoadedHistory) return { notifications: data, nextCursor: cursor };
         const firstPageIds = new Set(data.map((notification) => notification.id));
-        return [...data, ...prev.filter((notification) => !firstPageIds.has(notification.id))];
+        return {
+          notifications: [...data, ...prev.notifications.filter((notification) => !firstPageIds.has(notification.id))],
+          nextCursor: prev.nextCursor
+        };
       });
       setUnread(count);
-      setNextCursor((prevCursor) => preserveLoadedHistory ? prevCursor : cursor);
     } catch {
       // not available in local dev — silently degrade
     }
-  }, [notifications.length, open]);
+  }, [open]);
 
   useEffect(() => {
     load();
@@ -50,7 +55,10 @@ export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
     setOpen((prev) => !prev);
     if (!open && unread > 0) {
       setUnread(0);
-      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+      setNotificationPage((prev) => ({
+        ...prev,
+        notifications: prev.notifications.map((n) => ({ ...n, read: true }))
+      }));
       await api.notifications.readAll().catch(() => undefined);
     }
   }
@@ -61,8 +69,10 @@ export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
     setLoadMoreError(null);
     try {
       const { notifications: data, nextCursor: cursor } = await api.notifications.list({ limit: 20, cursor: nextCursor });
-      setNotifications((prev) => [...prev, ...data]);
-      setNextCursor(cursor);
+      setNotificationPage((prev) => ({
+        notifications: [...prev.notifications, ...data],
+        nextCursor: cursor
+      }));
     } catch {
       setLoadMoreError('Unable to load more notifications.');
     } finally {
@@ -104,8 +114,7 @@ export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
             <strong>Notifications</strong>
             {notifications.length > 0 && (
               <button className="btn btn-ghost btn-sm" onClick={async () => {
-                setNotifications([]);
-                setNextCursor(null);
+                setNotificationPage({ notifications: [], nextCursor: null });
                 setLoadMoreError(null);
                 await api.notifications.readAll().catch(() => undefined);
               }}>Clear all</button>

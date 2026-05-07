@@ -66,6 +66,18 @@ function encodeNotificationCursor(row) {
   return Buffer.from(JSON.stringify({ created_at: row.created_at, id: row.id })).toString('base64url');
 }
 
+function notificationRowToApi(row) {
+  return {
+    id: row.id,
+    deckId: row.deck_id ?? null,
+    kind: row.kind,
+    body: row.body,
+    refId: row.ref_id ?? null,
+    read: Boolean(row.read),
+    createdAt: row.created_at
+  };
+}
+
 function parseNotificationCursor(value) {
   if (value === undefined) return null;
   if (typeof value !== 'string' || !value.trim()) fail(400, 'invalid_cursor', 'Invalid notification cursor');
@@ -651,12 +663,14 @@ export function createApp(options = {}) {
         .select('id', { count: 'exact', head: true })
         .eq('user_id', req.user.id)
         .eq('read', false);
-      const [{ data }, { count }] = await Promise.all([query.limit(limit + 1), unreadQuery]);
+      const [{ data, error: pageError }, { count, error: unreadError }] = await Promise.all([query.limit(limit + 1), unreadQuery]);
+      if (pageError) fail(500, 'notifications_error', pageError.message || 'Unable to load notifications');
+      if (unreadError) fail(500, 'notifications_error', unreadError.message || 'Unable to load notifications');
       const rows = data || [];
       const page = rows.slice(0, limit);
       const unread = count ?? rows.filter((n) => !n.read).length;
       const nextCursor = rows.length > limit ? encodeNotificationCursor(page[page.length - 1]) : null;
-      res.json({ notifications: page, unread, nextCursor });
+      res.json({ notifications: page.map(notificationRowToApi), unread, nextCursor });
     } catch (err) { next(err); }
   });
 

@@ -13,17 +13,19 @@ class FakeSupabase {
       profiles: [],
       user_tokens: []
     };
+    this.errors = [];
   }
 
   from(table) {
-    return new FakeQuery(this.tables, table);
+    return new FakeQuery(this.tables, table, this.errors);
   }
 }
 
 class FakeQuery {
-  constructor(tables, table) {
+  constructor(tables, table, errors = []) {
     this.tables = tables;
     this.table = table;
+    this.errors = errors;
     this.filters = [];
     this.pendingUpdate = null;
     this.pendingDelete = false;
@@ -106,6 +108,8 @@ class FakeQuery {
   }
 
   async execute() {
+    const syntheticError = this.syntheticError();
+    if (syntheticError) return { data: null, count: null, error: syntheticError };
     if (this.pendingDelete) {
       const rows = this.tables[this.table];
       const kept = rows.filter((row) => !this.matches(row));
@@ -121,6 +125,12 @@ class FakeQuery {
     const rows = this.rows();
     if (this.selectOptions.head) return { data: null, count: rows.length, error: null };
     return { data: rows, count: this.selectOptions.count ? rows.length : null, error: null };
+  }
+
+  syntheticError() {
+    const isHead = Boolean(this.selectOptions.head);
+    const match = this.errors.find((error) => error.table === this.table && (error.head === undefined || error.head === isHead));
+    return match ? { message: match.message || 'Synthetic Supabase error' } : null;
   }
 
   async maybeSingle() {
@@ -797,7 +807,7 @@ test('notifications API supports limit and created_at cursor pagination', async 
     { id: 'n1', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'decision', body: 'Oldest', ref_id: null, read: true, created_at: '2026-05-07T12:01:00.000Z' },
     { id: 'n3', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'comment', body: 'Tied newer', ref_id: null, read: false, created_at: '2026-05-07T12:03:00.000Z' },
     { id: 'n2', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'reaction', body: 'Middle', ref_id: null, read: false, created_at: '2026-05-07T12:02:00.000Z' },
-    { id: 'n4', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'comment', body: 'Newest tie', ref_id: null, read: false, created_at: '2026-05-07T12:03:00.000Z' }
+    { id: 'n4', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'comment', body: 'Newest tie', ref_id: 'comment-4', read: false, created_at: '2026-05-07T12:03:00.000Z' }
   ];
   const { app } = await createTestApp({
     auth: {
@@ -816,6 +826,12 @@ test('notifications API supports limit and created_at cursor pagination', async 
   assert.deepEqual(first.body.notifications.map((notification) => notification.id), ['n4', 'n3']);
   assert.equal(first.body.unread, 3);
   assert.ok(first.body.nextCursor);
+  assert.equal(first.body.notifications[0].deckId, 'deck-demo-zanki');
+  assert.equal(first.body.notifications[0].refId, 'comment-4');
+  assert.equal(first.body.notifications[0].createdAt, '2026-05-07T12:03:00.000Z');
+  assert.equal(first.body.notifications[0].deck_id, undefined);
+  assert.equal(first.body.notifications[0].ref_id, undefined);
+  assert.equal(first.body.notifications[0].created_at, undefined);
 
   const second = await request(app)
     .get('/api/notifications')
@@ -823,6 +839,52 @@ test('notifications API supports limit and created_at cursor pagination', async 
     .expect(200);
   assert.deepEqual(second.body.notifications.map((notification) => notification.id), ['n2', 'n1']);
   assert.equal(second.body.nextCursor, null);
+});
+
+test('notifications API reports page query errors', async () => {
+  const supabase = new FakeSupabase();
+  supabase.tables.notifications = [];
+  supabase.errors = [{ table: 'notifications', head: false, message: 'page query failed' }];
+  const { app } = await createTestApp({
+    auth: {
+      supabase,
+      requireUser(req, _res, next) {
+        req.user = { id: 'you', email: 'you@example.com', name: 'You' };
+        next();
+      }
+    }
+  });
+
+  await request(app)
+    .get('/api/notifications')
+    .expect(500)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'notifications_error');
+      assert.equal(res.body.error.message, 'page query failed');
+    });
+});
+
+test('notifications API reports unread count query errors', async () => {
+  const supabase = new FakeSupabase();
+  supabase.tables.notifications = [];
+  supabase.errors = [{ table: 'notifications', head: true, message: 'unread count failed' }];
+  const { app } = await createTestApp({
+    auth: {
+      supabase,
+      requireUser(req, _res, next) {
+        req.user = { id: 'you', email: 'you@example.com', name: 'You' };
+        next();
+      }
+    }
+  });
+
+  await request(app)
+    .get('/api/notifications')
+    .expect(500)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'notifications_error');
+      assert.equal(res.body.error.message, 'unread count failed');
+    });
 });
 
 test('notifications API rejects malformed cursors', async () => {
