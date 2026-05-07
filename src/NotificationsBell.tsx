@@ -5,8 +5,32 @@ interface Props {
   pollIntervalMs?: number;
 }
 
+interface NotificationPageState {
+  notifications: Notification[];
+  nextCursor: string | null;
+}
+
+function mergeNotificationRefresh(
+  prev: NotificationPageState,
+  refreshedNotifications: Notification[],
+  refreshedNextCursor: string | null,
+  preserveLoadedRows: boolean
+): NotificationPageState {
+  if (!preserveLoadedRows) {
+    return { notifications: refreshedNotifications, nextCursor: refreshedNextCursor };
+  }
+  const refreshedIds = new Set(refreshedNotifications.map((notification) => notification.id));
+  return {
+    notifications: [
+      ...refreshedNotifications,
+      ...prev.notifications.filter((notification) => !refreshedIds.has(notification.id))
+    ],
+    nextCursor: prev.nextCursor ?? refreshedNextCursor
+  };
+}
+
 export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
-  const [notificationPage, setNotificationPage] = useState<{ notifications: Notification[]; nextCursor: string | null }>({
+  const [notificationPage, setNotificationPage] = useState<NotificationPageState>({
     notifications: [],
     nextCursor: null
   });
@@ -15,25 +39,30 @@ export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
+  const openRef = useRef(false);
+  const loadingMoreRef = useRef(false);
   const { notifications, nextCursor } = notificationPage;
 
   const load = useCallback(async () => {
     try {
       const { notifications: data, unread: count, nextCursor: cursor } = await api.notifications.list({ limit: 20 });
       setNotificationPage((prev) => {
-        const preserveLoadedHistory = open && prev.notifications.length > data.length;
-        if (!preserveLoadedHistory) return { notifications: data, nextCursor: cursor };
-        const firstPageIds = new Set(data.map((notification) => notification.id));
-        return {
-          notifications: [...data, ...prev.notifications.filter((notification) => !firstPageIds.has(notification.id))],
-          nextCursor: prev.nextCursor
-        };
+        const preserveLoadedRows = openRef.current || loadingMoreRef.current;
+        return mergeNotificationRefresh(prev, data, cursor, preserveLoadedRows);
       });
       setUnread(count);
     } catch {
       // not available in local dev — silently degrade
     }
+  }, []);
+
+  useEffect(() => {
+    openRef.current = open;
   }, [open]);
+
+  useEffect(() => {
+    loadingMoreRef.current = loadingMore;
+  }, [loadingMore]);
 
   useEffect(() => {
     load();
@@ -52,7 +81,9 @@ export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
   }, [open]);
 
   async function openPanel() {
-    setOpen((prev) => !prev);
+    const opening = !open;
+    openRef.current = opening;
+    setOpen(opening);
     if (!open && unread > 0) {
       setUnread(0);
       setNotificationPage((prev) => ({
@@ -65,6 +96,7 @@ export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
 
   async function loadMore() {
     if (!nextCursor || loadingMore) return;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
     setLoadMoreError(null);
     try {
@@ -76,6 +108,7 @@ export function NotificationsBell({ pollIntervalMs = 30000 }: Props) {
     } catch {
       setLoadMoreError('Unable to load more notifications.');
     } finally {
+      loadingMoreRef.current = false;
       setLoadingMore(false);
     }
   }
