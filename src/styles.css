@@ -239,6 +239,29 @@
   border-color: var(--border);
 }
 
+[data-theme="dark"] .owner-attention,
+[data-theme="dark"] .attention-item,
+[data-theme="dark"] .attention-clear {
+  background: var(--bg-card);
+  border-color: var(--border);
+}
+
+[data-theme="dark"] .owner-sync-proof span {
+  background: var(--bg-secondary);
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+[data-theme="dark"] .owner-attention-heading,
+[data-theme="dark"] .attention-item strong,
+[data-theme="dark"] .attention-clear strong {
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .attention-item:hover {
+  background: var(--bg-secondary);
+}
+
 [data-theme="dark"] .review-heading,
 [data-theme="dark"] .review-filter-bar {
   border-color: var(--border);
@@ -671,16 +694,32 @@ button:disabled {
 }
 
 .sync-strip {
-  height: 38px;
-  display: flex;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 10px minmax(150px, 1fr) auto minmax(120px, auto) 34px;
   align-items: center;
   gap: 9px;
-  padding: 0 10px;
+  padding: 6px 8px 6px 10px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--panel);
   box-shadow: 0 6px 24px rgba(20, 35, 64, 0.04);
   font-size: 13px;
+  max-width: 560px;
+}
+
+.sync-strip-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.sync-strip-main strong,
+.sync-strip-main small,
+.sync-strip-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sync-strip small {
@@ -697,6 +736,10 @@ button:disabled {
 .sync-light.on {
   background: var(--green);
 }
+
+.sync-strip--warning .sync-light { background: var(--amber); }
+.sync-strip--danger .sync-light { background: var(--red); }
+.sync-strip--info .sync-light { background: var(--blue); }
 
 .connected-pill,
 .offline-pill,
@@ -717,6 +760,48 @@ button:disabled {
 .offline-pill {
   background: #f1f4f8;
   color: #657085;
+}
+
+.sync-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.sync-badge--success {
+  color: #137449;
+  background: var(--green-soft);
+  border-color: #bde7ca;
+}
+
+.sync-badge--warning {
+  color: #9a6400;
+  background: var(--amber-soft);
+  border-color: #ffd780;
+}
+
+.sync-badge--danger {
+  color: #b92727;
+  background: var(--red-soft);
+  border-color: #ffc5c5;
+}
+
+.sync-badge--info {
+  color: #0b62ce;
+  background: #eef6ff;
+  border-color: #bdd8ff;
+}
+
+.sync-badge--neutral {
+  color: #596579;
+  background: #f2f5f9;
 }
 
 .role-toggle {
@@ -751,6 +836,7 @@ button:disabled {
 
 .deck-panel {
   padding: 24px 24px 28px;
+  min-width: 0;
 }
 
 .breadcrumb {
@@ -771,6 +857,7 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 28px;
+  min-width: 0;
 }
 
 .tabs button,
@@ -1035,6 +1122,7 @@ button:disabled {
   overflow-x: auto;
   overflow-y: hidden;
   box-shadow: var(--shadow);
+  min-width: 0;
 }
 
 .table-tools {
@@ -1216,6 +1304,107 @@ button:disabled {
   border-left: 1px solid var(--line);
   background: #fbfcfe;
   padding: 24px 18px;
+  min-width: 0;
+}
+
+.owner-attention {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 14px;
+  margin-bottom: 18px;
+}
+
+.owner-attention-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #2b3549;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.owner-sync-proof {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.owner-sync-proof span {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #536075;
+  padding: 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.attention-list {
+  display: grid;
+  gap: 8px;
+}
+
+.attention-item,
+.attention-clear {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  padding: 10px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+}
+
+.attention-item:hover {
+  border-color: #a9cbff;
+  background: #f6fbff;
+}
+
+.attention-item strong,
+.attention-clear strong {
+  display: block;
+  color: #263249;
+  font-size: 13px;
+}
+
+.attention-item small,
+.attention-clear small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.attention-item b {
+  color: var(--blue);
+  font-size: 12px;
+}
+
+.attention-item--warning {
+  border-color: #ffd780;
+}
+
+.attention-item--danger {
+  border-color: #ffc5c5;
+}
+
+.attention-item--success {
+  border-color: #bde7ca;
+}
+
+.attention-clear {
+  grid-template-columns: 28px 1fr;
+  color: var(--green);
+  cursor: default;
 }
 
 .review-heading {
@@ -1748,10 +1937,47 @@ button:disabled {
     position: static;
   }
 
+  .topbar > *,
+  .right-actions,
+  .topbar-actions {
+    min-width: 0;
+    max-width: 100%;
+  }
+
   .right-actions,
   .topbar-actions {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+
+  .topbar-actions .button {
+    flex: 1 1 112px;
+    justify-content: center;
+  }
+
+  .sync-strip {
+    width: 100%;
+    max-width: 100%;
+    grid-template-columns: 10px minmax(0, 1fr) auto 34px;
+  }
+
+  .sync-strip-detail {
+    display: none;
+  }
+
+  .right-actions .export-dropdown {
+    flex: 1 1 180px;
+    min-width: 0;
+  }
+
+  .right-actions .export-dropdown > .button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .tabs {
+    overflow-x: auto;
+    overflow-y: hidden;
   }
 
   .summary-band,
@@ -1768,6 +1994,21 @@ button:disabled {
   .table-row {
     gap: 8px;
     padding: 14px;
+  }
+
+  .card-table {
+    min-width: 0;
+  }
+
+  .pagination-row {
+    height: auto;
+    gap: 10px;
+    padding: 12px 16px;
+  }
+
+  .pagination-row label,
+  .pagination-row > span {
+    white-space: nowrap;
   }
 }
 
@@ -1887,6 +2128,7 @@ button:disabled {
 
 .wizard-status-card,
 .wizard-test-card,
+.wizard-proof-card,
 .wizard-config-summary,
 .wizard-hint-box,
 .wizard-success {
@@ -1903,6 +2145,10 @@ button:disabled {
 
 .wizard-test-card {
   gap: 8px;
+}
+
+.wizard-proof-card {
+  border-style: dashed;
 }
 
 .wizard-test-card p {

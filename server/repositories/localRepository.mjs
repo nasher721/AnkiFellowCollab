@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { applySuggestion, mergeAddonCards, nowIso, summarizeDeck } from '../domain.mjs';
+import { applySuggestion, buildAddonSyncResult, mergeAddonCards, nowIso, summarizeDeck } from '../domain.mjs';
 import { fail } from '../errors.mjs';
 import { loadState, saveState } from '../store.mjs';
 
@@ -8,6 +8,8 @@ const roleRank = { viewer: 0, editor: 1, owner: 2 };
 function ensureCollections(state) {
   state.studySessions ||= [];
   state.shareLinks ||= [];
+  state.sync ||= {};
+  state.sync.lastAddonSync ??= null;
 }
 
 function collaboratorToUser(person) {
@@ -222,6 +224,9 @@ export function createLocalRepository() {
       ensureCollections(state);
       const { deck } = requireRole(state, user.id, deckId, 'editor');
       const result = mergeAddonCards(deck, syncInput, user.name);
+      const lastAddonSync = buildAddonSyncResult(syncInput, result);
+      state.sync.lastAddonSync = lastAddonSync;
+      state.sync.lastCheckedAt = result.syncedAt;
       state.sync.conflicts = result.conflicts;
       if (!syncInput.dryRun) {
         state.sync.lastPullAt = syncInput.conflictPolicy === 'overwrite-platform' ? result.syncedAt : state.sync.lastPullAt;
@@ -232,11 +237,13 @@ export function createLocalRepository() {
           text: `${user.name} synced ${result.stats.total} Anki card(s): ${result.stats.created} new, ${result.stats.updated} updated, ${result.stats.conflicts} conflict(s)`,
           at: result.syncedAt
         });
-        await saveState(state);
       }
+      await saveState(state);
       return {
         result: {
           syncedAt: result.syncedAt,
+          source: lastAddonSync.source,
+          client: lastAddonSync.client,
           stats: result.stats,
           conflicts: result.conflicts
         },
@@ -251,6 +258,16 @@ export function createLocalRepository() {
       state.activeDeckId = deckId;
       await saveState(state);
       return this.getDeckState(user, deckId);
+    },
+
+    async setDemoRole(user, role) {
+      const state = await loadState();
+      ensureCollections(state);
+      const next = await this.getDeckState(user, state.activeDeckId);
+      return {
+        ...next,
+        role: role === 'owner' ? 'owner' : 'collaborator'
+      };
     },
 
     async createStudySession(user, session) {

@@ -313,6 +313,22 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
   return result;
 }
 
+export function buildAddonSyncResult(syncInput, result) {
+  return {
+    syncedAt: result.syncedAt,
+    source: syncInput.source,
+    client: syncInput.client,
+    stats: {
+      total: result.stats.total,
+      created: result.stats.created,
+      updated: result.stats.updated,
+      skipped: result.stats.skipped,
+      conflicts: result.stats.conflicts,
+      dryRun: result.stats.dryRun
+    }
+  };
+}
+
 export function createSeedState() {
   const importedAt = nowIso();
   const deck = {
@@ -453,6 +469,7 @@ export function createSeedState() {
       lastCheckedAt: null,
       lastPullAt: null,
       lastPushAt: null,
+      lastAddonSync: null,
       conflicts: []
     }
   };

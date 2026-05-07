@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { createClient } from '@supabase/supabase-js';
-import { applySuggestion, mergeAddonCards, nowIso, summarizeDeck } from '../domain.mjs';
+import { applySuggestion, buildAddonSyncResult, mergeAddonCards, nowIso, summarizeDeck } from '../domain.mjs';
 import { fail } from '../errors.mjs';
 
 export const roleRank = {
@@ -129,6 +129,7 @@ function emptyState(user) {
       lastCheckedAt: null,
       lastPullAt: null,
       lastPushAt: null,
+      lastAddonSync: null,
       conflicts: []
     },
     user,
@@ -176,6 +177,7 @@ export function createSupabaseRepository(options = {}) {
     if (conflictsError) throw conflictsError;
     const fullDeck = toDeck(deck, (cards || []).map(toCard));
     const deckSuggestions = (suggestions || []).map(toSuggestion);
+    const lastAddonSync = deck.last_sync_result || null;
     return {
       decks: [fullDeck],
       summaries: [summarizeDeck(fullDeck, deckSuggestions)],
@@ -187,9 +189,10 @@ export function createSupabaseRepository(options = {}) {
       sync: {
         ankiConnectUrl: null,
         connected: false,
-        lastCheckedAt: null,
+        lastCheckedAt: lastAddonSync?.syncedAt || null,
         lastPullAt: null,
-        lastPushAt: null,
+        lastPushAt: lastAddonSync && !lastAddonSync.stats?.dryRun ? lastAddonSync.syncedAt : fullDeck.lastSyncedAt || null,
+        lastAddonSync,
         conflicts: (conflicts || []).map((row) => ({
           id: row.id,
           deckId: row.deck_id,
@@ -533,6 +536,7 @@ export function createSupabaseRepository(options = {}) {
       const state = await getDeckRows(user, deckId);
       const deck = state.decks[0];
       const result = mergeAddonCards(deck, syncInput, user.name);
+      const lastAddonSync = buildAddonSyncResult(syncInput, result);
 
       if (!syncInput.dryRun) {
         if (result.createdCards.length) {
@@ -588,7 +592,10 @@ export function createSupabaseRepository(options = {}) {
           })));
           if (error) throw error;
         }
-        const { error: deckError } = await supabase.from('decks').update({ last_synced_at: result.syncedAt }).eq('id', deck.id);
+        const { error: deckError } = await supabase.from('decks').update({
+          last_synced_at: result.syncedAt,
+          last_sync_result: lastAddonSync
+        }).eq('id', deck.id);
         if (deckError) throw deckError;
         await supabase.from('activity').insert({
           id: `act-${randomUUID()}`,
@@ -598,15 +605,22 @@ export function createSupabaseRepository(options = {}) {
           text: `${user.name} synced ${result.stats.total} Anki card(s): ${result.stats.created} new, ${result.stats.updated} updated, ${result.stats.conflicts} conflict(s)`,
           created_at: result.syncedAt
         });
+      } else {
+        const { error: deckError } = await supabase.from('decks').update({
+          last_sync_result: lastAddonSync
+        }).eq('id', deck.id);
+        if (deckError) throw deckError;
       }
 
       return {
         result: {
           syncedAt: result.syncedAt,
+          source: lastAddonSync.source,
+          client: lastAddonSync.client,
           stats: result.stats,
           conflicts: result.conflicts
         },
-        state: syncInput.dryRun ? state : await getDeckRows(user, deck.id)
+        state: await getDeckRows(user, deck.id)
       };
     }
   };

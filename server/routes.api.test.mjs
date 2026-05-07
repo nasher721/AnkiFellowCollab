@@ -206,6 +206,11 @@ test('authenticated API returns current user and visible decks', async () => {
 
   const decks = await asUser(request(app).get('/api/decks'), 'you', 'You').expect(200);
   assert.equal(decks.body.decks.length, 1);
+
+  const collaboratorSession = await asUser(request(app)
+    .patch('/api/session')
+    .send({ role: 'collaborator' }), 'you', 'You').expect(200);
+  assert.equal(collaboratorSession.body.role, 'collaborator');
 });
 
 test('token API creates one-time raw tokens and lists metadata only', async () => {
@@ -365,6 +370,7 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
     .send({
       conflictPolicy: 'overwrite-platform',
       source: 'DeckBridge Sync test',
+      client: { name: 'DeckBridge Sync', version: '0.1.0', fingerprint: 'test-host' },
       cards: [{
         id: 'anki-9001',
         ankiNoteId: 9001,
@@ -379,6 +385,10 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
     }), 'you', 'You').expect(200);
 
   assert.equal(created.body.result.stats.created, 1);
+  assert.equal(created.body.result.source, 'DeckBridge Sync test');
+  assert.equal(created.body.result.client.name, 'DeckBridge Sync');
+  assert.equal(created.body.state.sync.lastAddonSync.stats.created, 1);
+  assert.equal(created.body.state.sync.lastAddonSync.client.version, '0.1.0');
   assert.equal(created.body.state.decks[0].cards.some((card) => card.ankiNoteId === 9001), true);
 
   const conflict = await asUser(request(app)
@@ -401,6 +411,29 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
 
   assert.equal(conflict.body.result.stats.conflicts, 1);
   assert.equal(conflict.body.state.sync.conflicts[0].cardId, 'anki-9001');
+
+  const dryRun = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      dryRun: true,
+      conflictPolicy: 'detect',
+      source: 'DeckBridge Sync preview',
+      cards: [{
+        id: 'anki-9001',
+        ankiNoteId: 9001,
+        type: 'Basic',
+        modelName: 'Basic',
+        fieldOrder: ['Front', 'Back'],
+        fields: { Front: 'Different local Anki text', Back: 'Synced into platform' },
+        tags: ['DeckBridge'],
+        state: 'Review',
+        suspended: false
+      }]
+    }), 'you', 'You').expect(200);
+
+  assert.equal(dryRun.body.result.stats.dryRun, true);
+  assert.equal(dryRun.body.state.sync.lastAddonSync.stats.dryRun, true);
+  assert.equal(dryRun.body.state.sync.lastAddonSync.source, 'DeckBridge Sync preview');
 });
 
 test('Anki add-on can create the first DeckBridge workspace from a local deck', async () => {

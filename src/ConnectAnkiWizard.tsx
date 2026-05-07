@@ -1,12 +1,14 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import { api, type AddonDownloadAvailability, type AddonVersion, type CreatedToken, type MeResponse } from './api';
-import type { DeckSummary } from './types';
+import type { AppState, DeckSummary } from './types';
 
-type Step = 'download' | 'token' | 'connect' | 'map';
+type Step = 'download' | 'token' | 'map' | 'prove' | 'manual';
 
 interface Props {
   decks: DeckSummary[];
   platformUrl: string;
+  currentState: AppState;
+  onRefreshState: () => Promise<AppState>;
   onClose: () => void;
 }
 
@@ -18,17 +20,17 @@ const STEPS: { id: Step; label: string }[] = [
   { id: 'download', label: 'Download' },
   { id: 'token', label: 'Authorize' },
   { id: 'map', label: 'Map Deck' },
-  { id: 'connect', label: 'Connect' },
+  { id: 'prove', label: 'Prove Sync' },
 ];
 
 function StepIndicator({ current }: StepIndicatorProps) {
-  const currentIndex = STEPS.findIndex((s) => s.id === current);
+  const currentIndex = STEPS.findIndex((s) => s.id === (current === 'manual' ? 'map' : current));
   return (
     <div className="wizard-steps">
       {STEPS.map((step, i) => (
         <div
           key={step.id}
-          className={`wizard-step ${i < currentIndex ? 'done' : ''} ${step.id === current ? 'active' : ''}`}
+          className={`wizard-step ${i < currentIndex ? 'done' : ''} ${step.id === (current === 'manual' ? 'map' : current) ? 'active' : ''}`}
         >
           <span className="wizard-step-number">{i < currentIndex ? '✓' : i + 1}</span>
           <span className="wizard-step-label">{step.label}</span>
@@ -39,7 +41,31 @@ function StepIndicator({ current }: StepIndicatorProps) {
   );
 }
 
-export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
+function syncProofFromState(state: AppState, deckId: string) {
+  const summary = state.summaries.find((deck) => deck.id === deckId);
+  const deck = state.decks.find((item) => item.id === deckId);
+  const lastAddonSync = state.sync.lastAddonSync;
+  const syncedAt = lastAddonSync?.syncedAt || summary?.lastSyncedAt || deck?.lastSyncedAt || state.sync.lastPushAt || state.sync.lastPullAt || null;
+  return {
+    syncedAt,
+    lastAddonSync,
+    summary,
+    conflictCount: state.sync.conflicts.length || lastAddonSync?.stats.conflicts || 0,
+    verified: Boolean(lastAddonSync || syncedAt || state.sync.conflicts.length)
+  };
+}
+
+function relativeProofTime(value?: string | null) {
+  if (!value) return 'Not yet';
+  const diff = Date.now() - new Date(value).getTime();
+  const minutes = Math.max(1, Math.round(diff / 60000));
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshState, onClose }: Props) {
   const [step, setStep] = useState<Step>('download');
   const [addonVersion, setAddonVersion] = useState<AddonVersion | null>(null);
   const [versionLoading, setVersionLoading] = useState(true);
@@ -56,6 +82,9 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<MeResponse | null>(null);
   const [testError, setTestError] = useState('');
+  const [proofLoading, setProofLoading] = useState(false);
+  const [proofError, setProofError] = useState('');
+  const [proofState, setProofState] = useState(() => syncProofFromState(currentState, selectedDeckId));
   const [showManualToken, setShowManualToken] = useState(false);
   const localDeckNameForConfig = localDeckName.trim();
 
@@ -112,6 +141,10 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
     }
   }, [availableDecks, selectedDeckId]);
 
+  useEffect(() => {
+    setProofState(syncProofFromState(currentState, selectedDeckId));
+  }, [currentState, selectedDeckId]);
+
   const generateToken = useCallback(async () => {
     setGenerating(true);
     setError('');
@@ -167,6 +200,19 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
       setTesting(false);
     }
   }, [createdToken]);
+
+  const checkSyncProof = useCallback(async () => {
+    setProofLoading(true);
+    setProofError('');
+    try {
+      const nextState = await onRefreshState();
+      setProofState(syncProofFromState(nextState, selectedDeckId));
+    } catch (err) {
+      setProofError(err instanceof Error ? err.message : 'Unable to refresh sync proof');
+    } finally {
+      setProofLoading(false);
+    }
+  }, [onRefreshState, selectedDeckId]);
 
   return (
     <div className="wizard-overlay" role="dialog" aria-modal="true" aria-label="Connect Anki Add-on">
@@ -261,7 +307,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
             </div>
           )}
 
-          {step === 'connect' && createdToken && (
+          {step === 'manual' && createdToken && (
             <div className="wizard-step-content">
               <h3>Manual setup</h3>
               <p>
@@ -309,7 +355,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
               </div>
               <div className="wizard-nav">
                 <button className="btn btn-ghost" onClick={() => setStep('map')}>← Back</button>
-                <button className="btn btn-primary" onClick={() => setStep('map')}>Next →</button>
+                <button className="btn btn-primary" onClick={() => setStep('prove')}>Prove sync →</button>
               </div>
             </div>
           )}
@@ -438,8 +484,67 @@ export function ConnectAnkiWizard({ decks, platformUrl, onClose }: Props) {
               </p>
               <div className="wizard-nav">
                 <button className="btn btn-ghost" onClick={() => setStep('token')}>← Back</button>
-                {createdToken ? <button className="btn btn-secondary" onClick={() => setStep('connect')}>Manual setup</button> : null}
-                <button className="btn btn-primary" onClick={onClose}>Done ✓</button>
+                {createdToken ? <button className="btn btn-secondary" onClick={() => setStep('manual')}>Manual setup</button> : null}
+                <button className="btn btn-primary" onClick={() => setStep('prove')} disabled={!selectedDeckId}>Prove sync →</button>
+              </div>
+            </div>
+          )}
+
+          {step === 'prove' && (
+            <div className="wizard-step-content">
+              <h3>Step 4: Prove Sync</h3>
+              <p>
+                Run <strong>Preview push</strong> or <strong>Push Anki deck to DeckBridge</strong> from the
+                DeckBridge Sync add-on, then check for the posted sync result here.
+              </p>
+              <div className="wizard-config-summary">
+                <strong>Current setup target</strong>
+                <span>DeckBridge deck: {availableDecks.find((deck) => deck.id === selectedDeckId)?.name || selectedDeckId || 'Select a deck'}</span>
+                <span>Local Anki deck: {localDeckName || 'Add-on active deck'}</span>
+                <span>Conflict policy: {conflictPolicy}</span>
+              </div>
+              {autoConfigUrl ? (
+                <div className="wizard-autoconfig wizard-primary-action">
+                  <p className="wizard-hint">Use this again if Anki has not saved the mapping yet.</p>
+                  <a href={autoConfigUrl} className="btn btn-secondary">Open connection link</a>
+                  <button className="btn btn-secondary" onClick={() => copyText(autoConfigUrl)}>
+                    Copy link
+                  </button>
+                </div>
+              ) : null}
+              <div className={proofState.verified ? 'wizard-success' : 'wizard-proof-card'}>
+                <strong>{proofState.verified ? 'Sync proof captured' : 'Waiting for add-on proof'}</strong>
+                {proofState.lastAddonSync ? (
+                  <>
+                    <span>{proofState.lastAddonSync.stats.total} cards scanned by {proofState.lastAddonSync.client?.name || proofState.lastAddonSync.source}.</span>
+                    <span>{proofState.lastAddonSync.stats.created} new · {proofState.lastAddonSync.stats.updated} updated · {proofState.lastAddonSync.stats.skipped} unchanged.</span>
+                    <span>{proofState.lastAddonSync.stats.dryRun ? 'Dry-run result' : 'Sync result'} posted {relativeProofTime(proofState.lastAddonSync.syncedAt)}.</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Last sync: {relativeProofTime(proofState.syncedAt)}</span>
+                    <span>Conflicts: {proofState.conflictCount}</span>
+                    <span>{proofState.summary?.cardCount ?? 0} cards visible in this DeckBridge deck.</span>
+                  </>
+                )}
+              </div>
+              {proofError ? <div className="wizard-error">{proofError}</div> : null}
+              <div className="wizard-actions">
+                <button className="btn btn-primary" onClick={checkSyncProof} disabled={proofLoading || !selectedDeckId}>
+                  {proofLoading ? 'Checking...' : 'Check for sync result'}
+                </button>
+                <button className="btn btn-secondary" onClick={onClose} disabled={!proofState.verified}>
+                  Go to workbench
+                </button>
+              </div>
+              {!proofState.verified ? (
+                <p className="wizard-hint">
+                  No posted result yet. Keep this window open, run the add-on dry-run or sync, then check again.
+                </p>
+              ) : null}
+              <div className="wizard-nav">
+                <button className="btn btn-ghost" onClick={() => setStep('map')}>← Back</button>
+                <button className="btn btn-secondary" onClick={onClose}>Close</button>
               </div>
             </div>
           )}

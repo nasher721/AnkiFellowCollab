@@ -1,7 +1,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Session } from '@supabase/supabase-js';
-import { api, setApiAuthToken, type ShareLink } from './api';
-import type { AppState, Deck, DeckCard, DeckSummary, Suggestion } from './types';
+import { api, setApiAuthToken, type AddonDownloadAvailability, type AddonVersion, type ShareLink } from './api';
+import type { AddonSyncResult, AppState, Deck, DeckCard, DeckSummary, Suggestion } from './types';
 import { useRealtime } from './useRealtime';
 import { ConnectAnkiWizard } from './ConnectAnkiWizard';
 import { CardEditor } from './CardEditor';
@@ -18,6 +18,38 @@ interface Toast {
   id: string;
   message: string;
   type: 'success' | 'error' | 'info';
+}
+
+interface AddonPackageState {
+  loading: boolean;
+  version: AddonVersion | null;
+  availability: AddonDownloadAvailability | null;
+  error: string;
+}
+
+interface SyncHealth {
+  state: 'not-connected' | 'ready-to-test' | 'dry-run-passed' | 'sync-healthy' | 'conflicts' | 'package-missing' | 'api-unavailable' | 'token-failed';
+  tone: 'neutral' | 'info' | 'success' | 'warning' | 'danger';
+  title: string;
+  badge: string;
+  detail: string;
+  packageLabel: string;
+  deckLabel: string;
+  localDeckLabel: string;
+  lastCheckedLabel: string;
+  lastSyncedLabel: string;
+  conflictLabel: string;
+  primaryAction: 'setup' | 'check' | 'conflicts';
+  primaryLabel: string;
+}
+
+interface OwnerAttentionItem {
+  id: string;
+  label: string;
+  detail: string;
+  tone: 'neutral' | 'info' | 'success' | 'warning' | 'danger';
+  action: 'setup' | 'suggestions' | 'conflicts' | 'cards' | 'settings' | 'study';
+  actionLabel: string;
 }
 
 const TOAST_ICONS: Record<Toast['type'], string> = {
@@ -72,6 +104,230 @@ function shareLinkUrl(token: string) {
   return `${window.location.origin}/share/${encodeURIComponent(token)}`;
 }
 
+function packageLabel(addonPackage: AddonPackageState) {
+  if (addonPackage.loading) return 'Checking package';
+  if (addonPackage.error) return 'Package check failed';
+  if (!addonPackage.availability?.available) return 'Package missing';
+  return addonPackage.version?.version ? `Add-on v${addonPackage.version.version}` : 'Add-on ready';
+}
+
+function localDeckLabel(deck: Deck | undefined) {
+  const sourceDeck = deck?.source?.deckPath || deck?.source?.deckName;
+  if (sourceDeck) return sourceDeck;
+  return deck?.cards.find((card) => card.sourceDeckName)?.sourceDeckName || 'Local deck not mapped';
+}
+
+function changedInLastSync(deck: Deck | undefined, result: AddonSyncResult | null | undefined) {
+  if (!deck) return 0;
+  if (result) return result.stats.dryRun ? 0 : result.stats.created + result.stats.updated;
+  if (!deck.lastSyncedAt) return 0;
+  const syncedAt = new Date(deck.lastSyncedAt).getTime();
+  return deck.cards.filter((card) => {
+    const modifiedAt = new Date(card.modifiedAt).getTime();
+    return Number.isFinite(modifiedAt) && modifiedAt >= syncedAt && ['Anki', 'Import'].includes(card.modifiedBy);
+  }).length;
+}
+
+function deriveSyncHealth({
+  activeDeck,
+  addonPackage,
+  apiHealth,
+  sync
+}: {
+  activeDeck: Deck | undefined;
+  addonPackage: AddonPackageState;
+  apiHealth: 'checking' | 'ok' | 'down';
+  sync: AppState['sync'];
+}): SyncHealth {
+  const lastAddonSync = sync.lastAddonSync;
+  const conflictCount = sync.conflicts.length || lastAddonSync?.stats.conflicts || 0;
+  const lastChecked = sync.lastCheckedAt || lastAddonSync?.syncedAt || null;
+  const lastSynced = activeDeck?.lastSyncedAt || (!lastAddonSync?.stats.dryRun ? lastAddonSync?.syncedAt : null) || sync.lastPushAt || sync.lastPullAt || null;
+  const deckLabel = activeDeck?.name || 'No DeckBridge deck';
+  const labels = {
+    packageLabel: packageLabel(addonPackage),
+    deckLabel,
+    localDeckLabel: localDeckLabel(activeDeck),
+    lastCheckedLabel: relativeTime(lastChecked),
+    lastSyncedLabel: relativeTime(lastSynced),
+    conflictLabel: `${conflictCount} conflict${conflictCount === 1 ? '' : 's'}`
+  };
+
+  if (apiHealth === 'down') {
+    return {
+      ...labels,
+      state: 'api-unavailable',
+      tone: 'danger',
+      title: 'API unavailable',
+      badge: 'Offline',
+      detail: 'DeckBridge cannot verify sync state yet.',
+      primaryAction: 'check',
+      primaryLabel: 'Retry'
+    };
+  }
+  if (!addonPackage.loading && addonPackage.availability && !addonPackage.availability.available) {
+    return {
+      ...labels,
+      state: 'package-missing',
+      tone: 'warning',
+      title: 'Add-on package missing',
+      badge: 'Build needed',
+      detail: addonPackage.availability.message || 'The add-on download is not available.',
+      primaryAction: 'setup',
+      primaryLabel: 'Open setup'
+    };
+  }
+  if (sync.lastError) {
+    return {
+      ...labels,
+      state: 'token-failed',
+      tone: 'danger',
+      title: 'Connection needs attention',
+      badge: 'Token failed',
+      detail: sync.lastError,
+      primaryAction: 'setup',
+      primaryLabel: 'Repair setup'
+    };
+  }
+  if (conflictCount > 0) {
+    return {
+      ...labels,
+      state: 'conflicts',
+      tone: 'warning',
+      title: 'Conflicts need review',
+      badge: labels.conflictLabel,
+      detail: 'Review differences before pushing more changes.',
+      primaryAction: 'conflicts',
+      primaryLabel: 'Review'
+    };
+  }
+  if (lastAddonSync?.stats.dryRun) {
+    return {
+      ...labels,
+      state: 'dry-run-passed',
+      tone: 'success',
+      title: 'Dry-run passed',
+      badge: `${lastAddonSync.stats.total} scanned`,
+      detail: `${lastAddonSync.stats.created} new, ${lastAddonSync.stats.updated} updated, ${lastAddonSync.stats.skipped} unchanged.`,
+      primaryAction: 'setup',
+      primaryLabel: 'Finish setup'
+    };
+  }
+  if (lastSynced) {
+    return {
+      ...labels,
+      state: 'sync-healthy',
+      tone: 'success',
+      title: 'Sync healthy',
+      badge: labels.lastSyncedLabel,
+      detail: lastAddonSync ? `${lastAddonSync.stats.total} cards scanned by ${lastAddonSync.client?.name || lastAddonSync.source}.` : 'Deck has a verified sync timestamp.',
+      primaryAction: 'check',
+      primaryLabel: 'Check'
+    };
+  }
+  if (activeDeck) {
+    return {
+      ...labels,
+      state: 'ready-to-test',
+      tone: 'info',
+      title: 'Ready to test',
+      badge: 'No proof yet',
+      detail: 'Create a connection link, run a dry-run in Anki, then verify here.',
+      primaryAction: 'setup',
+      primaryLabel: 'Open setup'
+    };
+  }
+  return {
+    ...labels,
+    state: 'not-connected',
+    tone: 'neutral',
+    title: 'Not connected',
+    badge: 'Setup needed',
+    detail: 'Import or sync an Anki deck to start the owner workflow.',
+    primaryAction: 'setup',
+    primaryLabel: 'Start setup'
+  };
+}
+
+function deriveOwnerAttentionItems({
+  canReview,
+  changedCards,
+  deckVisibility,
+  pendingSuggestions,
+  studyCards,
+  syncHealth
+}: {
+  canReview: boolean;
+  changedCards: number;
+  deckVisibility: string;
+  pendingSuggestions: number;
+  studyCards: number;
+  syncHealth: SyncHealth;
+}): OwnerAttentionItem[] {
+  const items: OwnerAttentionItem[] = [];
+  if (syncHealth.state !== 'sync-healthy' && syncHealth.state !== 'conflicts') {
+    items.push({
+      id: 'sync',
+      label: syncHealth.title,
+      detail: syncHealth.detail,
+      tone: syncHealth.tone,
+      action: syncHealth.primaryAction === 'conflicts' ? 'conflicts' : 'setup',
+      actionLabel: syncHealth.primaryLabel
+    });
+  }
+  if (pendingSuggestions > 0) {
+    items.push({
+      id: 'suggestions',
+      label: `${pendingSuggestions} suggestion${pendingSuggestions === 1 ? '' : 's'} pending`,
+      detail: canReview ? 'Owner decisions are waiting.' : 'Owner review is still in progress.',
+      tone: 'warning',
+      action: 'suggestions',
+      actionLabel: 'Review'
+    });
+  }
+  if (syncHealth.state === 'conflicts') {
+    items.push({
+      id: 'conflicts',
+      label: syncHealth.conflictLabel,
+      detail: 'Resolve sync conflicts before pushing accepted changes.',
+      tone: 'danger',
+      action: 'conflicts',
+      actionLabel: 'Resolve'
+    });
+  }
+  if (changedCards > 0) {
+    items.push({
+      id: 'changed-cards',
+      label: `${changedCards} card${changedCards === 1 ? '' : 's'} changed in last sync`,
+      detail: 'Spot-check recently synced content in the card browser.',
+      tone: 'info',
+      action: 'cards',
+      actionLabel: 'Browse'
+    });
+  }
+  if (deckVisibility === 'private') {
+    items.push({
+      id: 'visibility',
+      label: 'Deck is private',
+      detail: canReview ? 'Create a share link when the group is ready.' : 'Owner access controls sharing.',
+      tone: 'neutral',
+      action: 'settings',
+      actionLabel: 'Settings'
+    });
+  }
+  if (studyCards === 0) {
+    items.push({
+      id: 'study',
+      label: 'No studyable cards',
+      detail: 'Approved, unsuspended cards are required for study mode.',
+      tone: 'warning',
+      action: 'study',
+      actionLabel: 'Study'
+    });
+  }
+  return items.slice(0, 5);
+}
+
 function authMessage(message: string, mode: 'sign-in' | 'sign-up') {
   const lower = message.toLowerCase();
   if (lower.includes('invalid login credentials')) {
@@ -120,6 +376,72 @@ function EmptyState({ message }: { message: string }) {
   return <div className="empty-state">{message}</div>;
 }
 
+function SyncHealthStrip({ health, onAction }: { health: SyncHealth; onAction: (action: SyncHealth['primaryAction']) => void }) {
+  return (
+    <div className={`sync-strip sync-strip--${health.tone}`} aria-label="Sync health">
+      <span className={`sync-light ${health.tone === 'success' ? 'on' : ''}`} />
+      <div className="sync-strip-main">
+        <strong>{health.title}</strong>
+        <small>{health.packageLabel} · {health.deckLabel} · {health.localDeckLabel}</small>
+      </div>
+      <span className={`sync-badge sync-badge--${health.tone}`}>{health.badge}</span>
+      <small className="sync-strip-detail">{health.lastSyncedLabel === 'Not yet' || health.state === 'dry-run-passed' ? health.detail : `Last sync ${health.lastSyncedLabel} · ${health.conflictLabel}`}</small>
+      <button className="icon-button" title={health.primaryLabel} onClick={() => onAction(health.primaryAction)}>
+        <Icon name={health.primaryAction === 'conflicts' ? 'x' : 'sync'} />
+      </button>
+    </div>
+  );
+}
+
+function OwnerAttentionPanel({
+  items,
+  onAction,
+  syncHealth
+}: {
+  items: OwnerAttentionItem[];
+  onAction: (action: OwnerAttentionItem['action']) => void;
+  syncHealth: SyncHealth;
+}) {
+  return (
+    <section className="owner-attention" aria-label="Owner attention">
+      <div className="owner-attention-heading">
+        <strong>Owner Attention</strong>
+        <span className={`sync-badge sync-badge--${syncHealth.tone}`}>{syncHealth.badge}</span>
+      </div>
+      <div className="owner-sync-proof">
+        <span>{syncHealth.packageLabel}</span>
+        <span>{syncHealth.lastCheckedLabel === 'Not yet' ? 'No bridge check yet' : `Checked ${syncHealth.lastCheckedLabel}`}</span>
+      </div>
+      {items.length ? (
+        <div className="attention-list">
+          {items.map((item) => (
+            <button
+              key={item.id}
+              className={`attention-item attention-item--${item.tone}`}
+              aria-label={`Attention item: ${item.label}`}
+              onClick={() => onAction(item.action)}
+            >
+              <span>
+                <strong>{item.label}</strong>
+                <small>{item.detail}</small>
+              </span>
+              <b>{item.actionLabel}</b>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="attention-clear">
+          <Icon name="check" />
+          <span>
+            <strong>Owner queue clear</strong>
+            <small>Sync, review, and study readiness have no urgent blockers.</small>
+          </span>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
@@ -153,6 +475,12 @@ export default function App() {
   const [deckVisibility, setDeckVisibility] = useState<Record<string, string>>({});
   const [copiedShare, setCopiedShare] = useState('');
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem('deckbridge-dark') === 'true');
+  const [addonPackage, setAddonPackage] = useState<AddonPackageState>({
+    loading: true,
+    version: null,
+    availability: null,
+    error: ''
+  });
   const toastTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const activeDeck = state?.decks.find((deck) => deck.id === state.activeDeckId) || state?.decks[0];
 
@@ -206,6 +534,30 @@ export default function App() {
   }, [darkMode]);
 
   useEffect(() => {
+    let mounted = true;
+    setAddonPackage((current) => ({ ...current, loading: true }));
+    api.addonVersion()
+      .then(async (version) => {
+        const availability = await api.addonDownloadAvailability(version.downloadUrl || '/api/addon/download');
+        if (!mounted) return;
+        setAddonPackage({ loading: false, version, availability, error: '' });
+      })
+      .catch(async (error) => {
+        const availability = await api.addonDownloadAvailability('/api/addon/download');
+        if (!mounted) return;
+        setAddonPackage({
+          loading: false,
+          version: null,
+          availability,
+          error: error instanceof Error ? error.message : 'Unable to load add-on package details'
+        });
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
     setPage(1);
   }, [query, tagFilter, cardStateFilter, activeDeck?.id]);
 
@@ -242,10 +594,12 @@ export default function App() {
 
   const activeSummary = state?.summaries.find((summary) => summary.id === activeDeck?.id);
   const currentMembership = state?.memberships?.find((item) => item.deckId === activeDeck?.id);
-  const membershipRole = currentMembership?.role || (state?.role === 'owner' ? 'owner' : 'editor');
+  const isDevDemo = import.meta.env.DEV;
+  const membershipRole = isDevDemo
+    ? (state?.role === 'owner' ? 'owner' : 'editor')
+    : currentMembership?.role || (state?.role === 'owner' ? 'owner' : 'editor');
   const canReview = membershipRole === 'owner';
   const canSuggest = membershipRole === 'owner' || membershipRole === 'editor';
-  const isDevDemo = import.meta.env.DEV;
   const suggestions = useMemo(
     () => (state?.suggestions || []).filter((item) => item.deckId === activeDeck?.id),
     [state, activeDeck]
@@ -301,6 +655,34 @@ export default function App() {
     };
   }, [suggestions]);
   const deckEmbedCode = activeDeck ? `<iframe src="${window.location.origin}/embed/decks/${activeDeck.id}" title="${activeDeck.name}" loading="lazy"></iframe>` : '';
+  const syncSnapshot = state?.sync || {
+    ankiConnectUrl: '',
+    connected: false,
+    lastCheckedAt: null,
+    lastPullAt: null,
+    lastPushAt: null,
+    lastAddonSync: null,
+    conflicts: []
+  };
+  const syncHealth = useMemo(() => deriveSyncHealth({
+    activeDeck,
+    addonPackage,
+    apiHealth,
+    sync: syncSnapshot
+  }), [activeDeck, addonPackage, apiHealth, syncSnapshot]);
+  const activeDeckVisibility = activeDeck ? (deckVisibility[activeDeck.id] ?? 'private') : 'private';
+  const changedCards = useMemo(
+    () => changedInLastSync(activeDeck, syncSnapshot.lastAddonSync),
+    [activeDeck, syncSnapshot.lastAddonSync]
+  );
+  const ownerAttentionItems = useMemo(() => deriveOwnerAttentionItems({
+    canReview,
+    changedCards,
+    deckVisibility: activeDeckVisibility,
+    pendingSuggestions: pendingSuggestions.length,
+    studyCards: studyCards.length,
+    syncHealth
+  }), [activeDeckVisibility, canReview, changedCards, pendingSuggestions.length, studyCards.length, syncHealth]);
 
   async function refreshWith<T extends AppState | unknown>(task: Promise<T>, success: string, map?: (value: T) => AppState) {
     setBusy(true);
@@ -314,6 +696,12 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function refreshState() {
+    const next = await api.state();
+    setState(next);
+    return next;
   }
 
   function uploadDeck(event: ChangeEvent<HTMLInputElement>) {
@@ -349,6 +737,43 @@ export default function App() {
   function switchRole(role: 'owner' | 'collaborator') {
     if (!isDevDemo) return;
     refreshWith(api.session({ role }), role === 'owner' ? 'Owner review controls enabled' : 'Collaborator suggestion mode enabled');
+  }
+
+  function handleSyncAction(action: SyncHealth['primaryAction']) {
+    if (action === 'check') {
+      refreshWith(api.ankiStatus().then(() => api.state()), 'Sync status refreshed');
+      return;
+    }
+    if (action === 'conflicts') {
+      setActiveTab('overview');
+      return;
+    }
+    setShowConnectWizard(true);
+  }
+
+  function handleOwnerAttentionAction(action: OwnerAttentionItem['action']) {
+    if (action === 'setup') {
+      setShowConnectWizard(true);
+      return;
+    }
+    if (action === 'suggestions') {
+      setReviewStatusFilter('pending');
+      setReviewAuthorFilter('All');
+      return;
+    }
+    if (action === 'conflicts') {
+      setActiveTab('overview');
+      return;
+    }
+    if (action === 'cards') {
+      setActiveTab('cards');
+      return;
+    }
+    if (action === 'settings') {
+      setActiveTab('settings');
+      return;
+    }
+    setActiveTab('study');
   }
 
   function createSuggestion() {
@@ -596,17 +1021,7 @@ export default function App() {
             </button>
           </div>
 
-          <div className="sync-strip">
-            <span className={`sync-light ${state.sync.connected ? 'on' : ''}`} />
-            <strong>AnkiConnect</strong>
-            <span className={state.sync.connected ? 'connected-pill' : 'offline-pill'}>
-              {state.sync.connected ? 'Connected' : 'Offline'}
-            </span>
-            <small>{state.sync.ankiConnectUrl?.replace('http://', '') || 'Local bridge'}</small>
-            <button className="icon-button" title="Check AnkiConnect" onClick={() => refreshWith(api.ankiStatus().then(() => api.state()), 'AnkiConnect checked')}>
-              <Icon name="sync" />
-            </button>
-          </div>
+          <SyncHealthStrip health={syncHealth} onAction={handleSyncAction} />
 
           <div className="right-actions">
             {isDevDemo ? (
@@ -697,7 +1112,7 @@ export default function App() {
                 deckId={activeDeck.id}
                 deckName={activeDeck.name}
                 isOwner={canReview}
-                currentVisibility={deckVisibility[activeDeck.id] ?? 'private'}
+                currentVisibility={activeDeckVisibility}
                 onSetVisibility={(v) => setDeckVisibility((prev) => ({ ...prev, [activeDeck.id]: v }))}
               />
             ) : null}
@@ -714,7 +1129,7 @@ export default function App() {
             {activeTab === 'settings' && activeDeck ? (
               <DeckSettingsView
                 deck={activeDeck}
-                visibility={deckVisibility[activeDeck.id] ?? 'private'}
+                visibility={activeDeckVisibility}
                 canReview={canReview}
                 embedCode={deckEmbedCode}
                 copiedShare={copiedShare}
@@ -870,6 +1285,12 @@ export default function App() {
           </section>
 
           <aside className="review-panel">
+            <OwnerAttentionPanel
+              items={ownerAttentionItems}
+              syncHealth={syncHealth}
+              onAction={handleOwnerAttentionAction}
+            />
+
             <div className="review-heading">
               <strong>Review Queue <span>{pendingSuggestions.length}</span></strong>
               <button
@@ -1015,6 +1436,8 @@ export default function App() {
         <ConnectAnkiWizard
           decks={state.summaries}
           platformUrl={window.location.origin}
+          currentState={state}
+          onRefreshState={refreshState}
           onClose={() => setShowConnectWizard(false)}
         />
       )}

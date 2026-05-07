@@ -117,12 +117,31 @@ export interface Activity {
   at: string;
 }
 
+export interface AddonSyncResult {
+  syncedAt: string;
+  source: string;
+  client: {
+    name: string;
+    version: string;
+    fingerprint?: string;
+  } | null;
+  stats: {
+    total: number;
+    created: number;
+    updated: number;
+    skipped: number;
+    conflicts: number;
+    dryRun: boolean;
+  };
+}
+
 export interface SyncState {
   ankiConnectUrl: string;
   connected: boolean;
   lastCheckedAt: string | null;
   lastPullAt: string | null;
   lastPushAt: string | null;
+  lastAddonSync: AddonSyncResult | null;
   lastError?: string | null;
   conflicts: Array<{
     id: string;

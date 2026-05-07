@@ -379,6 +379,10 @@ export function createApp(options = {}) {
         res.json(await repository.setActiveDeck(req.user, req.body.activeDeckId));
         return;
       }
+      if (req.body.role && repository.setDemoRole) {
+        res.json(await repository.setDemoRole(req.user, req.body.role));
+        return;
+      }
       res.json(await repository.getDeckState(req.user));
     } catch (error) {
       next(error);

@@ -324,6 +324,108 @@ test.describe('Connect Anki Wizard', () => {
     );
   });
 
+  test('continues from mapping into first sync proof', async ({ page }) => {
+    await page.route('**/api/tokens', async (route) => {
+      if (route.request().method() !== 'POST') return route.fallback();
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 'token-proof',
+          raw: 'db_proof_token',
+          label: 'Anki Add-on',
+          createdAt: new Date().toISOString(),
+          lastUsedAt: null
+        })
+      });
+    });
+    await page.route('**/api/me', async (route) => {
+      if (route.request().headers().authorization !== 'Bearer db_proof_token') return route.fallback();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          user: { id: 'you', email: 'you@example.com', name: 'You' },
+          memberships: [],
+          decks: [{
+            id: 'deck-visible',
+            name: 'Visible Deck',
+            description: 'Token-visible deck',
+            cardCount: 12,
+            noteCount: 10,
+            tagCount: 3,
+            noteTypes: ['Basic'],
+            pendingSuggestions: 0,
+            lastSyncedAt: null,
+            importedAt: new Date().toISOString()
+          }]
+        })
+      });
+    });
+    await page.route('**/api/state', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          user: { id: 'you', email: 'you@example.com', name: 'You' },
+          memberships: [{ deckId: 'deck-visible', userId: 'you', role: 'owner', createdAt: new Date().toISOString() }],
+          decks: [{
+            id: 'deck-visible',
+            name: 'Visible Deck',
+            description: 'Token-visible deck',
+            owner: 'You',
+            importedAt: new Date().toISOString(),
+            lastSyncedAt: new Date().toISOString(),
+            cards: [],
+            media: {},
+            source: { filename: 'anki', format: 'anki-addon', deckName: 'Local Boards', deckPath: 'Local Boards' }
+          }],
+          summaries: [{
+            id: 'deck-visible',
+            name: 'Visible Deck',
+            description: 'Token-visible deck',
+            cardCount: 12,
+            noteCount: 10,
+            tagCount: 3,
+            noteTypes: ['Basic'],
+            pendingSuggestions: 0,
+            lastSyncedAt: new Date().toISOString(),
+            importedAt: new Date().toISOString()
+          }],
+          activeDeckId: 'deck-visible',
+          role: 'owner',
+          collaborators: [{ id: 'you', name: 'You', email: 'you@example.com', role: 'owner', accepted: 0 }],
+          suggestions: [],
+          activity: [],
+          sync: {
+            ankiConnectUrl: null,
+            connected: false,
+            lastCheckedAt: new Date().toISOString(),
+            lastPullAt: null,
+            lastPushAt: new Date().toISOString(),
+            lastAddonSync: {
+              syncedAt: new Date().toISOString(),
+              source: 'DeckBridge Sync',
+              client: { name: 'DeckBridge Sync', version: '0.1.0', fingerprint: 'test-host' },
+              stats: { total: 12, created: 2, updated: 1, skipped: 9, conflicts: 0, dryRun: true }
+            },
+            conflicts: []
+          }
+        })
+      });
+    });
+
+    await page.getByRole('button', { name: /Connect Anki/ }).click();
+    await page.getByRole('button', { name: /Already installed/ }).click();
+    await page.getByRole('button', { name: 'Create connection link' }).click();
+    await page.getByRole('button', { name: /Prove sync/ }).click();
+    await expect(page.getByText('Step 4: Prove Sync')).toBeVisible();
+    await page.getByRole('button', { name: 'Check for sync result' }).click();
+    await expect(page.getByText('Sync proof captured')).toBeVisible();
+    await expect(page.getByText('12 cards scanned by DeckBridge Sync.')).toBeVisible();
+    await expect(page.getByText('2 new · 1 updated · 9 unchanged.')).toBeVisible();
+  });
+
   test('shows true empty mapping state when token-visible decks are empty', async ({ page }) => {
     await page.route('**/api/tokens', async (route) => {
       if (route.request().method() !== 'POST') return route.fallback();
