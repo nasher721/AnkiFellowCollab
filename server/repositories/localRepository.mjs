@@ -318,7 +318,7 @@ export function createLocalRepository() {
       const next = await this.getDeckState(user, state.activeDeckId);
       return {
         ...next,
-        role: role === 'owner' ? 'owner' : 'collaborator'
+        role
       };
     },
 

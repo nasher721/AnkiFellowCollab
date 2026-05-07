@@ -207,10 +207,10 @@ test('authenticated API returns current user and visible decks', async () => {
   const decks = await asUser(request(app).get('/api/decks'), 'you', 'You').expect(200);
   assert.equal(decks.body.decks.length, 1);
 
-  const collaboratorSession = await asUser(request(app)
+  const contributorSession = await asUser(request(app)
     .patch('/api/session')
-    .send({ role: 'collaborator' }), 'you', 'You').expect(200);
-  assert.equal(collaboratorSession.body.role, 'collaborator');
+    .send({ role: 'contributor' }), 'you', 'You').expect(200);
+  assert.equal(contributorSession.body.role, 'contributor');
 });
 
 test('token API creates one-time raw tokens and lists metadata only', async () => {
@@ -577,6 +577,49 @@ test('share link API creates owner links and redacts password hashes', async () 
   assert.equal(listed.body.shareLinks.length, 1);
   assert.equal(listed.body.shareLinks[0].passwordProtected, true);
   assert.equal(Object.hasOwn(listed.body.shareLinks[0], 'passwordHash'), false);
+});
+
+test('security validation rejects malformed deck ids and session roles', async () => {
+  const { app } = await createTestApp();
+
+  await asUser(request(app)
+    .patch('/api/session')
+    .send({ role: 'admin' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'invalid_role');
+    });
+
+  await asUser(request(app)
+    .post('/api/decks/../../state/export')
+    .send({}), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'invalid_deck_id');
+    });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/share-links')
+    .send({ label: 'Unsafe', passwordHash: 'client-supplied' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'password_hash_not_allowed');
+    });
+});
+
+test('invite API rejects malformed email before storing invite', async () => {
+  const { app } = await createTestApp();
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/invites')
+    .send({ email: 'not-an-email', role: 'contributor' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'invalid_email');
+    });
+
+  const invites = await asUser(request(app).get('/api/decks/deck-demo-zanki/invites'), 'you', 'You').expect(200);
+  assert.equal(invites.body.invites.length, 0);
 });
 
 test('discover API returns real preview fields from public deck cards', async () => {

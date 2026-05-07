@@ -599,10 +599,10 @@ export default function App() {
   const currentMembership = state?.memberships?.find((item) => item.deckId === activeDeck?.id);
   const isDevDemo = import.meta.env.DEV;
   const membershipRole = isDevDemo
-    ? (state?.role === 'owner' ? 'owner' : 'editor')
-    : currentMembership?.role || (state?.role === 'owner' ? 'owner' : 'editor');
+    ? (state?.role === 'owner' ? 'owner' : 'contributor')
+    : currentMembership?.role || (state?.role === 'owner' ? 'owner' : 'contributor');
   const canReview = membershipRole === 'owner';
-  const canSuggest = membershipRole === 'owner' || membershipRole === 'editor';
+  const canSuggest = ['owner', 'editor', 'reviewer', 'contributor'].includes(membershipRole);
   const suggestions = useMemo(
     () => (state?.suggestions || []).filter((item) => item.deckId === activeDeck?.id),
     [state, activeDeck]
@@ -737,9 +737,9 @@ export default function App() {
     refreshWith(api.session({ activeDeckId: deckId }), 'Deck switched');
   }
 
-  function switchRole(role: 'owner' | 'collaborator') {
+  function switchRole(role: 'owner' | 'contributor') {
     if (!isDevDemo) return;
-    refreshWith(api.session({ role }), role === 'owner' ? 'Owner review controls enabled' : 'Collaborator suggestion mode enabled');
+    refreshWith(api.session({ role }), role === 'owner' ? 'Owner review controls enabled' : 'Contributor suggestion mode enabled');
   }
 
   function toggleCardSelection(cardId: string) {
@@ -1099,7 +1099,7 @@ export default function App() {
             {isDevDemo ? (
               <div className="role-toggle" aria-label="Role selector">
                 <button className={membershipRole === 'owner' ? 'selected' : ''} onClick={() => switchRole('owner')}>Owner</button>
-                <button className={membershipRole !== 'owner' ? 'selected' : ''} onClick={() => switchRole('collaborator')}>Collaborator</button>
+                <button className={membershipRole !== 'owner' ? 'selected' : ''} onClick={() => switchRole('contributor')}>Contributor</button>
               </div>
             ) : null}
             <NotificationsBell />

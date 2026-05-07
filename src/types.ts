@@ -1,5 +1,5 @@
-export type DemoRole = 'owner' | 'collaborator';
 export type MembershipRole = 'owner' | 'editor' | 'reviewer' | 'contributor' | 'viewer';
+export type DemoRole = MembershipRole;
 
 export interface User {
   id: string;
