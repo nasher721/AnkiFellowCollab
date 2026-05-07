@@ -265,6 +265,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ conflicts })
     }),
+  resolveConflict: (deckId: string, conflictId: string, resolution: 'local' | 'incoming' | 'skip') =>
+    jsonRequest<AppState>(`/api/decks/${deckId}/sync/conflicts/${conflictId}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ resolution })
+    }),
   exportDeck: async (deckId: string) => {
     const response = await fetch(`/api/decks/${deckId}/export`, {
       method: 'POST',

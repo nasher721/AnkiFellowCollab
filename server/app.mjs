@@ -1174,6 +1174,19 @@ export function createApp(options = {}) {
     }
   });
 
+  app.post('/api/decks/:deckId/sync/conflicts/:conflictId/resolve', auth.requireUser, async (req, res, next) => {
+    try {
+      const { resolution } = req.body;
+      if (!['local', 'incoming', 'skip'].includes(resolution)) {
+        fail(400, 'invalid_resolution', 'Resolution must be local, incoming, or skip');
+      }
+      if (!repository.resolveConflict) fail(501, 'resolve_unavailable', 'Conflict resolution is not available for this repository');
+      res.json(await repository.resolveConflict(req.user, req.params.deckId, req.params.conflictId, resolution));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post('/api/decks/:deckId/sync/cards', auth.requireUser, async (req, res, next) => {
     try {
       let syncInput;

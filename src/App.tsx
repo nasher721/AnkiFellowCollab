@@ -1146,17 +1146,12 @@ export default function App() {
             {state.sync.conflicts.length ? (
               <ConflictResolution
                 conflicts={state.sync.conflicts}
-                onResolve={(conflictId, resolution) => {
-                  setState(prev => prev ? {
-                    ...prev,
-                    sync: {
-                      ...prev.sync,
-                      conflicts: prev.sync.conflicts.filter(c => c.id !== conflictId)
-                    }
-                  } : prev);
-                  if (resolution !== 'skip') {
-                    pushToast(resolution === 'local' ? 'Kept local version' : 'Applied incoming changes', 'info');
-                  }
+                onResolve={async (conflictId, resolution) => {
+                  if (!activeDeck) return;
+                  const next = await api.resolveConflict(activeDeck.id, conflictId, resolution);
+                  setState(next as AppState);
+                  if (resolution === 'incoming') pushToast('Applied incoming changes', 'info');
+                  else if (resolution === 'local') pushToast('Kept local version', 'info');
                 }}
               />
             ) : null}

@@ -538,6 +538,37 @@ export function createSupabaseRepository(options = {}) {
         .filter((activity) => !kinds.length || kinds.includes(activity.kind));
     },
 
+    async resolveConflict(user, deckId, conflictId, resolution) {
+      await assertMembership(user.id, deckId, 'editor');
+      if (resolution === 'incoming') {
+        const { data: conflict, error: cErr } = await supabase.from('sync_conflicts')
+          .select('card_id, incoming_fields')
+          .eq('id', conflictId)
+          .eq('deck_id', deckId)
+          .single();
+        if (cErr || !conflict) fail(404, 'conflict_not_found', 'Conflict not found');
+        const { error: cardErr } = await supabase.from('cards')
+          .update({ fields: conflict.incoming_fields, modified_at: nowIso(), modified_by: user.name })
+          .eq('id', conflict.card_id)
+          .eq('deck_id', deckId);
+        if (cardErr) throw cardErr;
+      }
+      const { error } = await supabase.from('sync_conflicts')
+        .delete()
+        .eq('id', conflictId)
+        .eq('deck_id', deckId);
+      if (error) throw error;
+      await supabase.from('activity').insert({
+        id: `act-${randomUUID()}`,
+        deck_id: deckId,
+        user_id: user.id,
+        kind: 'sync',
+        text: `${user.name} resolved a sync conflict (${resolution === 'incoming' ? 'kept incoming' : resolution === 'local' ? 'kept local' : 'skipped'})`,
+        created_at: nowIso()
+      });
+      return getDeckRows(user, deckId);
+    },
+
     async recordSyncConflicts(user, deckId, conflicts) {
       await assertMembership(user.id, deckId, 'editor');
       await supabase.from('sync_conflicts').delete().eq('deck_id', deckId);

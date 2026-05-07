@@ -235,6 +235,31 @@ export function createLocalRepository() {
       return { download, state: await this.getDeckState(user, deck.id) };
     },
 
+    async resolveConflict(user, deckId, conflictId, resolution) {
+      const state = await loadState();
+      ensureCollections(state);
+      const { deck } = requireRole(state, user.id, deckId, 'editor');
+      const conflict = state.sync.conflicts.find((c) => c.id === conflictId);
+      if (!conflict) fail(404, 'conflict_not_found', 'Conflict not found');
+      if (resolution === 'incoming') {
+        const card = deck.cards.find((c) => c.id === conflict.cardId);
+        if (card) {
+          card.fields = { ...card.fields, ...conflict.incomingFields };
+          card.modifiedAt = nowIso();
+          card.modifiedBy = user.name;
+        }
+      }
+      state.sync.conflicts = state.sync.conflicts.filter((c) => c.id !== conflictId);
+      state.activity.unshift({
+        id: `act-${randomUUID()}`,
+        kind: 'sync',
+        text: `${user.name} resolved a sync conflict (${resolution === 'incoming' ? 'kept incoming' : resolution === 'local' ? 'kept local' : 'skipped'})`,
+        at: nowIso()
+      });
+      await saveState(state);
+      return this.getDeckState(user, deck.id);
+    },
+
     async recordSyncConflicts(user, deckId, conflicts) {
       const state = await loadState();
       ensureCollections(state);

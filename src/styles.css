@@ -339,6 +339,30 @@
   border-color: var(--border);
 }
 
+[data-theme="dark"] .conflict-card-preview {
+  background: var(--bg-secondary);
+  border-color: var(--border);
+}
+
+[data-theme="dark"] .conflict-nav-btn {
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+[data-theme="dark"] .conflict-changed-removed {
+  background: #3f1515;
+  color: #fca5a5;
+}
+
+[data-theme="dark"] .conflict-changed-added {
+  background: #14371f;
+  color: #86efac;
+}
+
+[data-theme="dark"] .conflict-actions-batch {
+  border-color: var(--border);
+}
+
 [data-theme="dark"] .settings-field select,
 [data-theme="dark"] .copy-row input,
 [data-theme="dark"] .settings-view textarea {
@@ -2649,19 +2673,110 @@ button:disabled {
 }
 
 .conflict-changed {
-  background: #fff7bf;
-  color: #7a5c00;
   padding: 1px 3px;
   border-radius: 3px;
   font-weight: 700;
+}
+
+.conflict-changed-removed {
+  background: #ffecec;
+  color: #b91c1c;
+  text-decoration: line-through;
+}
+
+.conflict-changed-added {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.conflict-card-preview {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: var(--soft);
+}
+
+.conflict-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.conflict-source {
+  font-weight: 600;
+}
+
+.conflict-time {
+  color: var(--muted);
+}
+
+.conflict-nav-btn {
+  background: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 1px 5px;
+  margin-left: 6px;
+  color: var(--muted);
+}
+
+.conflict-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.conflict-nav-btn:not(:disabled):hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.conflict-field-changed .conflict-side {
+  border-width: 1.5px;
 }
 
 .conflict-actions {
   padding: 12px 16px;
   border-top: 1px solid var(--line);
   display: flex;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
   background: #f8fafc;
+}
+
+.conflict-actions-primary {
+  display: flex;
+  gap: 8px;
+}
+
+.conflict-actions-batch {
+  display: flex;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.conflict-batch-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  color: var(--muted);
+}
+
+.button.ghost {
+  background: none;
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+}
+
+.button.ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 /* ─── Activity Timeline ────────────────────────────────────────────────────── */
