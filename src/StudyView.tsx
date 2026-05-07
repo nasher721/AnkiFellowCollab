@@ -149,7 +149,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
   // Keyboard shortcuts
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.metaKey || e.ctrlKey || e.altKey || isEditableShortcutTarget(e.target)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || isEditableShortcutTarget(e.target)) return;
       if (e.key === ' ' || e.key === 'Enter') {
         if (!flipped) setFlipped(true);
         else rate(3);
@@ -159,7 +159,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
         else if (e.key === '3') rate(3);
         else if (e.key === '4') rate(4);
       }
-      if (e.key.toLowerCase() === 's') skipCard();
+      if (e.key === 's') skipCard();
       if (e.key === 'Escape') onClose();
     }
     window.addEventListener('keydown', onKey);
@@ -203,7 +203,19 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
     }
   }, [done, persistSessionSummary, serverProgressLoaded]);
 
-  if (queue.length === 0 || done) {
+  if (!serverProgressLoaded && queue.length === 0 && !done) {
+    return (
+      <div className="study-overlay" role="dialog" aria-modal="true" aria-label="Study mode">
+        <div className="study-panel study-done">
+          <h2>Loading study session</h2>
+          <p className="study-empty-msg">Checking current card progress...</p>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    );
+  }
+
+  if ((serverProgressLoaded && queue.length === 0) || done) {
     return (
       <div className="study-overlay" role="dialog" aria-modal="true">
         <div className="study-panel study-done">
