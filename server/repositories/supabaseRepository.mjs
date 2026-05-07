@@ -368,7 +368,7 @@ export function createSupabaseRepository(options = {}) {
       const { data: suggestion, error } = await supabase.from('suggestions').select('*').eq('id', suggestionId).single();
       if (error || !suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
       if (suggestion.status !== 'pending') fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');
-      await assertMembership(user.id, suggestion.deck_id, 'owner');
+      await assertMembership(user.id, suggestion.deck_id, 'reviewer');
       if (decision === 'accepted') {
         const { data: card, error: cardError } = await supabase.from('cards').select('*').eq('id', suggestion.card_id).single();
         if (cardError || !card) fail(404, 'card_not_found', 'Card not found');
@@ -401,54 +401,17 @@ export function createSupabaseRepository(options = {}) {
 
     async bulkDecideSuggestions(user, deckId, suggestionIds, decision) {
       if (new Set(suggestionIds).size !== suggestionIds.length) fail(400, 'duplicate_suggestion_ids', 'suggestionIds must be unique');
-      await assertMembership(user.id, deckId, 'reviewer');
-      const { data: suggestions, error } = await supabase
-        .from('suggestions')
-        .select('*')
-        .eq('deck_id', deckId)
-        .in('id', suggestionIds);
-      if (error) throw error;
-      if ((suggestions || []).length !== suggestionIds.length) fail(404, 'suggestion_not_found', 'Suggestion not found');
-      if (suggestions.some((suggestion) => suggestion.status !== 'pending')) {
-        fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');
-      }
-      const byId = new Map(suggestions.map((suggestion) => [suggestion.id, suggestion]));
-      const orderedSuggestions = suggestionIds.map((suggestionId) => byId.get(suggestionId));
-
-      if (decision === 'accepted') {
-        for (const suggestion of orderedSuggestions) {
-          const { data: card, error: cardError } = await supabase.from('cards').select('*').eq('id', suggestion.card_id).eq('deck_id', deckId).single();
-          if (cardError || !card) fail(404, 'card_not_found', 'Card not found');
-          const nextCard = applySuggestion(toDeck({ id: deckId, name: '', imported_at: nowIso() }, [toCard(card)]), toSuggestion(suggestion), user.name);
-          const { error: updateCardError } = await supabase.from('cards').update({
-            fields: nextCard.fields,
-            tags: nextCard.tags,
-            modified_at: nextCard.modifiedAt,
-            modified_by: nextCard.modifiedBy
-          }).eq('id', suggestion.card_id).eq('deck_id', deckId);
-          if (updateCardError) throw updateCardError;
-        }
-      }
-
       const reviewedAt = nowIso();
-      const { data: updatedSuggestions, error: updateError } = await supabase.from('suggestions').update({
-        status: decision,
-        reviewed_at: reviewedAt,
-        reviewed_by: user.name
-      }).eq('deck_id', deckId).eq('status', 'pending').in('id', suggestionIds).select('id');
-      if (updateError) throw updateError;
-      if (Array.isArray(updatedSuggestions) && updatedSuggestions.length !== suggestionIds.length) {
-        fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');
-      }
-      const { error: activityError } = await supabase.from('activity').insert({
-        id: `act-${randomUUID()}`,
-        deck_id: deckId,
-        user_id: user.id,
-        kind: decision,
-        text: `${user.name} ${decision} ${orderedSuggestions.length} suggestion(s)`,
-        created_at: reviewedAt
+      const { error } = await supabase.rpc('bulk_decide_suggestions', {
+        p_deck_id: deckId,
+        p_suggestion_ids: suggestionIds,
+        p_decision: decision,
+        p_reviewer_id: user.id,
+        p_reviewer_name: user.name,
+        p_activity_id: `act-${randomUUID()}`,
+        p_reviewed_at: reviewedAt
       });
-      if (activityError) throw activityError;
+      if (error) throw error;
       return getDeckRows(user, deckId);
     },
 

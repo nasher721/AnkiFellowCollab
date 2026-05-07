@@ -195,7 +195,7 @@ export function createLocalRepository() {
       const suggestion = state.suggestions.find((item) => item.id === suggestionId);
       if (!suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
       if (suggestion.status !== 'pending') fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');
-      const { deck } = requireRole(state, user.id, suggestion.deckId, 'owner');
+      const { deck } = requireRole(state, user.id, suggestion.deckId, 'reviewer');
       if (decision === 'accepted') {
         applySuggestion(deck, suggestion, user.name);
         const collaborator = state.collaborators.find((item) => item.id === suggestion.authorId);

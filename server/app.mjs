@@ -524,11 +524,14 @@ export function createApp(options = {}) {
       if (!Array.isArray(req.body.suggestionIds)) {
         fail(400, 'missing_suggestion_ids', 'suggestionIds array is required');
       }
-      const suggestionIds = req.body.suggestionIds
-        .map((id) => cleanShortText(id, '', 200))
-        .filter(Boolean);
+      if (req.body.suggestionIds.length > 100) fail(400, 'too_many_suggestion_ids', 'Bulk decisions support up to 100 suggestions');
+      const suggestionIds = req.body.suggestionIds.map((id) => {
+        if (typeof id !== 'string') fail(400, 'invalid_suggestion_id', 'Each suggestion ID must be a non-empty string up to 200 characters');
+        const trimmed = id.trim();
+        if (!trimmed || trimmed.length > 200) fail(400, 'invalid_suggestion_id', 'Each suggestion ID must be a non-empty string up to 200 characters');
+        return cleanShortText(trimmed, '', 200);
+      });
       if (!suggestionIds.length) fail(400, 'missing_suggestion_ids', 'suggestionIds array is required');
-      if (suggestionIds.length > 100) fail(400, 'too_many_suggestion_ids', 'Bulk decisions support up to 100 suggestions');
       if (new Set(suggestionIds).size !== suggestionIds.length) fail(400, 'duplicate_suggestion_ids', 'suggestionIds must be unique');
       if (!repository.bulkDecideSuggestions) fail(501, 'bulk_decision_unavailable', 'Bulk suggestion decisions are unavailable');
       res.json(await repository.bulkDecideSuggestions(req.user, deckId, suggestionIds, req.body.decision));

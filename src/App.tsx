@@ -1600,6 +1600,14 @@ export default function App() {
                   className={`queue-item ${suggestion.id === selectedSuggestion?.id ? 'active' : ''}`}
                   key={suggestion.id}
                   onClick={() => setSelectedSuggestionId(suggestion.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      setSelectedSuggestionId(suggestion.id);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
                 >
                   {canReview && suggestion.status === 'pending' ? (
                     <input

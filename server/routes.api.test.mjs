@@ -530,6 +530,36 @@ test('membership roles gate owner decisions and collaborator suggestions', async
     });
 });
 
+test('single suggestion role access allows reviewers and editors but rejects contributors', async () => {
+  for (const role of ['reviewer', 'editor']) {
+    const { app, dataDir } = await createTestApp();
+    await seedLocalState(dataDir, (state) => {
+      state.collaborators.find((person) => person.id === 'you').role = role;
+    });
+
+    await asUser(request(app)
+      .post('/api/suggestions/sugg-anca/decision')
+      .send({ decision: 'rejected' }), 'you', 'You')
+      .expect(200)
+      .expect((res) => {
+        assert.equal(res.body.suggestions.find((item) => item.id === 'sugg-anca').status, 'rejected');
+      });
+  }
+
+  const { app, dataDir } = await createTestApp();
+  await seedLocalState(dataDir, (state) => {
+    state.collaborators.find((person) => person.id === 'you').role = 'contributor';
+  });
+
+  await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/decision')
+    .send({ decision: 'rejected' }), 'you', 'You')
+    .expect(403)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'forbidden');
+    });
+});
+
 test('bulk suggestion decisions accept multiple pending suggestions for a deck', async () => {
   const { app } = await createTestApp();
 
@@ -575,6 +605,14 @@ test('bulk suggestion validation rejects duplicate and oversized id lists', asyn
 
   await asUser(request(app)
     .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: [], decision: 'rejected' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'missing_suggestion_ids');
+    });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
     .send({ suggestionIds: ['sugg-anca', 'sugg-anca'], decision: 'rejected' }), 'you', 'You')
     .expect(400)
     .expect((res) => {
@@ -588,6 +626,16 @@ test('bulk suggestion validation rejects duplicate and oversized id lists', asyn
     .expect((res) => {
       assert.equal(res.body.error.code, 'too_many_suggestion_ids');
     });
+
+  for (const invalidId of ['', '   ', 42, 'x'.repeat(201)]) {
+    await asUser(request(app)
+      .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+      .send({ suggestionIds: ['sugg-anca', invalidId], decision: 'rejected' }), 'you', 'You')
+      .expect(400)
+      .expect((res) => {
+        assert.equal(res.body.error.code, 'invalid_suggestion_id');
+      });
+  }
 });
 
 test('bulk suggestion role access allows reviewers and editors but rejects contributors', async () => {
