@@ -140,6 +140,71 @@ export function AnalyticsDashboard({ deckId, deckName, isOwner, onSetVisibility,
           </div>
         </div>
       )}
+
+      {/* Study activity */}
+      {analytics.study && (
+        <div className="analytics-section">
+          <h3>Study activity</h3>
+          <div className="analytics-grid">
+            <div className="analytics-card">
+              <span className="analytics-value">{analytics.study.sessions.total}</span>
+              <span className="analytics-label">Study sessions</span>
+            </div>
+            <div className="analytics-card highlight">
+              <span className="analytics-value">{analytics.study.sessions.accuracyRate}%</span>
+              <span className="analytics-label">Accuracy rate</span>
+            </div>
+            <div className="analytics-card">
+              <span className="analytics-value">{analytics.study.sessions.cardsStudied.toLocaleString()}</span>
+              <span className="analytics-label">Cards studied</span>
+            </div>
+            <div className="analytics-card">
+              <span className="analytics-value">
+                {Math.round(analytics.study.sessions.durationSeconds / 60)} min
+              </span>
+              <span className="analytics-label">Total study time</span>
+            </div>
+          </div>
+
+          {analytics.study.weeklyTrend.length > 0 && (
+            <div className="study-trend">
+              <h4>Recent activity</h4>
+              <div className="study-trend-bars">
+                {(() => {
+                  const maxCount = Math.max(...analytics.study.weeklyTrend.map((d) => d.count), 1);
+                  return analytics.study.weeklyTrend.map((d) => (
+                    <div key={d.date} className="trend-bar-col" title={`${d.date}: ${d.count} cards`}>
+                      <div
+                        className="trend-bar"
+                        style={{ height: `${Math.max((d.count / maxCount) * 100, 4)}%` }}
+                      />
+                      <span className="trend-bar-label">{d.date.slice(5)}</span>
+                    </div>
+                  ));
+                })()}
+              </div>
+            </div>
+          )}
+
+          {analytics.study.strugglingCards.length > 0 && (
+            <div className="struggling-cards">
+              <h4>Cards needing attention</h4>
+              {analytics.study.strugglingCards.map((card) => (
+                <div key={card.cardId} className="struggling-card-row">
+                  <span className="struggling-id">{card.cardId.slice(0, 8)}…</span>
+                  <span className="struggling-ease">Ease {card.easeFactor.toFixed(2)}</span>
+                  <span className="struggling-reps">{card.repetitions} reps</span>
+                  <span className="struggling-due">Due {card.nextDue.slice(0, 10)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {analytics.study.sessions.total === 0 && (
+            <p className="analytics-empty">No study sessions recorded yet. Start studying to see your progress here.</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

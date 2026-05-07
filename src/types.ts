@@ -1,5 +1,5 @@
-export type Role = 'owner' | 'collaborator';
-export type MembershipRole = 'owner' | 'editor' | 'viewer';
+export type DemoRole = 'owner' | 'collaborator';
+export type MembershipRole = 'owner' | 'editor' | 'reviewer' | 'contributor' | 'viewer';
 
 export interface User {
   id: string;
@@ -91,7 +91,7 @@ export interface Collaborator {
   id: string;
   name: string;
   email: string;
-  role: Role;
+  role: MembershipRole;
   accepted: number;
 }
 
@@ -110,11 +110,27 @@ export interface Suggestion {
   proposedTags: string[];
 }
 
+export type ActivityKind = 'import' | 'export' | 'sync' | 'suggestion' | 'accepted' | 'rejected' | 'revision' | 'study' | 'share';
+
 export interface Activity {
   id: string;
-  kind: string;
+  kind: ActivityKind | string;
   text: string;
   at: string;
+}
+
+export interface StudySession {
+  id: string;
+  userId: string;
+  deckId: string;
+  startedAt: string;
+  endedAt: string | null;
+  durationSeconds: number;
+  cardsStudied: number;
+  cardsCorrect: number;
+  newCards: number;
+  reviewCards: number;
+  createdAt: string;
 }
 
 export interface AddonSyncResult {
@@ -160,7 +176,7 @@ export interface AppState {
   decks: Deck[];
   summaries: DeckSummary[];
   activeDeckId: string | null;
-  role: Role;
+  role: DemoRole;
   collaborators: Collaborator[];
   suggestions: Suggestion[];
   activity: Activity[];

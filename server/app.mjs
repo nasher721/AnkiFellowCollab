@@ -455,6 +455,20 @@ export function createApp(options = {}) {
     }
   });
 
+  // Bulk delete cards (owner only)
+  app.delete('/api/decks/:deckId/cards', auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const ids = Array.isArray(req.body.cardIds) ? req.body.cardIds.slice(0, 500) : [];
+      if (!ids.length) fail(400, 'missing_card_ids', 'cardIds array is required');
+      if (repository.deleteCards) {
+        return res.json(await repository.deleteCards(req.user, req.params.deckId, ids));
+      }
+      if (!auth.supabase) fail(501, 'delete_unavailable', 'Card deletion requires Supabase');
+      await auth.supabase.from('cards').delete().in('id', ids).eq('deck_id', req.params.deckId);
+      res.json({ deleted: ids.length });
+    } catch (err) { next(err); }
+  });
+
   // --- Comments ---
 
   app.get('/api/suggestions/:id/comments', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireContributor(auth.supabase), async (req, res, next) => {
@@ -814,6 +828,134 @@ export function createApp(options = {}) {
     } catch (err) { next(err); }
   });
 
+  // --- Collaborator Invitations ---
+
+  function toInviteResponse(row) {
+    return {
+      id: row.id,
+      deckId: row.deck_id || row.deckId,
+      email: row.email,
+      role: row.role,
+      status: row.status,
+      expiresAt: row.expires_at || row.expiresAt || null,
+      createdAt: row.created_at || row.createdAt,
+      respondedAt: row.responded_at || row.respondedAt || null
+    };
+  }
+
+  // Create invite (editor+)
+  app.post('/api/decks/:deckId/invites', auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
+    try {
+      const email = cleanShortText(req.body.email || '', '', 254).toLowerCase();
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        fail(400, 'invalid_email', 'A valid email address is required');
+      }
+      const allowedRoles = ['viewer', 'contributor', 'reviewer', 'editor'];
+      const role = allowedRoles.includes(req.body.role) ? req.body.role : 'contributor';
+      if (repository.createInvite) {
+        const invite = await repository.createInvite(req.user, req.params.deckId, { email, role });
+        return res.status(201).json({ invite });
+      }
+      if (!auth.supabase) fail(501, 'invites_unavailable', 'Invites require Supabase');
+      const token = crypto.randomBytes(20).toString('base64url');
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      const { data, error } = await auth.supabase.from('deck_invites').insert({
+        id: randomUUID(), deck_id: req.params.deckId, invited_by: req.user.id,
+        email, role, token, status: 'pending', expires_at: expiresAt, created_at: new Date().toISOString()
+      }).select().single();
+      if (error) fail(500, 'invite_error', error.message);
+      res.status(201).json({ invite: toInviteResponse(data) });
+    } catch (err) { next(err); }
+  });
+
+  // List invites for a deck (editor+)
+  app.get('/api/decks/:deckId/invites', auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
+    try {
+      if (repository.listInvites) {
+        return res.json({ invites: await repository.listInvites(req.user, req.params.deckId) });
+      }
+      if (!auth.supabase) return res.json({ invites: [] });
+      const { data, error } = await auth.supabase.from('deck_invites')
+        .select('*').eq('deck_id', req.params.deckId)
+        .order('created_at', { ascending: false });
+      if (error) fail(500, 'invites_error', error.message);
+      res.json({ invites: (data || []).map(toInviteResponse) });
+    } catch (err) { next(err); }
+  });
+
+  // Revoke invite (owner only)
+  app.delete('/api/decks/:deckId/invites/:inviteId', auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      if (repository.revokeInvite) {
+        await repository.revokeInvite(req.user, req.params.deckId, req.params.inviteId);
+        return res.status(204).end();
+      }
+      if (!auth.supabase) fail(501, 'invites_unavailable', 'Invites require Supabase');
+      const { error } = await auth.supabase.from('deck_invites')
+        .delete().eq('id', req.params.inviteId).eq('deck_id', req.params.deckId);
+      if (error) fail(500, 'revoke_error', error.message);
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
+  // Preview invite metadata (public, no auth)
+  app.get('/api/invites/:token', async (req, res, next) => {
+    try {
+      if (repository.previewInvite) {
+        const preview = await repository.previewInvite(req.params.token);
+        return res.json({ invite: preview });
+      }
+      if (!auth.supabase) fail(501, 'invites_unavailable', 'Invites require Supabase');
+      const { data: invite } = await auth.supabase
+        .from('deck_invites')
+        .select('id, email, role, status, expires_at, deck_id, decks(name)')
+        .eq('token', req.params.token).single();
+      if (!invite) fail(404, 'invite_not_found', 'Invite not found');
+      res.json({
+        invite: {
+          deckId: invite.deck_id,
+          deckName: invite.decks?.name || null,
+          role: invite.role,
+          email: invite.email,
+          status: invite.status,
+          expiresAt: invite.expires_at
+        }
+      });
+    } catch (err) { next(err); }
+  });
+
+  // Accept invite (requires auth)
+  app.post('/api/invites/:token/accept', auth.requireUser, async (req, res, next) => {
+    try {
+      if (repository.acceptInvite) {
+        const result = await repository.acceptInvite(req.user, req.params.token);
+        return res.json(result);
+      }
+      if (!auth.supabase) fail(501, 'invites_unavailable', 'Invites require Supabase');
+      const { data: invite, error: inviteErr } = await auth.supabase
+        .from('deck_invites').select('*').eq('token', req.params.token).single();
+      if (inviteErr || !invite) fail(404, 'invite_not_found', 'Invite not found or already used');
+      if (invite.status !== 'pending') fail(409, 'invite_used', `Invite has already been ${invite.status}`);
+      if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
+        await auth.supabase.from('deck_invites').update({ status: 'expired' }).eq('id', invite.id);
+        fail(410, 'invite_expired', 'This invite link has expired');
+      }
+      if (invite.email.toLowerCase() !== req.user.email.toLowerCase()) {
+        fail(403, 'invite_email_mismatch', 'This invite was sent to a different email address');
+      }
+      const now = new Date().toISOString();
+      await auth.supabase.from('profiles')
+        .upsert({ id: req.user.id, email: req.user.email, name: req.user.name }, { onConflict: 'id', ignoreDuplicates: true });
+      await auth.supabase.from('deck_members').upsert(
+        { deck_id: invite.deck_id, user_id: req.user.id, role: invite.role, created_at: now },
+        { onConflict: 'deck_id,user_id' }
+      );
+      await auth.supabase.from('deck_invites')
+        .update({ status: 'accepted', responded_at: now }).eq('id', invite.id);
+      res.json({ deckId: invite.deck_id, role: invite.role });
+    } catch (err) { next(err); }
+  });
+
   // Fork a public deck into the requester's workspace
   app.post('/api/decks/:deckId/fork', auth.requireUser, async (req, res, next) => {
     try {
@@ -923,6 +1065,9 @@ export function createApp(options = {}) {
   // Deck analytics
   app.get('/api/decks/:deckId/analytics', auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
     try {
+      if (repository.getAnalytics) {
+        return res.json({ analytics: await repository.getAnalytics(req.user, req.params.deckId) });
+      }
       if (!auth.supabase) return res.json({ analytics: null });
 
       const [suggestionsRes, starsRes, cardsRes, progressRes, sessionsRes] = await Promise.all([
