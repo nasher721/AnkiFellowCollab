@@ -73,9 +73,20 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
   const [done, setDone] = useState(false);
   const [serverProgressLoaded, setServerProgressLoaded] = useState(false);
   const [sessionSaved, setSessionSaved] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const sessionSavedRef = useRef(false);
   const startedAtRef = useRef(new Date().toISOString());
   const startTime = useRef(Date.now());
+
+  useEffect(() => {
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    panelRef.current?.focus({ preventScroll: true });
+
+    return () => {
+      previousFocusRef.current?.focus({ preventScroll: true });
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -205,11 +216,11 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
 
   if (!serverProgressLoaded && queue.length === 0 && !done) {
     return (
-      <div className="study-overlay" role="dialog" aria-modal="true" aria-label="Study mode">
-        <div className="study-panel study-done">
-          <h2>Loading study session</h2>
+      <div className="study-overlay" role="dialog" aria-modal="true" aria-labelledby="study-title">
+        <div className="study-panel study-done" ref={panelRef} tabIndex={-1}>
+          <h2 id="study-title">Loading study session</h2>
           <p className="study-empty-msg">Checking current card progress...</p>
-          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-ghost" onClick={onClose} aria-label="Cancel study session">Cancel</button>
         </div>
       </div>
     );
@@ -217,9 +228,9 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
 
   if ((serverProgressLoaded && queue.length === 0) || done) {
     return (
-      <div className="study-overlay" role="dialog" aria-modal="true">
-        <div className="study-panel study-done">
-          <h2>Session complete</h2>
+      <div className="study-overlay" role="dialog" aria-modal="true" aria-labelledby="study-title">
+        <div className="study-panel study-done" ref={panelRef} tabIndex={-1}>
+          <h2 id="study-title">Session complete</h2>
           <div className="study-stats-grid">
             <div><span className="stat-value">{totalRated}</span><span className="stat-label">Cards reviewed</span></div>
             <div><span className="stat-value">{accuracy}%</span><span className="stat-label">Accuracy</span></div>
@@ -241,8 +252,9 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
 
   if (!currentCard) {
     return (
-      <div className="study-overlay" role="dialog" aria-modal="true">
-        <div className="study-panel study-done">
+      <div className="study-overlay" role="dialog" aria-modal="true" aria-labelledby="study-title">
+        <div className="study-panel study-done" ref={panelRef} tabIndex={-1}>
+          <h2 id="study-title" className="sr-only">Study mode</h2>
           <p>Session complete!</p>
           <button className="btn btn-primary" onClick={onClose}>Done</button>
         </div>
@@ -251,8 +263,9 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
   }
 
   return (
-    <div className="study-overlay" role="dialog" aria-modal="true" aria-label="Study mode">
-      <div className="study-panel">
+    <div className="study-overlay" role="dialog" aria-modal="true" aria-labelledby="study-title">
+      <div className="study-panel" ref={panelRef} tabIndex={-1}>
+        <h2 id="study-title" className="sr-only">Study mode</h2>
         <div className="study-header">
           <div
             className="study-progress-bar"
@@ -260,6 +273,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
             aria-valuemin={0}
             aria-valuemax={queue.length}
             aria-valuenow={progressCurrent}
+            aria-valuetext={`Card ${progressCurrent} of ${queue.length}`}
             aria-label="Study progress"
           >
             <div
@@ -268,7 +282,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
             />
           </div>
           <div className="study-meta" aria-live="polite">
-            <span>Card {progressCurrent} of {queue.length}</span>
+            <span aria-label="Study session progress">Card {progressCurrent} of {queue.length}</span>
             <span>{remaining} remaining</span>
             <span>{modeLabel}</span>
             <span>{accuracy}% accuracy</span>

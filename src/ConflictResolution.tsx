@@ -140,7 +140,7 @@ function highlightDiff(local: string, incoming: string, side: 'local' | 'incomin
   if (side === 'local') {
     return <>{localWords.map((word, i) => {
       if (!incomingWords.includes(word) && word.trim()) {
-        return <mark className="conflict-changed" key={i}>{word}</mark>;
+        return <mark className="conflict-changed" aria-label={`Changed local text: ${word.trim()}`} key={i}>{word}</mark>;
       }
       return <span key={i}>{word}</span>;
     })}</>;
@@ -148,7 +148,7 @@ function highlightDiff(local: string, incoming: string, side: 'local' | 'incomin
 
   return <>{incomingWords.map((word, i) => {
     if (!localWords.includes(word) && word.trim()) {
-      return <mark className="conflict-changed" key={i}>{word}</mark>;
+      return <mark className="conflict-changed" aria-label={`Changed incoming text: ${word.trim()}`} key={i}>{word}</mark>;
     }
     return <span key={i}>{word}</span>;
   })}</>;
@@ -296,20 +296,21 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
         </button>
       </div>
 
-      <div className="conflict-diff">
+      <div className="conflict-diff" role="group" aria-label="Conflict field differences">
         {allKeys.map((key) => {
           const localVal = conflict.localFields[key] ?? '';
           const incomingVal = conflict.incomingFields[key] ?? '';
           const hasChange = localVal !== incomingVal;
+          const fieldId = `conflict-${conflict.id}-${key}`.replace(/[^a-zA-Z0-9_-]/g, '-');
 
           return (
-            <div className="conflict-field" key={key}>
-              <div className="conflict-field-label">{key}</div>
-              <div className="conflict-side conflict-side-local">
+            <div className="conflict-field" role="group" aria-labelledby={fieldId} key={key}>
+              <div className="conflict-field-label" id={fieldId}>{key}</div>
+              <div className="conflict-side conflict-side-local" aria-label={`Local ${key}`}>
                 <small>Local</small>
                 <div>{hasChange ? highlightDiff(localVal, incomingVal, 'local') : localVal}</div>
               </div>
-              <div className="conflict-side conflict-side-incoming">
+              <div className="conflict-side conflict-side-incoming" aria-label={`Incoming ${key}`}>
                 <small>Incoming</small>
                 <div>{hasChange ? highlightDiff(localVal, incomingVal, 'incoming') : incomingVal}</div>
               </div>
@@ -319,15 +320,16 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
       </div>
 
       <div className="conflict-actions">
-        <button className="button secondary" disabled={safeIndex === 0} onClick={() => setIndex((i) => Math.max(i - 1, 0))}>
+        <button className="button secondary" disabled={safeIndex === 0} aria-label="Review previous conflict" onClick={() => setIndex((i) => Math.max(i - 1, 0))}>
           Previous
         </button>
-        <button className="button secondary" disabled={safeIndex >= visibleConflicts.length - 1} onClick={() => setIndex((i) => Math.min(i + 1, visibleConflicts.length - 1))}>
+        <button className="button secondary" disabled={safeIndex >= visibleConflicts.length - 1} aria-label="Review next conflict" onClick={() => setIndex((i) => Math.min(i + 1, visibleConflicts.length - 1))}>
           Next
         </button>
         <button
           className="button secondary"
           disabled={Boolean(currentDecision)}
+          aria-label="Keep local version for this conflict"
           onClick={() => {
             recordDecision(conflict, 'local');
           }}
@@ -337,6 +339,7 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
         <button
           className="button secondary"
           disabled={Boolean(currentDecision)}
+          aria-label="Keep incoming Anki version for this conflict"
           onClick={() => {
             recordDecision(conflict, 'incoming');
           }}
@@ -346,6 +349,7 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
         <button
           className="button primary"
           disabled={Boolean(currentDecision)}
+          aria-label="Skip this conflict for now"
           onClick={() => {
             recordDecision(conflict, 'skip');
           }}

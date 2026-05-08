@@ -2665,6 +2665,12 @@ button:disabled {
   color: var(--text-primary, #111);
 }
 
+.format-toolbar button:focus-visible {
+  outline: 2px solid var(--color-primary, #4f46e5);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px rgba(79,70,229,0.16);
+}
+
 .card-editor-textarea, .card-editor-input {
   width: 100%;
   padding: 8px 10px;
@@ -2711,6 +2717,11 @@ button:disabled {
   user-select: none;
 }
 .study-card:hover { border-color: var(--color-primary, #4f46e5); box-shadow: 0 4px 16px rgba(79,70,229,0.1); }
+.study-card:focus-visible {
+  outline: 3px solid var(--color-primary, #4f46e5);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 5px rgba(79,70,229,0.16);
+}
 .study-card.flipped { cursor: default; }
 
 .study-card-content { font-size: 1.1rem; line-height: 1.6; }
@@ -2723,6 +2734,12 @@ button:disabled {
 .study-rate-btn { flex: 1 1 86px; flex-direction: column; gap: 2px; padding: 10px; border-radius: 9px; border: 2px solid transparent; font-size: 0.85rem; min-width: 0; }
 .study-rate-btn kbd { font-size: 0.72rem; opacity: 0.6; }
 .study-skip { flex: 0 1 86px; }
+.study-rate-btn:focus-visible,
+.study-skip:focus-visible {
+  outline: 2px solid var(--color-primary, #4f46e5);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(79,70,229,0.16);
+}
 .rating-again { border-color: #fca5a5; background: #fef2f2; color: #dc2626; }
 .rating-again:hover { background: #fee2e2; }
 .rating-hard { border-color: #fcd34d; background: #fffbeb; color: #d97706; }
@@ -3101,6 +3118,12 @@ button:disabled {
   flex-wrap: wrap;
   gap: 10px;
   background: #f8fafc;
+}
+
+.conflict-actions button:focus-visible {
+  outline: 2px solid var(--color-primary, #4f46e5);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(79,70,229,0.16);
 }
 
 .conflict-empty {

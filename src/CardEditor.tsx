@@ -26,12 +26,12 @@ function FormattingToolbar({ textareaId }: { textareaId: string }) {
   }
 
   return (
-    <div className="format-toolbar">
-      <button type="button" title="Bold" onClick={() => wrapSelection('**', '**')}><b>B</b></button>
-      <button type="button" title="Italic" onClick={() => wrapSelection('*', '*')}><i>I</i></button>
-      <button type="button" title="List" onClick={() => wrapSelection('- ', '')}>List</button>
-      <button type="button" title="Cloze" onClick={() => wrapSelection('{{c1::', '}}')}>{'{{}}'}</button>
-      <button type="button" title="Code" onClick={() => wrapSelection('`', '`')}>{'<>'}</button>
+    <div className="format-toolbar" role="toolbar" aria-label="Formatting tools">
+      <button type="button" aria-label="Bold selected text" aria-controls={textareaId} title="Bold" onClick={() => wrapSelection('**', '**')}><b aria-hidden="true">B</b></button>
+      <button type="button" aria-label="Italicize selected text" aria-controls={textareaId} title="Italic" onClick={() => wrapSelection('*', '*')}><i aria-hidden="true">I</i></button>
+      <button type="button" aria-label="Turn selected text into a list item" aria-controls={textareaId} title="List" onClick={() => wrapSelection('- ', '')}>List</button>
+      <button type="button" aria-label="Wrap selected text in Anki cloze markup" aria-controls={textareaId} title="Cloze" onClick={() => wrapSelection('{{c1::', '}}')}>{'{{}}'}</button>
+      <button type="button" aria-label="Wrap selected text as inline code" aria-controls={textareaId} title="Code" onClick={() => wrapSelection('`', '`')}>{'<>'}</button>
     </div>
   );
 }
@@ -85,7 +85,7 @@ export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props
       <div className="card-editor-header">
         <strong>Edit card</strong>
         <span className="card-editor-hint">Submits as a suggestion for owner review</span>
-        <button className="btn btn-ghost card-editor-close" onClick={onCancel} aria-label="Cancel edit">✕</button>
+        <button type="button" className="btn btn-ghost card-editor-close" onClick={onCancel} aria-label="Cancel edit">✕</button>
       </div>
 
       <div className="card-editor-fields">
@@ -137,8 +137,8 @@ export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props
         <span className="card-editor-chars">{charCount} chars</span>
         <span className="card-editor-shortcuts"><kbd>Ctrl+Enter</kbd> submit · <kbd>Esc</kbd> cancel</span>
         <div className="card-editor-actions">
-          <button className="btn btn-ghost" onClick={onCancel} disabled={busy}>Cancel</button>
-          <button className="btn btn-primary" onClick={handleSubmit} disabled={busy || !canSuggest}>
+          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button type="button" className="btn btn-primary" onClick={handleSubmit} disabled={busy || !canSuggest} aria-label={busy ? 'Submitting suggestion' : 'Submit suggestion'}>
             {busy ? 'Submitting…' : 'Submit suggestion'}
           </button>
         </div>
