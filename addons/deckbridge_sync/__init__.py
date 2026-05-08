@@ -707,15 +707,46 @@ def collect_media_payload(
     return payload
 
 
-def note_to_card(note: Any) -> Dict[str, Any]:
+def _card_ord(card: Any, fallback: int = 0) -> int:
+    try:
+        return max(0, int(getattr(card, "ord", fallback) or 0))
+    except Exception:
+        return fallback
+
+
+def _template_for_ord(templates: List[Any], ord_value: int) -> Dict[str, Any]:
+    if templates and 0 <= ord_value < len(templates) and isinstance(templates[ord_value], dict):
+        return templates[ord_value]
+    if templates and isinstance(templates[0], dict):
+        return templates[0]
+    return {}
+
+
+def _card_state(card: Any, fallback: Dict[str, Any]) -> Dict[str, Any]:
+    due = getattr(card, "due", fallback.get("due"))
+    queue = getattr(card, "queue", None)
+    if queue is None:
+        return fallback
+    if queue < 0:
+        state = "Suspended"
+    elif queue == 0:
+        state = "New"
+    elif queue in (1, 3):
+        state = "Learning"
+    else:
+        state = "Review"
+    return {"due": due, "state": state, "suspended": queue < 0}
+
+
+def _note_to_card(note: Any, card: Optional[Any], ord_value: int, fallback_state: Dict[str, Any]) -> Dict[str, Any]:
     model = note.note_type()
     templates = model.get("tmpls") or []
-    template = templates[0] if templates and isinstance(templates[0], dict) else {}
+    template = _template_for_ord(templates, ord_value)
     field_names = list(note.keys())
-    state = note_state(note)
+    state = _card_state(card, fallback_state) if card is not None else fallback_state
     fields = {name: str(note[name]) for name in field_names}
     return {
-        "id": f"anki-{note.id}",
+        "id": f"anki-{note.id}-{ord_value}",
         "ankiNoteId": int(note.id),
         "type": model.get("name", "Basic"),
         "modelName": model.get("name", "Basic"),
@@ -733,12 +764,28 @@ def note_to_card(note: Any) -> Dict[str, Any]:
         "templateFront": str(template.get("qfmt") or ""),
         "templateBack": str(template.get("afmt") or ""),
         "modelCss": str(model.get("css") or ""),
+        "clozeOrd": ord_value,
     }
+
+
+def note_to_cards(note: Any) -> List[Dict[str, Any]]:
+    fallback_state = note_state(note)
+    cards = list(note.cards())
+    if not cards:
+        return [_note_to_card(note, None, 0, fallback_state)]
+    return [_note_to_card(note, card, _card_ord(card, index), fallback_state) for index, card in enumerate(cards)]
+
+
+def note_to_card(note: Any) -> Dict[str, Any]:
+    return note_to_cards(note)[0]
 
 
 def collect_cards() -> List[Dict[str, Any]]:
     note_ids = mw.col.find_notes(note_query())
-    return [note_to_card(mw.col.get_note(note_id)) for note_id in note_ids]
+    cards: List[Dict[str, Any]] = []
+    for note_id in note_ids:
+        cards.extend(note_to_cards(mw.col.get_note(note_id)))
+    return cards
 
 
 def sync_payload(

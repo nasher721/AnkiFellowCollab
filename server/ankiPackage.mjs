@@ -54,14 +54,14 @@ with tempfile.TemporaryDirectory() as tempdir:
     deck_name = next((deck.get('name') for deck in decks.values() if deck.get('name') and deck.get('name') != 'Default'), None)
     if not deck_name:
         deck_name = next((deck.get('name') for deck in decks.values() if deck.get('name')), 'Imported Anki Deck')
-    due_by_note = {}
-    state_by_note = {}
-    tmpl_ord_by_note = {}
+    cards_by_note = {}
     for card in con.execute('select nid, due, queue, ord from cards'):
-        due_by_note.setdefault(card['nid'], card['due'])
-        tmpl_ord_by_note.setdefault(card['nid'], card['ord'])
         queue = card['queue']
-        state_by_note.setdefault(card['nid'], 'Suspended' if queue < 0 else 'New' if queue == 0 else 'Learning' if queue in (1, 3) else 'Review')
+        cards_by_note.setdefault(card['nid'], []).append({
+            'due': card['due'],
+            'ord': card['ord'],
+            'state': 'Suspended' if queue < 0 else 'New' if queue == 0 else 'Learning' if queue in (1, 3) else 'Review',
+        })
     cards = []
     for note in con.execute('select id, mid, flds, tags, mod from notes order by id'):
         model = models.get(str(note['mid']), {})
@@ -69,21 +69,26 @@ with tempfile.TemporaryDirectory() as tempdir:
         values = note['flds'].split('\\x1f')
         fields = {field_names[i] if i < len(field_names) else f'Field {i+1}': value for i, value in enumerate(values)}
         tmpls = model.get('tmpls', [])
-        tmpl_idx = tmpl_ord_by_note.get(note['id'], 0)
-        tmpl = tmpls[tmpl_idx] if tmpls and tmpl_idx < len(tmpls) else (tmpls[0] if tmpls else {})
-        cards.append({
-            'id': str(note['id']),
-            'noteId': note['id'],
-            'noteType': model.get('name', 'Basic'),
-            'fields': fields,
-            'tags': [tag for tag in note['tags'].split(' ') if tag],
-            'due': due_by_note.get(note['id']),
-            'state': state_by_note.get(note['id'], 'New'),
-            'templateFront': tmpl.get('qfmt', ''),
-            'templateBack': tmpl.get('afmt', ''),
-            'modelCss': model.get('css', ''),
-            'clozeOrd': tmpl_ord_by_note.get(note['id'], 0),
-        })
+        note_cards = sorted(cards_by_note.get(note['id'], [{'due': None, 'ord': 0, 'state': 'New'}]), key=lambda item: item['ord'])
+        for note_card in note_cards:
+            tmpl_idx = note_card.get('ord', 0)
+            tmpl = tmpls[tmpl_idx] if tmpls and tmpl_idx < len(tmpls) else (tmpls[0] if tmpls else {})
+            cards.append({
+                'id': f"{note['id']}-{tmpl_idx}",
+                'noteId': note['id'],
+                'noteType': model.get('name', 'Basic'),
+                'modelName': model.get('name', 'Basic'),
+                'type': tmpl.get('name') or model.get('name', 'Basic'),
+                'fieldOrder': field_names,
+                'fields': fields,
+                'tags': [tag for tag in note['tags'].split(' ') if tag],
+                'due': note_card.get('due'),
+                'state': note_card.get('state', 'New'),
+                'templateFront': tmpl.get('qfmt', ''),
+                'templateBack': tmpl.get('afmt', ''),
+                'modelCss': model.get('css', ''),
+                'clozeOrd': tmpl_idx,
+            })
     print(json.dumps({'deck_name': deck_name, 'cards': cards}))
 `, [apkgPath]);
     try {

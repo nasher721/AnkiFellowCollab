@@ -20,8 +20,65 @@ const ANKI_BASE_CSS = `.card {
   background-color: white;
 }`;
 
-function renderCloze(html: string, activeClozeNum: number | undefined, side: 'front' | 'back'): string {
-  return html.replace(/\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g, (_match, num, text, hint) => {
+type TemplateSide = 'front' | 'back';
+
+interface TemplateContext {
+  card: DeckCard;
+  fields: Record<string, string>;
+  deckId: string;
+  frontHtml?: string;
+  activeClozeNum?: number;
+  side: TemplateSide;
+}
+
+function resolveField(fields: Record<string, string>, name: string): string {
+  const requested = name.trim();
+  if (!requested) return '';
+  if (Object.prototype.hasOwnProperty.call(fields, requested)) return fields[requested] ?? '';
+  const match = Object.keys(fields).find((key) => key.toLowerCase() === requested.toLowerCase());
+  return match ? fields[match] ?? '' : '';
+}
+
+function stripHtml(value: string): string {
+  if (typeof window !== 'undefined' && typeof window.DOMParser !== 'undefined') {
+    const parser = new window.DOMParser();
+    const document = parser.parseFromString(value, 'text/html');
+    return document.body.textContent || '';
+  }
+  return value.replace(/<[^>]+>/g, '');
+}
+
+function escapeAttribute(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function resolveSpecialValue(name: string, context: TemplateContext): string | undefined {
+  const key = name.trim().toLowerCase();
+  if (key === 'frontside') return context.frontHtml ?? '';
+  if (key === 'tags') return context.card.tags.join(' ');
+  if (key === 'type') return context.card.modelName || context.card.type || '';
+  if (key === 'deck') return context.card.sourceDeckName || context.card.sourceDeckPath || '';
+  if (key === 'subdeck') {
+    const path = context.card.sourceDeckPath || context.card.sourceDeckName || '';
+    const parts = path.split('::').filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : '';
+  }
+  if (key === 'card') return context.card.type || context.card.modelName || '';
+  return undefined;
+}
+
+function resolveTemplateValue(name: string, context: TemplateContext): string {
+  const special = resolveSpecialValue(name, context);
+  if (special !== undefined) return special;
+  return resolveField(context.fields, name);
+}
+
+function renderClozeField(value: string, activeClozeNum: number | undefined, side: TemplateSide): string {
+  return value.replace(/\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g, (_match, num, text, hint) => {
     const n = parseInt(num, 10);
     if (side === 'front' && activeClozeNum !== undefined && n === activeClozeNum) {
       return `<span class="cloze">[${hint ?? '...'}]</span>`;
@@ -33,60 +90,87 @@ function renderCloze(html: string, activeClozeNum: number | undefined, side: 'fr
   });
 }
 
-function applyTemplate(
-  template: string,
-  fields: Record<string, string>,
-  deckId: string,
-  frontHtml: string | undefined,
-  clozeOrd: number | undefined,
-  side: 'front' | 'back',
-): string {
-  let result = template;
+function renderHint(value: string, label: string): string {
+  if (!value.trim()) return '';
+  const safeLabel = escapeAttribute(label.trim() || 'hint');
+  return `<a class="hint" href="#" onclick="this.style.display='none';this.nextElementSibling.style.display='block';return false;">Show ${safeLabel}</a><div class="hint-content" style="display:none">${value}</div>`;
+}
 
-  // {{FrontSide}} — replaced with pre-rendered front HTML
-  if (frontHtml !== undefined) {
-    result = result.replace(/\{\{FrontSide\}\}/gi, frontHtml);
+function renderTypeAnswer(value: string, context: TemplateContext): string {
+  if (context.side === 'front') {
+    return `<input class="type-answer" type="text" aria-label="Type answer" autocomplete="off" data-answer="${escapeAttribute(stripHtml(value))}">`;
+  }
+  return `<div class="type-answer type-answer-back">${value}</div>`;
+}
+
+function applyFieldReference(ref: string, context: TemplateContext): string {
+  const parts = ref.split(':').map((part) => part.trim()).filter(Boolean);
+  if (!parts.length) return '';
+  const fieldName = parts[parts.length - 1];
+  const filters = parts.slice(0, -1).map((filter) => filter.toLowerCase());
+  let value = resolveTemplateValue(fieldName, context);
+
+  for (const filter of filters.reverse()) {
+    if (filter === 'text') {
+      value = stripHtml(value);
+    } else if (filter === 'hint') {
+      value = renderHint(value, fieldName);
+    } else if (filter === 'type') {
+      value = renderTypeAnswer(value, context);
+    } else if (filter === 'cloze') {
+      value = renderClozeField(value, context.activeClozeNum, context.side);
+    }
   }
 
-  // Conditional sections {{#Field}}...{{/Field}}
-  result = result.replace(/\{\{#([^}]+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (_m, name, content) => {
-    const val = fields[name.trim()] ?? fields[name.trim().toLowerCase()] ?? '';
-    return val.trim() ? content : '';
-  });
+  return value;
+}
 
-  // Inverse conditionals {{^Field}}...{{/Field}}
-  result = result.replace(/\{\{\^([^}]+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (_m, name, content) => {
-    const val = fields[name.trim()] ?? fields[name.trim().toLowerCase()] ?? '';
-    return val.trim() ? '' : content;
-  });
+function isTruthyField(ref: string, context: TemplateContext): boolean {
+  return stripHtml(applyFieldReference(ref, context)).trim().length > 0;
+}
 
-  // Field substitutions {{FieldName}} and special prefixes
-  result = result.replace(/\{\{([^}]+)\}\}/g, (_match, ref) => {
-    const r = ref.trim();
-    if (r === 'FrontSide') return '';
+function parseSection(template: string, context: TemplateContext, startIndex = 0, closingName?: string): { html: string; index: number } {
+  const tokenPattern = /\{\{\s*([#/^]?)([^}]+?)\s*\}\}/g;
+  let html = '';
+  let cursor = startIndex;
+  tokenPattern.lastIndex = startIndex;
 
-    if (r.startsWith('text:')) {
-      const name = r.slice(5).trim();
-      const val = fields[name] ?? fields[name.toLowerCase()] ?? '';
-      return val.replace(/<[^>]+>/g, '');
+  while (true) {
+    const token = tokenPattern.exec(template);
+    if (!token) break;
+    const [raw, marker, rawName] = token;
+    const name = rawName.trim();
+    html += template.slice(cursor, token.index);
+    cursor = tokenPattern.lastIndex;
+
+    if (marker === '/') {
+      if (closingName && name.toLowerCase() === closingName.toLowerCase()) {
+        return { html, index: cursor };
+      }
+      continue;
     }
-    if (r.startsWith('type:')) {
-      const name = r.slice(5).trim();
-      return fields[name] ?? fields[name.toLowerCase()] ?? '';
-    }
-    if (r.startsWith('cloze:')) {
-      const name = r.slice(6).trim();
-      const val = fields[name] ?? fields[name.toLowerCase()] ?? '';
-      const activeClozeNum = clozeOrd !== undefined ? clozeOrd + 1 : undefined;
-      return renderCloze(val, activeClozeNum, side);
-    }
-    // Remaining Anki specials (closing tags etc.) — swallow
-    if (r.startsWith('#') || r.startsWith('/') || r.startsWith('^')) return '';
 
-    return fields[r] ?? fields[r.toLowerCase()] ?? '';
-  });
+    if (marker === '#' || marker === '^') {
+      const inner = parseSection(template, context, cursor, name);
+      const include = isTruthyField(name, context);
+      if ((marker === '#' && include) || (marker === '^' && !include)) {
+        html += inner.html;
+      }
+      cursor = inner.index;
+      tokenPattern.lastIndex = cursor;
+      continue;
+    }
 
-  return renderMediaHtml(deckId, result);
+    html += applyFieldReference(name, context);
+  }
+
+  html += template.slice(cursor);
+  return { html, index: template.length };
+}
+
+function renderAnkiTemplate(template: string, context: TemplateContext): string {
+  const rendered = parseSection(template, context).html;
+  return renderMediaHtml(context.deckId, rendered);
 }
 
 function buildFallbackHtml(card: DeckCard, deckId: string, side: 'front' | 'back'): string {
@@ -110,13 +194,44 @@ export function renderCardHtml(
   frontHtml?: string,
   clozeOrd?: number,
 ): string {
+  const effectiveClozeOrd = clozeOrd ?? card.clozeOrd;
+  const context: TemplateContext = {
+    card,
+    fields: card.fields,
+    deckId,
+    frontHtml,
+    activeClozeNum: effectiveClozeOrd !== undefined ? effectiveClozeOrd + 1 : undefined,
+    side
+  };
   if (side === 'front' && card.templateFront) {
-    return applyTemplate(card.templateFront, card.fields, deckId, undefined, clozeOrd, 'front');
+    return renderAnkiTemplate(card.templateFront, { ...context, frontHtml: undefined });
   }
   if (side === 'back' && card.templateBack) {
-    return applyTemplate(card.templateBack, card.fields, deckId, frontHtml, clozeOrd, 'back');
+    return renderAnkiTemplate(card.templateBack, context);
   }
   return buildFallbackHtml(card, deckId, side);
+}
+
+export function buildAnkiCardDocument(bodyHtml: string, modelCss?: string): string {
+  const effectiveModelCss = modelCss?.trim() ? modelCss : ANKI_BASE_CSS;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{margin:0;padding:16px;box-sizing:border-box;background:#fff;}
+img,video{max-width:100%;height:auto;}
+audio{display:block;margin:8px auto;}
+.cloze{font-weight:bold;color:#00a;}
+${ANKI_BASE_CSS}
+${effectiveModelCss !== ANKI_BASE_CSS ? effectiveModelCss : ''}
+</style>
+</head>
+<body class="card">
+${bodyHtml}
+</body>
+</html>`;
 }
 
 export function AnkiCardRenderer({ card, deckId, side, frontHtml, clozeOrd, className = '' }: Props) {
@@ -130,24 +245,7 @@ export function AnkiCardRenderer({ card, deckId, side, frontHtml, clozeOrd, clas
   const modelCss = card.modelCss?.trim() ? card.modelCss : ANKI_BASE_CSS;
 
   const htmlDoc = useMemo(
-    () => `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-html,body{margin:0;padding:16px;box-sizing:border-box;background:#fff;}
-img,video{max-width:100%;height:auto;}
-audio{display:block;margin:8px auto;}
-.cloze{font-weight:bold;color:#00a;}
-${ANKI_BASE_CSS}
-${modelCss !== ANKI_BASE_CSS ? modelCss : ''}
-</style>
-</head>
-<body class="card">
-${bodyHtml}
-</body>
-</html>`,
+    () => buildAnkiCardDocument(bodyHtml, modelCss),
     [bodyHtml, modelCss],
   );
 

@@ -2846,7 +2846,7 @@ button:disabled {
   box-shadow: 0 0 0 5px rgba(79,70,229,0.16);
 }
 .study-card.flipped { cursor: default; }
-.study-card .anki-card-iframe { pointer-events: none; }
+.study-card .anki-card-iframe { pointer-events: auto; }
 
 .study-card-content { min-width: 0; font-size: 1.1rem; line-height: 1.6; overflow-wrap: anywhere; }
 .study-card-content img,

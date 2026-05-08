@@ -271,6 +271,27 @@ test.describe('Tabs', () => {
     await expect(page.locator('.study-overlay')).toBeVisible();
   });
 
+  test('renders study card front and back content inside Anki iframes', async ({ page }) => {
+    await page.getByRole('button', { name: 'Study' }).click();
+    await page.getByRole('button', { name: 'Start study session' }).click();
+    await expect(page.locator('.study-overlay')).toBeVisible();
+
+    const frontFrame = page.frameLocator('.study-card-front iframe');
+    const frontText = await frontFrame.locator('body').innerText();
+    expect(frontText).toMatch(/First-line treatment for H\. pylori infection\?|Vitamin B12/);
+    await expect(page.locator('.study-card-front iframe')).toHaveCSS('pointer-events', 'auto');
+
+    await page.locator('.study-flip-hint').click();
+
+    const backFrame = page.frameLocator('.study-card-back iframe');
+    const backText = await backFrame.locator('body').innerText();
+    if (frontText.includes('H. pylori')) {
+      expect(backText).toContain('Bismuth quadruple therapy or clarithromycin triple therapy depending on resistance patterns.');
+    } else {
+      expect(backText).toContain('Dorsal columns and lateral corticospinal tracts are affected.');
+    }
+  });
+
   test('contains focus inside study dialog and restores focus after close', async ({ page }) => {
     await page.getByRole('button', { name: 'Study' }).click();
     await page.getByRole('button', { name: 'Start study session' }).click();

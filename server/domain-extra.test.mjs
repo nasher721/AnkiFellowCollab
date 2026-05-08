@@ -112,6 +112,59 @@ test('mergeAddonCards overwrites in overwrite-platform mode', () => {
   assert.equal(deck.cards[0].fields.Front, 'New');
 });
 
+test('mergeAddonCards matches same note by template ordinal without collapsing sibling cards', () => {
+  const deck = {
+    cards: [
+      { id: 'anki-101-0', ankiNoteId: 101, clozeOrd: 0, fields: { Front: 'Old front' }, tags: [], type: 'Basic', modelName: 'Basic', fieldOrder: ['Front'], due: null, state: 'New', suspended: false, mediaRefs: [], modifiedAt: new Date().toISOString(), modifiedBy: 'test' },
+      { id: 'anki-101-1', ankiNoteId: 101, clozeOrd: 1, fields: { Front: 'Old back' }, tags: [], type: 'Basic', modelName: 'Basic', fieldOrder: ['Front'], due: null, state: 'New', suspended: false, mediaRefs: [], modifiedAt: new Date().toISOString(), modifiedBy: 'test' }
+    ],
+    lastSyncedAt: null
+  };
+
+  const result = mergeAddonCards(deck, {
+    cards: [
+      { id: 'anki-101-0', ankiNoteId: 101, clozeOrd: 0, fields: { Front: 'New front' }, tags: [], type: 'Basic', modelName: 'Basic', fieldOrder: ['Front'], due: null, state: 'New', suspended: false, mediaRefs: [], modifiedAt: new Date().toISOString(), modifiedBy: 'test' },
+      { id: 'anki-101-1', ankiNoteId: 101, clozeOrd: 1, fields: { Front: 'New back' }, tags: [], type: 'Basic', modelName: 'Basic', fieldOrder: ['Front'], due: null, state: 'New', suspended: false, mediaRefs: [], modifiedAt: new Date().toISOString(), modifiedBy: 'test' }
+    ],
+    dryRun: false,
+    allowCreate: true,
+    conflictPolicy: 'overwrite-platform',
+    source: 'test'
+  });
+
+  assert.equal(result.stats.updated, 2);
+  assert.equal(result.stats.created, 0);
+  assert.equal(deck.cards.length, 2);
+  assert.equal(deck.cards.find((card) => card.id === 'anki-101-0').fields.Front, 'New front');
+  assert.equal(deck.cards.find((card) => card.id === 'anki-101-1').fields.Front, 'New back');
+});
+
+test('mergeAddonCards updates legacy note-only card for ordinal zero and creates later ordinals', () => {
+  const deck = {
+    cards: [
+      { id: 'anki-202', ankiNoteId: 202, fields: { Front: 'Legacy front' }, tags: [], type: 'Basic', modelName: 'Basic', fieldOrder: ['Front'], due: null, state: 'New', suspended: false, mediaRefs: [], modifiedAt: new Date().toISOString(), modifiedBy: 'test' }
+    ],
+    lastSyncedAt: null
+  };
+
+  const result = mergeAddonCards(deck, {
+    cards: [
+      { id: 'anki-202-0', ankiNoteId: 202, clozeOrd: 0, fields: { Front: 'Ordinal zero' }, tags: [], type: 'Basic', modelName: 'Basic', fieldOrder: ['Front'], due: null, state: 'New', suspended: false, mediaRefs: [], modifiedAt: new Date().toISOString(), modifiedBy: 'test' },
+      { id: 'anki-202-1', ankiNoteId: 202, clozeOrd: 1, fields: { Front: 'Ordinal one' }, tags: [], type: 'Basic', modelName: 'Basic', fieldOrder: ['Front'], due: null, state: 'New', suspended: false, mediaRefs: [], modifiedAt: new Date().toISOString(), modifiedBy: 'test' }
+    ],
+    dryRun: false,
+    allowCreate: true,
+    conflictPolicy: 'overwrite-platform',
+    source: 'test'
+  });
+
+  assert.equal(result.stats.updated, 1);
+  assert.equal(result.stats.created, 1);
+  assert.equal(deck.cards.length, 2);
+  assert.equal(deck.cards.find((card) => card.id === 'anki-202').fields.Front, 'Ordinal zero');
+  assert.equal(deck.cards.find((card) => card.id === 'anki-202-1').fields.Front, 'Ordinal one');
+});
+
 test('summarizeDeck counts tags and note types', () => {
   const state = createSeedState();
   const summary = summarizeDeck(state.decks[0]);

@@ -36,6 +36,7 @@ from deckbridge_sync import (
     media_refs_from_fields,
     normalize_platform_url,
     note_to_card,
+    note_to_cards,
     open_settings,
     pull_scheduling_from_platform,
     platform_url,
@@ -263,9 +264,10 @@ class TestVersion(unittest.TestCase):
 
 
 class FakeCard:
-    def __init__(self):
-        self.due = 0
-        self.queue = 2
+    def __init__(self, ord=0, due=0, queue=2):
+        self.ord = ord
+        self.due = due
+        self.queue = queue
         self.type = 2
         self.ivl = 1
         self.factor = 2500
@@ -309,9 +311,43 @@ class TestSchedulingSync(unittest.TestCase):
     def test_note_to_card_includes_model_template_and_css(self):
         card = note_to_card(FakeNote())
 
+        self.assertEqual(card['id'], 'anki-101-0')
         self.assertEqual(card['templateFront'], '{{Front}}')
         self.assertEqual(card['templateBack'], '{{FrontSide}}<hr>{{Back}}')
         self.assertEqual(card['modelCss'], '.card { color: red; }')
+        self.assertEqual(card['clozeOrd'], 0)
+
+    def test_note_to_cards_emits_one_card_per_anki_card_with_matching_template_ord(self):
+        class MultiCardNote(FakeNote):
+            def __init__(self):
+                super().__init__()
+                self.cards_list = [
+                    FakeCard(ord=0, due=3, queue=0),
+                    FakeCard(ord=1, due=9, queue=2),
+                ]
+
+            def note_type(self):
+                return {
+                    'name': 'Basic (and reversed card)',
+                    'tmpls': [
+                        {'qfmt': '{{Front}}', 'afmt': '{{FrontSide}}<hr>{{Back}}'},
+                        {'qfmt': '{{Back}}', 'afmt': '{{FrontSide}}<hr>{{Front}}'},
+                    ],
+                    'css': '.card { color: blue; }',
+                }
+
+            def cards(self):
+                return self.cards_list
+
+        cards = note_to_cards(MultiCardNote())
+
+        self.assertEqual([card['id'] for card in cards], ['anki-101-0', 'anki-101-1'])
+        self.assertEqual([card['ankiNoteId'] for card in cards], [101, 101])
+        self.assertEqual([card['clozeOrd'] for card in cards], [0, 1])
+        self.assertEqual(cards[0]['templateFront'], '{{Front}}')
+        self.assertEqual(cards[1]['templateFront'], '{{Back}}')
+        self.assertEqual(cards[0]['state'], 'New')
+        self.assertEqual(cards[1]['state'], 'Review')
 
     @patch('deckbridge_sync.mw')
     def test_apply_scheduling_update_sets_review_card_values(self, mock_mw):

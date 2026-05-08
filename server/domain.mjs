@@ -414,13 +414,37 @@ function copySyncedCard(card, actorName, timestamp) {
   };
 }
 
+function addonCardOrd(card) {
+  if (Number.isFinite(Number(card.clozeOrd))) return Number(card.clozeOrd);
+  const match = String(card.id || '').match(/^anki-\d+-(\d+)$/);
+  if (match) return Number(match[1]);
+  return 0;
+}
+
+function addonNoteOrdKey(card) {
+  if (!card.ankiNoteId) return null;
+  return `${card.ankiNoteId}:${addonCardOrd(card)}`;
+}
+
+function isLegacyAddonNoteId(card) {
+  return Boolean(card.ankiNoteId) && String(card.id || '') === `anki-${card.ankiNoteId}`;
+}
+
 export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki add-on') {
   const syncedAt = nowIso();
   deck.media ||= {};
   let mediaChanged = false;
   const mediaToApply = new Set();
   const byId = new Map(deck.cards.map((card) => [card.id, card]));
-  const byNoteId = new Map(deck.cards.filter((card) => card.ankiNoteId).map((card) => [String(card.ankiNoteId), card]));
+  const byNoteOrd = new Map();
+  const legacyByNoteId = new Map();
+  for (const card of deck.cards) {
+    const noteOrdKey = addonNoteOrdKey(card);
+    if (noteOrdKey && !byNoteOrd.has(noteOrdKey)) byNoteOrd.set(noteOrdKey, card);
+    if (card.ankiNoteId && addonCardOrd(card) === 0 && !legacyByNoteId.has(String(card.ankiNoteId))) {
+      legacyByNoteId.set(String(card.ankiNoteId), card);
+    }
+  }
   const result = {
     syncedAt,
     stats: {
@@ -437,7 +461,14 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
   };
 
   for (const incoming of syncInput.cards) {
-    const existing = byId.get(incoming.id) || (incoming.ankiNoteId ? byNoteId.get(String(incoming.ankiNoteId)) : null);
+    const incomingNoteOrdKey = addonNoteOrdKey(incoming);
+    const incomingOrd = addonCardOrd(incoming);
+    const legacyMatch = incoming.ankiNoteId && incomingOrd === 0
+      ? legacyByNoteId.get(String(incoming.ankiNoteId))
+      : null;
+    const existing = byId.get(incoming.id)
+      || (incomingNoteOrdKey ? byNoteOrd.get(incomingNoteOrdKey) : null)
+      || legacyMatch;
     if (!existing) {
       if (!syncInput.allowCreate) {
         result.stats.skipped += 1;
@@ -449,7 +480,11 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
       if (!syncInput.dryRun) {
         deck.cards.push(created);
         byId.set(created.id, created);
-        if (created.ankiNoteId) byNoteId.set(String(created.ankiNoteId), created);
+        const createdNoteOrdKey = addonNoteOrdKey(created);
+        if (createdNoteOrdKey) byNoteOrd.set(createdNoteOrdKey, created);
+        if (created.ankiNoteId && addonCardOrd(created) === 0 && !legacyByNoteId.has(String(created.ankiNoteId))) {
+          legacyByNoteId.set(String(created.ankiNoteId), created);
+        }
       }
       for (const ref of created.mediaRefs || []) mediaToApply.add(ref);
       continue;
@@ -511,7 +546,12 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
     }, actorName, syncedAt);
     result.updatedCards.push(updated);
     result.stats.updated += 1;
-    if (!syncInput.dryRun) Object.assign(existing, updated);
+    if (!syncInput.dryRun) {
+      Object.assign(existing, updated);
+      const updatedNoteOrdKey = addonNoteOrdKey(existing);
+      if (updatedNoteOrdKey) byNoteOrd.set(updatedNoteOrdKey, existing);
+      if (isLegacyAddonNoteId(existing)) legacyByNoteId.set(String(existing.ankiNoteId), existing);
+    }
     for (const ref of updated.mediaRefs || []) mediaToApply.add(ref);
   }
 
