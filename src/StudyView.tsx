@@ -54,10 +54,28 @@ const initialSessionStats: SessionStats = {
   skipped: 0,
 };
 
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])'
+].join(',');
+
 function isEditableShortcutTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
   const tagName = target.tagName.toLowerCase();
   return tagName === 'input' || tagName === 'textarea' || tagName === 'select' || target.isContentEditable;
+}
+
+function getFocusableElements(container: HTMLElement) {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter((element) => (
+      !element.hasAttribute('disabled') &&
+      element.getAttribute('aria-hidden') !== 'true' &&
+      Boolean(element.offsetParent || element.getClientRects().length)
+    ));
 }
 
 export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: Props) {
@@ -160,6 +178,36 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
   // Keyboard shortcuts
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (e.key === 'Tab') {
+        const panel = panelRef.current;
+        if (!panel) return;
+
+        const focusable = getFocusableElements(panel);
+        if (!focusable.length) {
+          e.preventDefault();
+          panel.focus({ preventScroll: true });
+          return;
+        }
+
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const activeElement = document.activeElement;
+
+        if (!panel.contains(activeElement)) {
+          e.preventDefault();
+          first.focus({ preventScroll: true });
+          return;
+        }
+
+        if (e.shiftKey && activeElement === first) {
+          e.preventDefault();
+          last.focus({ preventScroll: true });
+        } else if (!e.shiftKey && activeElement === last) {
+          e.preventDefault();
+          first.focus({ preventScroll: true });
+        }
+        return;
+      }
       if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || isEditableShortcutTarget(e.target)) return;
       if (e.key === ' ' || e.key === 'Enter') {
         if (!flipped) setFlipped(true);
@@ -282,7 +330,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
             />
           </div>
           <div className="study-meta" aria-live="polite">
-            <span aria-label="Study session progress">Card {progressCurrent} of {queue.length}</span>
+            <span>Card {progressCurrent} of {queue.length}</span>
             <span>{remaining} remaining</span>
             <span>{modeLabel}</span>
             <span>{accuracy}% accuracy</span>

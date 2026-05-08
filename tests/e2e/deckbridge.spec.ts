@@ -210,6 +210,33 @@ test.describe('Tabs', () => {
     await expect(page.locator('.study-overlay')).toBeVisible();
   });
 
+  test('contains focus inside study dialog and restores focus after close', async ({ page }) => {
+    await page.getByRole('button', { name: 'Study' }).click();
+    await page.getByRole('button', { name: 'Start study session' }).click();
+    const dialog = page.locator('.study-overlay');
+    await expect(dialog).toBeVisible();
+
+    for (let i = 0; i < 8; i += 1) {
+      await page.keyboard.press('Tab');
+      await expect.poll(() => page.evaluate(() => {
+        const active = document.activeElement;
+        return active !== document.body && Boolean(active?.closest('.study-overlay'));
+      })).toBe(true);
+    }
+
+    for (let i = 0; i < 4; i += 1) {
+      await page.keyboard.press('Shift+Tab');
+      await expect.poll(() => page.evaluate(() => {
+        const active = document.activeElement;
+        return active !== document.body && Boolean(active?.closest('.study-overlay'));
+      })).toBe(true);
+    }
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Overview' })).toBeFocused();
+  });
+
   test('switches to Cards tab', async ({ page }) => {
     await page.getByRole('button', { name: 'Cards', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Cards', exact: true })).toHaveClass(/active/);

@@ -488,6 +488,7 @@ export default function App() {
   });
   const toastTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const retainConflictReviewSnapshot = useRef(false);
+  const overviewTabRef = useRef<HTMLButtonElement>(null);
   const activeDeck = state?.decks.find((deck) => deck.id === state.activeDeckId) || state?.decks[0];
 
   function applyAuthoritativeState(next: AppState) {
@@ -660,6 +661,13 @@ export default function App() {
     !card.suspended && !cardsWithPendingSuggestions.has(card.id)
   )), [activeDeck, cardsWithPendingSuggestions]);
   const studyCards = studyApprovedOnly ? approvedStudyCards : (activeDeck?.cards || []);
+  const closeStudyView = useCallback(() => {
+    setShowStudy(false);
+    setActiveTab('overview');
+    window.requestAnimationFrame(() => {
+      overviewTabRef.current?.focus({ preventScroll: true });
+    });
+  }, []);
   const suggestionStats = useMemo(() => {
     const total = suggestions.length;
     const accepted = suggestions.filter((item) => item.status === 'accepted').length;
@@ -1211,7 +1219,7 @@ export default function App() {
           <section className="deck-panel">
             <div className="breadcrumb">Decks <span>/</span> {activeDeck.name}</div>
             <div className="tabs">
-              <button className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
+              <button ref={overviewTabRef} className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
               <button className={activeTab === 'study' ? 'active' : ''} onClick={() => setActiveTab('study')}>Study</button>
               <button className={activeTab === 'cards' ? 'active' : ''} onClick={() => setActiveTab('cards')}>Cards</button>
               <button className={activeTab === 'stats' ? 'active' : ''} onClick={() => setActiveTab('stats')}>Stats</button>
@@ -1697,7 +1705,7 @@ export default function App() {
           deckId={activeDeck.id}
           cards={studyCards}
           modeLabel={studyApprovedOnly ? 'Approved cards only' : 'All cards'}
-          onClose={() => { setShowStudy(false); setActiveTab('overview'); }}
+          onClose={closeStudyView}
         />
       )}
     </main>
