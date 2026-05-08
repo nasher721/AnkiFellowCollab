@@ -290,6 +290,23 @@
   color: #7ee787;
 }
 
+[data-theme="dark"] .card-preview-col .anki-card-iframe,
+[data-theme="dark"] .card-preview-single .anki-card-iframe {
+  border-color: var(--border);
+}
+
+[data-theme="dark"] .card-preview-label {
+  color: var(--text-secondary);
+}
+
+[data-theme="dark"] .card-preview-label.proposed {
+  color: #7ee787;
+}
+
+[data-theme="dark"] .card-preview-side-label {
+  color: var(--text-muted, #596579);
+}
+
 [data-theme="dark"] .queue-item {
   background: var(--bg-card);
   border-color: var(--border);
@@ -1773,6 +1790,55 @@ button:disabled {
 .diff-lines .added {
   background: #ecf9f0;
   color: #167348;
+}
+
+.card-preview-comparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.card-preview-single {
+  margin-bottom: 18px;
+}
+
+.card-preview-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.card-preview-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #596579;
+  margin-bottom: 2px;
+}
+
+.card-preview-label.proposed {
+  color: #167348;
+}
+
+.card-preview-side-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #9aa5b5;
+  margin-top: 6px;
+}
+
+.card-preview-col .anki-card-iframe,
+.card-preview-single .anki-card-iframe {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
 }
 
 .tag-diff {

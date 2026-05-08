@@ -16,6 +16,7 @@ import { ConflictResolution, type Conflict } from './ConflictResolution';
 import { DeckSettingsView } from './views/DeckSettingsView';
 import { DeckStatsView } from './views/DeckStatsView';
 import { StudyPrepView } from './views/StudyPrepView';
+import { AnkiCardRenderer, renderCardHtml } from './AnkiCardRenderer';
 
 interface Toast {
   id: string;
@@ -1577,15 +1578,13 @@ export default function App() {
                 </div>
 
                 {reviewTab === 'changes' ? (<>
-                <DiffBlock
-                  label="Front"
-                  before={fieldValue(selectedCard, 'Front')}
-                  after={selectedSuggestion?.proposedFields.Front}
-                />
-                <DiffBlock
-                  label="Back"
-                  before={fieldValue(selectedCard, 'Back')}
-                  after={selectedSuggestion?.proposedFields.Back}
+                <CardPreviewComparison
+                  currentCard={selectedCard}
+                  proposedCard={selectedSuggestion
+                    ? { ...selectedCard, fields: { ...selectedCard.fields, ...selectedSuggestion.proposedFields } }
+                    : selectedCard}
+                  deckId={activeDeck!.id}
+                  hasSuggestion={!!selectedSuggestion}
                 />
                 <div className="diff-block">
                   <label>Tags</label>
@@ -1735,6 +1734,52 @@ function DiffBlock({ label, before, after }: { label: string; before?: string; a
       <div className="diff-lines">
         <p className="removed">- {before || 'Empty'}</p>
         <p className="added">+ {after || before || 'No suggested change'}</p>
+      </div>
+    </div>
+  );
+}
+
+function CardPreviewComparison({ currentCard, proposedCard, deckId, hasSuggestion }: {
+  currentCard: DeckCard;
+  proposedCard: DeckCard;
+  deckId: string;
+  hasSuggestion: boolean;
+}) {
+  const currentFrontHtml = useMemo(
+    () => renderCardHtml(currentCard, deckId, 'front'),
+    [currentCard, deckId],
+  );
+  const proposedFrontHtml = useMemo(
+    () => renderCardHtml(proposedCard, deckId, 'front'),
+    [proposedCard, deckId],
+  );
+
+  if (!hasSuggestion) {
+    return (
+      <div className="card-preview-single">
+        <span className="card-preview-side-label">Front</span>
+        <AnkiCardRenderer card={currentCard} deckId={deckId} side="front" />
+        <span className="card-preview-side-label">Back</span>
+        <AnkiCardRenderer card={currentCard} deckId={deckId} side="back" frontHtml={currentFrontHtml} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="card-preview-comparison">
+      <div className="card-preview-col">
+        <span className="card-preview-label">Current</span>
+        <span className="card-preview-side-label">Front</span>
+        <AnkiCardRenderer card={currentCard} deckId={deckId} side="front" />
+        <span className="card-preview-side-label">Back</span>
+        <AnkiCardRenderer card={currentCard} deckId={deckId} side="back" frontHtml={currentFrontHtml} />
+      </div>
+      <div className="card-preview-col">
+        <span className="card-preview-label proposed">Proposed</span>
+        <span className="card-preview-side-label">Front</span>
+        <AnkiCardRenderer card={proposedCard} deckId={deckId} side="front" />
+        <span className="card-preview-side-label">Back</span>
+        <AnkiCardRenderer card={proposedCard} deckId={deckId} side="back" frontHtml={proposedFrontHtml} />
       </div>
     </div>
   );
