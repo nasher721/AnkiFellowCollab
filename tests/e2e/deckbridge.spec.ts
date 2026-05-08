@@ -94,7 +94,8 @@ test.describe('Conflict Resolution', () => {
       incomingFields: { Front: 'Incoming front', Back: 'Incoming answer' },
       localFields: { Front: 'Local front', Back: 'Local answer' }
     };
-    const stateWithConflict = {
+    let serverConflicts = [syncConflict];
+    const buildState = () => ({
       user: { id: 'you', email: 'you@example.com', name: 'You' },
       memberships: [{ deckId: 'deck-replay', userId: 'you', role: 'owner', createdAt: detectedAt }],
       decks: [{
@@ -137,16 +138,16 @@ test.describe('Conflict Resolution', () => {
           client: { name: 'DeckBridge Sync', version: '0.1.0', fingerprint: 'test-host' },
           stats: { total: 1, created: 0, updated: 0, skipped: 0, conflicts: 1, dryRun: false }
         },
-        conflicts: [syncConflict]
+        conflicts: serverConflicts
       }
-    };
+    });
     let stateRequests = 0;
     await page.route('**/api/state', async (route) => {
       stateRequests += 1;
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify(stateWithConflict)
+        body: JSON.stringify(buildState())
       });
     });
     await page.route('**/api/addon/version', async (route) => {
@@ -169,6 +170,13 @@ test.describe('Conflict Resolution', () => {
       }
       await route.fallback();
     });
+    await page.route('**/api/anki/status', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ connected: false })
+      });
+    });
 
     await page.goto('/');
     await expect(page.getByText('Conflicts need review')).toBeVisible();
@@ -180,6 +188,12 @@ test.describe('Conflict Resolution', () => {
     await expect.poll(() => stateRequests, { timeout: 20_000 }).toBeGreaterThan(requestsAfterDecision);
     await expect(page.getByText('Conflicts need review')).toHaveCount(0);
     await expect(page.getByText('No unresolved conflicts in this saved review.')).toBeVisible();
+
+    serverConflicts = [];
+    const requestsAfterRehydration = stateRequests;
+    await page.locator('button[title="Check"]').click();
+    await expect.poll(() => stateRequests).toBeGreaterThan(requestsAfterRehydration);
+    await expect(page.getByText('No unresolved conflicts in this saved review.')).toHaveCount(0);
   });
 });
 

@@ -488,7 +488,13 @@ export default function App() {
     error: ''
   });
   const toastTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const retainConflictReviewSnapshot = useRef(false);
   const activeDeck = state?.decks.find((deck) => deck.id === state.activeDeckId) || state?.decks[0];
+
+  function applyAuthoritativeState(next: AppState) {
+    retainConflictReviewSnapshot.current = false;
+    setState(next);
+  }
 
   useEffect(() => {
     if (!supabase) return;
@@ -515,7 +521,7 @@ export default function App() {
     if (!authReady || (supabase && !session)) return;
     Promise.all([api.state(), api.health()])
       .then(([next]) => {
-        setState(next);
+        applyAuthoritativeState(next);
         setApiHealth('ok');
         const nextActiveDeck = next.decks.find((deck) => deck.id === next.activeDeckId);
         setSelectedCardId(nextActiveDeck?.cards[0]?.id || null);
@@ -529,7 +535,7 @@ export default function App() {
   useEffect(() => {
     if (supabase && !session) return undefined;
     const timer = window.setInterval(() => {
-      api.ankiStatus().then(() => api.state()).then(setState).catch(() => undefined);
+      api.ankiStatus().then(() => api.state()).then(applyAuthoritativeState).catch(() => undefined);
     }, 15000);
     return () => window.clearInterval(timer);
   }, [session]);
@@ -583,12 +589,12 @@ export default function App() {
   }
 
   const handleSuggestionChange = useCallback(() => {
-    api.state().then(setState).catch(() => undefined);
+    api.state().then(applyAuthoritativeState).catch(() => undefined);
   }, []);
 
   const handleCommentChange = useCallback(() => {
     setCommentsVersion((version) => version + 1);
-    api.state().then(setState).catch(() => undefined);
+    api.state().then(applyAuthoritativeState).catch(() => undefined);
   }, []);
 
   useRealtime({
@@ -683,9 +689,13 @@ export default function App() {
   const activeSyncConflicts = syncSnapshot.conflicts;
   const pendingConflictIds = useMemo(() => activeSyncConflicts.map((conflict) => conflict.id), [activeSyncConflicts]);
   useEffect(() => {
-    if (!activeSyncConflicts.length) return;
-
     setConflictReviewSnapshot((previous) => {
+      if (!activeDeck?.id) return previous.length ? [] : previous;
+      if (previous.some((conflict) => conflict.deckId !== activeDeck.id)) return activeSyncConflicts.length ? activeSyncConflicts : [];
+      if (!activeSyncConflicts.length) {
+        return retainConflictReviewSnapshot.current || !previous.length ? previous : [];
+      }
+
       const previousIds = new Set(previous.map((conflict) => conflict.id));
       const isResolutionShrink = previous.length > 0 &&
         activeSyncConflicts.length < previous.length &&
@@ -693,7 +703,7 @@ export default function App() {
 
       return isResolutionShrink ? previous : activeSyncConflicts;
     });
-  }, [activeSyncConflicts]);
+  }, [activeDeck?.id, activeSyncConflicts]);
   const syncHealth = useMemo(() => deriveSyncHealth({
     activeDeck,
     addonPackage,
@@ -718,8 +728,8 @@ export default function App() {
     setBusy(true);
     try {
       const result = await task;
-      if (map) setState(map(result));
-      else if (result && typeof result === 'object' && 'decks' in result) setState(result as unknown as AppState);
+      if (map) applyAuthoritativeState(map(result));
+      else if (result && typeof result === 'object' && 'decks' in result) applyAuthoritativeState(result as unknown as AppState);
       pushToast(success, 'success');
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Something went wrong', 'error');
@@ -730,7 +740,7 @@ export default function App() {
 
   async function refreshState() {
     const next = await api.state();
-    setState(next);
+    applyAuthoritativeState(next);
     return next;
   }
 
@@ -762,6 +772,8 @@ export default function App() {
     setSelectedSuggestionId(null);
     setSelectedCardId(null);
     setSelectedSuggestionIds(new Set());
+    retainConflictReviewSnapshot.current = false;
+    setConflictReviewSnapshot([]);
     refreshWith(api.session({ activeDeckId: deckId }), 'Deck switched');
   }
 
@@ -932,7 +944,7 @@ export default function App() {
       anchor.click();
       URL.revokeObjectURL(url);
       const next = await api.state();
-      setState(next);
+      applyAuthoritativeState(next);
       pushToast(`Exported ${filename}`, 'success');
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Export failed', 'error');
@@ -1107,7 +1119,7 @@ export default function App() {
             onFork={(deckId, name) => {
               setTopView('workspace');
               pushToast(`Forked "${name}" into your workspace`, 'success');
-              api.state().then(setState).catch(() => undefined);
+              api.state().then(applyAuthoritativeState).catch(() => undefined);
             }}
           />
         </section>
@@ -1119,7 +1131,7 @@ export default function App() {
             onUse={(deckId, name) => {
               setTopView('workspace');
               pushToast(`Created "${name}" from template`, 'success');
-              api.state().then(setState).catch(() => undefined);
+              api.state().then(applyAuthoritativeState).catch(() => undefined);
             }}
           />
         </section>
@@ -1276,6 +1288,7 @@ export default function App() {
                 conflicts={conflictReviewSnapshot}
                 pendingConflictIds={pendingConflictIds}
                 onResolve={(conflictId, resolution) => {
+                  retainConflictReviewSnapshot.current = true;
                   setState(prev => prev ? {
                     ...prev,
                     sync: {
