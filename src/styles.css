@@ -2654,28 +2654,42 @@ button:disabled {
 
 .table-row.editing { display: block; padding: 0; cursor: default; background: var(--bg-card, #fff); }
 
-.card-editor { padding: 16px; border: 2px solid var(--color-primary, #4f46e5); border-radius: 8px; background: var(--bg-card, #fff); }
+.card-editor {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 16px;
+  border: 2px solid var(--color-primary, #4f46e5);
+  border-radius: 8px;
+  background: var(--bg-card, #fff);
+}
 
-.card-editor-header { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
-.card-editor-header strong { flex: 1; font-size: 0.95rem; }
-.card-editor-hint { font-size: 0.78rem; color: var(--text-muted, #888); }
-.card-editor-close { margin-left: auto; }
+.card-editor-header { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; min-width: 0; }
+.card-editor-header strong { flex: 1; min-width: 0; font-size: 0.95rem; overflow-wrap: anywhere; }
+.card-editor-hint { min-width: 0; font-size: 0.78rem; color: var(--text-muted, #888); overflow-wrap: anywhere; }
+.card-editor-close { min-width: 44px; min-height: 44px; margin-left: auto; justify-content: center; }
 
 .card-editor-fields { display: flex; flex-direction: column; gap: 12px; }
 
+.card-editor-field { min-width: 0; }
 .card-editor-field label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--text-secondary, #555); margin-bottom: 4px; }
 .card-editor-field label small { font-weight: 400; color: var(--text-muted, #888); }
 
 .format-toolbar {
   display: flex;
   gap: 4px;
+  max-width: 100%;
   padding: 4px 8px;
   background: var(--surface-2, #f3f4f6);
   border-radius: 6px 6px 0 0;
   border: 1px solid var(--border, #e5e7eb);
   border-bottom: none;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
 }
 .format-toolbar button {
+  flex: 0 0 auto;
+  min-width: 36px;
+  min-height: 36px;
   background: none;
   border: none;
   cursor: pointer;
@@ -2709,26 +2723,30 @@ button:disabled {
 
 .card-editor-error { font-size: 0.82rem; color: var(--color-error, #dc2626); background: var(--bg-error, #fef2f2); border: 1px solid var(--border-error, #fecaca); border-radius: 6px; padding: 7px 10px; margin-top: 10px; }
 
-.card-editor-footer { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.card-editor-footer { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; min-width: 0; }
 .card-editor-chars { font-size: 0.75rem; color: var(--text-muted, #888); }
-.card-editor-shortcuts { font-size: 0.75rem; color: var(--text-muted, #888); flex: 1; }
-.card-editor-actions { display: flex; gap: 8px; margin-left: auto; }
+.card-editor-shortcuts { min-width: 0; font-size: 0.75rem; color: var(--text-muted, #888); flex: 1; overflow-wrap: anywhere; }
+.card-editor-actions { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.card-editor-actions .btn { min-height: 44px; justify-content: center; }
 
 /* ─── Study View ──────────────────────────────────────────────────────────── */
 
 .study-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1100; padding: 16px; overflow-y: auto; }
 
-.study-panel { background: var(--bg-card, #fff); border-radius: 14px; box-shadow: 0 32px 80px rgba(0,0,0,0.25); width: min(100%, 640px); max-width: 640px; max-height: calc(100vh - 32px); padding: 28px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; }
+.study-panel { box-sizing: border-box; min-width: 0; background: var(--bg-card, #fff); border-radius: 14px; box-shadow: 0 32px 80px rgba(0,0,0,0.25); width: min(100%, 640px); max-width: 640px; max-height: calc(100vh - 32px); padding: 28px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; }
 
 .study-header { display: flex; flex-direction: column; gap: 6px; }
 
 .study-progress-bar { height: 4px; background: var(--bg-secondary, #f0f0f0); border-radius: 99px; overflow: hidden; }
 .study-progress-fill { height: 100%; background: var(--color-primary, #4f46e5); border-radius: 99px; transition: width 0.3s; }
 
-.study-meta { display: flex; align-items: center; gap: 12px; font-size: 0.82rem; color: var(--text-muted, #888); flex-wrap: wrap; }
-.study-close { margin-left: auto; font-size: 1rem; }
+.study-meta { display: flex; align-items: center; gap: 12px; font-size: 0.82rem; color: var(--text-muted, #888); flex-wrap: wrap; min-width: 0; }
+.study-meta span { min-width: 0; overflow-wrap: anywhere; }
+.study-close { min-width: 44px; min-height: 44px; margin-left: auto; font-size: 1rem; justify-content: center; }
 
 .study-card {
+  box-sizing: border-box;
+  min-width: 0;
   min-height: 200px;
   border: 2px solid var(--border, #e5e7eb);
   border-radius: 12px;
@@ -2739,6 +2757,7 @@ button:disabled {
   flex-direction: column;
   gap: 16px;
   user-select: none;
+  overflow-wrap: anywhere;
 }
 .study-card:hover { border-color: var(--color-primary, #4f46e5); box-shadow: 0 4px 16px rgba(79,70,229,0.1); }
 .study-card:focus-visible {
@@ -2748,14 +2767,20 @@ button:disabled {
 }
 .study-card.flipped { cursor: default; }
 
-.study-card-content { font-size: 1.1rem; line-height: 1.6; }
+.study-card-content { min-width: 0; font-size: 1.1rem; line-height: 1.6; overflow-wrap: anywhere; }
+.study-card-content img,
+.study-card-content video,
+.study-card-content audio {
+  max-width: 100%;
+}
 .study-flip-hint { font-size: 0.78rem; color: var(--text-muted, #aaa); margin-top: auto; }
 .study-divider { border: none; border-top: 1px solid var(--border, #e5e7eb); margin: 0; }
 
 .study-rating-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
 .study-rating-placeholder { color: var(--text-muted, #aaa); font-size: 0.85rem; justify-content: center; align-items: center; min-height: 48px; }
 
-.study-rate-btn { flex: 1 1 86px; flex-direction: column; gap: 2px; padding: 10px; border-radius: 9px; border: 2px solid transparent; font-size: 0.85rem; min-width: 0; }
+.study-rate-btn { flex: 1 1 86px; flex-direction: column; gap: 2px; min-height: 52px; padding: 10px; border-radius: 9px; border: 2px solid transparent; font-size: 0.85rem; min-width: 0; justify-content: center; }
+.study-rate-btn .rate-label { max-width: 100%; overflow-wrap: anywhere; }
 .study-rate-btn kbd { font-size: 0.72rem; opacity: 0.6; }
 .study-skip { flex: 0 1 86px; }
 .study-rate-btn:focus-visible,
@@ -2782,19 +2807,23 @@ button:disabled {
 .stat-value { font-size: 1.6rem; font-weight: 700; }
 .stat-label { font-size: 0.78rem; color: var(--text-muted, #888); }
 .study-rating-breakdown { display: flex; gap: 12px; font-size: 0.82rem; flex-wrap: wrap; justify-content: center; }
+.study-rating-breakdown span { min-width: 0; overflow-wrap: anywhere; }
 .study-empty-msg { font-size: 0.88rem; color: var(--text-muted, #888); }
 
 @media (max-width: 640px) {
   .study-overlay { align-items: stretch; justify-content: stretch; padding: 0; }
   .study-panel { width: 100%; max-width: none; max-height: none; min-height: 100vh; border-radius: 0; padding: 18px; gap: 16px; }
-  .study-meta { gap: 8px; font-size: 0.78rem; }
-  .study-close { margin-left: 0; }
+  .study-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 8px; font-size: 0.78rem; }
+  .study-close { grid-column: 1 / -1; justify-self: end; margin-left: 0; }
   .study-card { min-height: 180px; padding: 20px; }
   .study-card-content { font-size: 1rem; line-height: 1.5; overflow-wrap: anywhere; }
   .study-rating-row { gap: 8px; justify-content: stretch; }
   .study-rate-btn { flex-basis: calc(50% - 4px); }
   .study-skip { flex-basis: 100%; }
   .study-stats-grid { grid-template-columns: 1fr; }
+  .study-rating-breakdown { align-items: stretch; flex-direction: column; width: 100%; }
+  .study-rating-breakdown span { text-align: center; }
+  .study-rating-placeholder { align-items: stretch; flex-direction: column; text-align: center; }
 }
 
 /* ─── Suggestion Discussion ───────────────────────────────────────────────── */
@@ -3033,6 +3062,12 @@ button:disabled {
   background: #fff;
 }
 
+.conflict-controls > *,
+.conflict-diff,
+.conflict-field {
+  min-width: 0;
+}
+
 .conflict-controls label {
   display: grid;
   gap: 4px;
@@ -3044,6 +3079,7 @@ button:disabled {
 }
 
 .conflict-controls select {
+  width: 100%;
   min-height: 36px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -3092,12 +3128,14 @@ button:disabled {
 }
 
 .conflict-side {
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 8px 12px;
   font-size: 13px;
   line-height: 1.45;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .conflict-side small {
@@ -3144,6 +3182,13 @@ button:disabled {
   background: #f8fafc;
 }
 
+.conflict-actions .button,
+.conflict-empty-actions .button,
+.conflict-controls .button {
+  min-height: 44px;
+  justify-content: center;
+}
+
 .conflict-actions button:focus-visible {
   outline: 2px solid var(--color-primary, #4f46e5);
   outline-offset: 2px;
@@ -3171,6 +3216,56 @@ button:disabled {
 }
 
 @media (max-width: 760px) {
+  .card-table {
+    min-width: 0;
+  }
+
+  .table-row.editing {
+    margin-inline: -12px;
+  }
+
+  .card-editor {
+    border-right: 0;
+    border-left: 0;
+    border-radius: 0;
+    padding: 14px;
+  }
+
+  .card-editor-header,
+  .card-editor-footer,
+  .card-editor-actions,
+  .bulk-toolbar,
+  .bulk-tag-form,
+  .bulk-confirm {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .card-editor-close {
+    align-self: flex-end;
+  }
+
+  .card-editor-actions,
+  .card-editor-actions .btn,
+  .bulk-toolbar .button,
+  .bulk-tag-input {
+    width: 100%;
+  }
+
+  .card-editor-shortcuts {
+    flex: none;
+  }
+
+  .format-toolbar {
+    padding-inline: 6px;
+  }
+
+  .format-toolbar button,
+  .bulk-tag-input,
+  .conflict-controls select {
+    min-height: 44px;
+  }
+
   .conflict-header,
   .conflict-controls,
   .conflict-field {
@@ -3186,11 +3281,27 @@ button:disabled {
     align-items: stretch;
   }
 
+  .conflict-diff {
+    gap: 10px;
+    padding: 12px;
+  }
+
   .conflict-controls .button,
   .conflict-actions .button,
   .conflict-empty-actions .button {
     justify-content: center;
     width: 100%;
+  }
+
+  .conflict-control-summary {
+    justify-content: center;
+    white-space: normal;
+  }
+
+  .conflict-actions,
+  .conflict-empty-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .conflict-field-label {
