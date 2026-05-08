@@ -334,7 +334,8 @@
 }
 
 [data-theme="dark"] .conflict-header,
-[data-theme="dark"] .conflict-actions {
+[data-theme="dark"] .conflict-actions,
+[data-theme="dark"] .conflict-controls {
   background: var(--bg-secondary);
   border-color: var(--border);
 }
@@ -342,6 +343,18 @@
 [data-theme="dark"] .conflict-panel {
   background: var(--bg-card);
   border-color: var(--border);
+}
+
+[data-theme="dark"] .conflict-controls select {
+  background: var(--bg-card);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .conflict-control-summary strong,
+[data-theme="dark"] .conflict-empty strong,
+[data-theme="dark"] .conflict-header strong {
+  color: var(--text-primary);
 }
 
 [data-theme="dark"] .settings-field select,
@@ -2923,9 +2936,14 @@ button:disabled {
   padding: 14px 16px;
   border-bottom: 1px solid var(--line);
   display: flex;
+  gap: 12px;
   justify-content: space-between;
   align-items: center;
   background: #f8fafc;
+}
+
+.conflict-header-stacked {
+  align-items: flex-start;
 }
 
 .conflict-header strong {
@@ -2949,6 +2967,67 @@ button:disabled {
   font-size: 11px;
   font-weight: 800;
   border: 1px solid #ffd780;
+}
+
+.conflict-decision {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 3px 8px;
+  border-radius: 99px;
+  background: #ecfdf5;
+  color: #137449;
+  font-size: 11px;
+  font-weight: 800;
+  border: 1px solid #bde7ca;
+  text-transform: capitalize;
+}
+
+.conflict-controls {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  gap: 12px;
+  align-items: end;
+  background: #fff;
+}
+
+.conflict-controls label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.conflict-controls select {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: #172033;
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.conflict-control-summary {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.conflict-control-summary strong {
+  color: #172033;
 }
 
 .conflict-diff {
@@ -3019,8 +3098,57 @@ button:disabled {
   padding: 12px 16px;
   border-top: 1px solid var(--line);
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   background: #f8fafc;
+}
+
+.conflict-empty {
+  padding: 18px 16px;
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.conflict-empty strong {
+  color: #172033;
+  font-size: 14px;
+}
+
+.conflict-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+@media (max-width: 760px) {
+  .conflict-header,
+  .conflict-controls,
+  .conflict-field {
+    grid-template-columns: 1fr;
+  }
+
+  .conflict-header {
+    display: grid;
+    align-items: start;
+  }
+
+  .conflict-controls {
+    align-items: stretch;
+  }
+
+  .conflict-controls .button,
+  .conflict-actions .button,
+  .conflict-empty-actions .button {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .conflict-field-label {
+    padding-top: 0;
+  }
 }
 
 /* ─── Activity Timeline ────────────────────────────────────────────────────── */
