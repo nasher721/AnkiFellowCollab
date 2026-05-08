@@ -15,6 +15,7 @@ export function cleanText(value, fallback = '', maxLength = 4000) {
 
 const MAX_ADDON_MEDIA_ASSETS = 300;
 const MAX_ADDON_MEDIA_BYTES = 5 * 1024 * 1024;
+const MAX_ADDON_STORAGE_MEDIA_BYTES = 100 * 1024 * 1024;
 const SAFE_MEDIA_MIME_TYPES = new Set([
   'image/png',
   'image/jpeg',
@@ -134,6 +135,17 @@ function isSafeMediaFilename(value) {
   );
 }
 
+function cleanSha256(value) {
+  const sha256 = cleanText(value, '', 128).toLowerCase();
+  return /^[a-f0-9]{64}$/.test(sha256) ? sha256 : '';
+}
+
+function cleanPositiveInteger(value, maxValue) {
+  const parsed = Math.trunc(Number(value));
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.min(parsed, maxValue);
+}
+
 function normalizeBase64(value) {
   const compact = String(value || '').replace(/\s+/g, '');
   return compact.replace(/=+$/g, '');
@@ -147,6 +159,23 @@ function normalizeAddonMedia(media) {
     const asset = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
     const filename = cleanText(asset.filename || key, '', 240);
     if (!isSafeMediaFilename(filename)) continue;
+    const mimeType = safeMediaMimeType(asset.mimeType || asset.mime);
+    const sizeBytes = cleanPositiveInteger(asset.sizeBytes || asset.size, MAX_ADDON_STORAGE_MEDIA_BYTES);
+    const storagePath = cleanText(asset.storagePath, '', 600);
+    const storageBucket = cleanText(asset.storageBucket || asset.bucket, '', 120);
+    const storageSha256 = cleanSha256(asset.sha256 || asset.sha);
+    if (storagePath && storageSha256 && sizeBytes) {
+      normalized[filename] = {
+        filename,
+        mimeType,
+        sha256: storageSha256,
+        sizeBytes,
+        storagePath,
+        ...(storageBucket ? { storageBucket } : {})
+      };
+      continue;
+    }
+
     const rawBase64 = String(asset.dataBase64 || asset.base64 || '').replace(/\s+/g, '');
     if (!rawBase64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(rawBase64)) continue;
     let bytes;
@@ -163,12 +192,33 @@ function normalizeAddonMedia(media) {
     if (providedSha256 && providedSha256 !== computedSha256) continue;
     normalized[filename] = {
       filename,
-      mimeType: safeMediaMimeType(asset.mimeType || asset.mime),
+      mimeType,
       sha256: computedSha256,
+      sizeBytes: bytes.length,
       dataBase64: encoded
     };
   }
   return normalized;
+}
+
+export function normalizeMediaUploadFiles(files = []) {
+  if (!Array.isArray(files)) return [];
+  return files
+    .slice(0, MAX_ADDON_MEDIA_ASSETS)
+    .map((file) => {
+      const asset = file && typeof file === 'object' && !Array.isArray(file) ? file : {};
+      const filename = cleanText(asset.filename, '', 240);
+      const sha256 = cleanSha256(asset.sha256 || asset.sha);
+      const sizeBytes = cleanPositiveInteger(asset.sizeBytes || asset.size, MAX_ADDON_STORAGE_MEDIA_BYTES);
+      if (!isSafeMediaFilename(filename) || !sha256 || !sizeBytes) return null;
+      return {
+        filename,
+        mimeType: safeMediaMimeType(asset.mimeType || asset.mime),
+        sha256,
+        sizeBytes
+      };
+    })
+    .filter(Boolean);
 }
 
 function normalizeAddonCard(card, index) {

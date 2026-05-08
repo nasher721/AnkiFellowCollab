@@ -8,6 +8,7 @@ import {
   mergeAddonCards,
   normalizeAddonDeckCreateInput,
   normalizeAddonSyncInput,
+  normalizeMediaUploadFiles,
   normalizeSuggestionInput,
   normalizeParsedDeck,
   summarizeDeck
@@ -105,6 +106,44 @@ test('normalizes add-on sync media payloads and bounds asset count', () => {
   assert.equal(input.media['image.png'].dataBase64, bytes.toString('base64'));
   assert.equal(input.media['skip.txt'], undefined);
   assert.equal(Object.keys(input.media).length <= 300, true);
+});
+
+test('normalizes add-on sync media uploaded through storage metadata', () => {
+  const sha = 'a'.repeat(64);
+  const input = normalizeAddonSyncInput({
+    cards: [{ id: 'anki-storage-1', fields: { Front: '<img src="large.png">' }, mediaRefs: ['large.png'] }],
+    media: {
+      'large.png': {
+        filename: 'large.png',
+        mimeType: 'image/png',
+        sha256: sha,
+        sizeBytes: 12_000_000,
+        storageBucket: 'deckbridge-media',
+        storagePath: `deck-demo-zanki/${sha}/large.png`
+      }
+    }
+  });
+
+  assert.equal(input.media['large.png'].sha256, sha);
+  assert.equal(input.media['large.png'].sizeBytes, 12_000_000);
+  assert.equal(input.media['large.png'].storageBucket, 'deckbridge-media');
+  assert.equal(input.media['large.png'].storagePath, `deck-demo-zanki/${sha}/large.png`);
+  assert.equal(input.media['large.png'].dataBase64, undefined);
+});
+
+test('normalizes large media upload target requests', () => {
+  const files = normalizeMediaUploadFiles([
+    { filename: 'large image.png', mimeType: 'image/png', sha256: 'b'.repeat(64), sizeBytes: 20_000_000 },
+    { filename: '../skip.png', mimeType: 'image/png', sha256: 'c'.repeat(64), sizeBytes: 20_000_000 },
+    { filename: 'bad-sha.png', mimeType: 'image/png', sha256: 'bad', sizeBytes: 20_000_000 }
+  ]);
+
+  assert.deepEqual(files, [{
+    filename: 'large image.png',
+    mimeType: 'image/png',
+    sha256: 'b'.repeat(64),
+    sizeBytes: 20_000_000
+  }]);
 });
 
 test('normalizes add-on sync media by dropping unsafe filenames and mismatched hashes', () => {

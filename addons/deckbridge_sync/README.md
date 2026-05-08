@@ -28,6 +28,7 @@ If the link omits `localDeck`, the mapping is saved with a blank local deck and 
 - Login from Anki via `/api/anki/login`, which returns a normal DeckBridge `db_` token for future syncs.
 - First push can create a DeckBridge deck from the selected local Anki deck via `/api/decks/sync/from-anki`.
 - Push current Anki notes to `/api/decks/:deckId/sync/cards` after the deck exists.
+- Large local media is uploaded through signed storage URLs before card sync, so screenshots and audio do not have to fit inside the normal JSON sync request.
 - Pull DeckBridge cards into Anki with missing-note creation.
 - Bidirectional sync: push first, then pull only if conflicts are clear.
 - Dry-run preview before changing the platform.

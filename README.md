@@ -28,6 +28,7 @@ VITE_SUPABASE_URL=...
 VITE_SUPABASE_ANON_KEY=...
 SUPABASE_SERVICE_ROLE_KEY=...
 SUPABASE_EXPORTS_BUCKET=deckbridge-exports
+SUPABASE_MEDIA_BUCKET=deckbridge-media
 DECKBRIDGE_REPOSITORY=supabase
 ```
 
@@ -57,6 +58,7 @@ SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... npm run migrate:state
 - `POST /api/decks/:deckId/export` returns a signed/local download descriptor.
 - `POST /api/decks/:deckId/sync/conflicts` records conflicts found by a per-user local bridge.
 - `POST /api/decks/:deckId/sync/cards` lets the Anki add-on push local note snapshots into DeckBridge with either conflict detection or platform overwrite mode.
+- `POST /api/decks/:deckId/media/uploads` creates signed upload URLs for large Anki media files; the add-on uploads bytes to storage and sends small media metadata through the card sync API.
 
 ## Anki Integration
 

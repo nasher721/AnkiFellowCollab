@@ -119,6 +119,11 @@ public = false
 file_size_limit = "50MiB"
 allowed_mime_types = ["application/octet-stream"]
 
+[storage.buckets."deckbridge-media"]
+public = false
+file_size_limit = "100MiB"
+allowed_mime_types = ["image/png", "image/jpeg", "image/gif", "image/webp", "audio/mpeg", "audio/wav", "audio/ogg", "audio/mp4", "video/mp4", "application/octet-stream"]
+
 # Allow connections via S3 compatible clients
 [storage.s3_protocol]
 enabled = true

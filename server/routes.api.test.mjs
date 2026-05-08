@@ -1014,6 +1014,68 @@ test('Anki add-on sync stores unsafe media mime as octet-stream attachment', asy
   assert.deepEqual(media.body, bytes);
 });
 
+test('large media upload targets return signed storage metadata', async () => {
+  const upload = {
+    filename: 'large.png',
+    mimeType: 'image/png',
+    sha256: 'd'.repeat(64),
+    sizeBytes: 12_000_000,
+    storageBucket: 'deckbridge-media',
+    storagePath: `deck-demo-zanki/${'d'.repeat(64)}/large.png`,
+    uploadUrl: 'https://storage.example/upload/sign/large.png?token=signed',
+    expiresAt: new Date(Date.now() + 7200_000).toISOString()
+  };
+  const repository = {
+    async createMediaUploadTargets(_user, deckId, files) {
+      assert.equal(deckId, 'deck-demo-zanki');
+      assert.deepEqual(files, [{
+        filename: 'large.png',
+        mimeType: 'image/png',
+        sha256: 'd'.repeat(64),
+        sizeBytes: 12_000_000
+      }]);
+      return [upload];
+    }
+  };
+  const { app } = await createTestApp({ repository });
+
+  const response = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/media/uploads')
+    .send({ files: [{ filename: 'large.png', mimeType: 'image/png', sha256: 'd'.repeat(64), sizeBytes: 12_000_000 }] }), 'you', 'You')
+    .expect(201);
+
+  assert.deepEqual(response.body.uploads, [upload]);
+});
+
+test('storage-backed media route redirects through authenticated signed download', async () => {
+  const asset = {
+    filename: 'large.png',
+    mimeType: 'image/png',
+    sha256: 'd'.repeat(64),
+    sizeBytes: 12_000_000,
+    storageBucket: 'deckbridge-media',
+    storagePath: `deck-demo-zanki/${'d'.repeat(64)}/large.png`
+  };
+  const repository = {
+    async getDeckState(_user, deckId) {
+      assert.equal(deckId, 'deck-demo-zanki');
+      return { decks: [{ id: deckId, media: { 'large.png': asset } }] };
+    },
+    async createMediaDownload(_user, deckId, mediaAsset) {
+      assert.equal(deckId, 'deck-demo-zanki');
+      assert.deepEqual(mediaAsset, asset);
+      return { url: 'https://storage.example/signed/large.png' };
+    }
+  };
+  const { app } = await createTestApp({ repository });
+
+  const response = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/media/large.png'), 'you', 'You')
+    .expect(302);
+
+  assert.equal(response.headers.location, 'https://storage.example/signed/large.png');
+});
+
 test('Anki add-on can create the first DeckBridge workspace from a local deck', async () => {
   const { app } = await createTestApp();
 

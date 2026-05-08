@@ -154,6 +154,26 @@ function toShareLink(row) {
   };
 }
 
+function mediaBucket() {
+  return process.env.SUPABASE_MEDIA_BUCKET || 'deckbridge-media';
+}
+
+function storageFilename(filename) {
+  return String(filename || '').replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 180) || 'media.bin';
+}
+
+function storagePathForMedia(deckId, file) {
+  return `${deckId}/${file.sha256}/${storageFilename(file.filename)}`;
+}
+
+function assertDeckStoragePath(deckId, asset) {
+  const storagePath = String(asset?.storagePath || '');
+  if (!storagePath || storagePath.includes('..') || storagePath.includes('\\') || !storagePath.startsWith(`${deckId}/`)) {
+    fail(404, 'media_not_found', 'Media asset not found');
+  }
+  return storagePath;
+}
+
 function emptyState(user) {
   return {
     decks: [],
@@ -550,6 +570,44 @@ export function createSupabaseRepository(options = {}) {
       if (error) throw error;
       return {
         filename,
+        url: data.signedUrl,
+        expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString()
+      };
+    },
+
+    async createMediaUploadTargets(user, deckId, files) {
+      await assertMembership(user.id, deckId, 'editor');
+      const bucket = mediaBucket();
+      const expiresIn = 7200;
+      const uploads = [];
+      for (const file of files) {
+        const storagePath = storagePathForMedia(deckId, file);
+        const { data, error } = await supabase.storage
+          .from(bucket)
+          .createSignedUploadUrl(storagePath, { upsert: true });
+        if (error) throw error;
+        uploads.push({
+          filename: file.filename,
+          mimeType: file.mimeType,
+          sha256: file.sha256,
+          sizeBytes: file.sizeBytes,
+          storageBucket: bucket,
+          storagePath,
+          uploadUrl: data.signedUrl,
+          expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString()
+        });
+      }
+      return uploads;
+    },
+
+    async createMediaDownload(user, deckId, asset) {
+      await assertMembership(user.id, deckId, 'viewer');
+      const bucket = asset.storageBucket || mediaBucket();
+      const storagePath = assertDeckStoragePath(deckId, asset);
+      const expiresIn = Number(process.env.MEDIA_SIGNED_URL_SECONDS || 3600);
+      const { data, error } = await supabase.storage.from(bucket).createSignedUrl(storagePath, expiresIn);
+      if (error) throw error;
+      return {
         url: data.signedUrl,
         expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString()
       };

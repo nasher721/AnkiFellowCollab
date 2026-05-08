@@ -81,6 +81,7 @@ TRACKING_TAG_PREFIX = "deckbridge_card_"
 CONFIG_KEY = "deckbridge"
 DEFAULT_PLATFORM_URL = "https://anki-collab.vercel.app"
 MAX_SYNC_REQUEST_BYTES = 3_500_000
+MAX_INLINE_MEDIA_BYTES = 750_000
 LEGACY_LOCAL_PLATFORM_URLS = {
     "http://localhost:4175",
     "http://127.0.0.1:4175",
@@ -518,31 +519,133 @@ def media_dir() -> str:
         return ""
 
 
-def collect_media_payload(cards: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
-    payload: Dict[str, Dict[str, str]] = {}
+def local_media_assets(cards: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    assets: Dict[str, Dict[str, Any]] = {}
     try:
         root = media_dir()
     except Exception:
-        return payload
+        return assets
     if not root:
-        return payload
+        return assets
     for card in cards:
         for ref in card.get("mediaRefs") or []:
             filename = os.path.basename(str(ref or ""))
-            if not filename or filename in payload:
+            if not filename or filename in assets:
                 continue
+            media_path = os.path.join(root, filename)
             try:
-                with open(os.path.join(root, filename), "rb") as media_file:
-                    data = media_file.read()
+                size_bytes = os.path.getsize(media_path)
             except OSError:
                 continue
             mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-            payload[filename] = {
+            try:
+                digest = hashlib.sha256()
+                with open(media_path, "rb") as media_file:
+                    for chunk in iter(lambda: media_file.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError:
+                continue
+            assets[filename] = {
                 "filename": filename,
                 "mimeType": mime_type,
-                "sha256": hashlib.sha256(data).hexdigest(),
-                "dataBase64": base64.b64encode(data).decode("ascii"),
+                "sha256": digest.hexdigest(),
+                "sizeBytes": size_bytes,
+                "path": media_path,
             }
+    return assets
+
+
+def upload_media_file(upload_url: str, asset: Dict[str, Any]) -> None:
+    with open(str(asset["path"]), "rb") as media_file:
+        data = media_file.read()
+    request = urllib.request.Request(
+        upload_url,
+        data=data,
+        headers={
+            "Content-Type": str(asset.get("mimeType") or "application/octet-stream"),
+            "Cache-Control": "max-age=3600",
+            "x-upsert": "true",
+        },
+        method="PUT",
+    )
+    timeout = max(30, int(config().get("timeout_seconds") or 30))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read()
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"DeckBridge media upload failed for {asset['filename']}: {detail or error}") from error
+    except (urllib.error.URLError, socket.timeout) as error:
+        raise RuntimeError(f"DeckBridge media upload failed for {asset['filename']}: {error}") from error
+
+
+def upload_large_media_assets(
+    assets: Dict[str, Dict[str, Any]],
+    *,
+    cfg: Dict[str, Any],
+    deck_id: str,
+) -> Dict[str, Dict[str, Any]]:
+    large_assets = [
+        {
+            "filename": asset["filename"],
+            "mimeType": asset["mimeType"],
+            "sha256": asset["sha256"],
+            "sizeBytes": asset["sizeBytes"],
+        }
+        for asset in assets.values()
+        if int(asset.get("sizeBytes") or 0) > MAX_INLINE_MEDIA_BYTES
+    ]
+    if not large_assets or not deck_id:
+        return {}
+    response = request_json("POST", f"/api/decks/{deck_id}/media/uploads", {"files": large_assets}, cfg=cfg)
+    uploads = response.get("uploads") or []
+    uploaded: Dict[str, Dict[str, Any]] = {}
+    for upload in uploads:
+        filename = str(upload.get("filename") or "")
+        asset = assets.get(filename)
+        upload_url = str(upload.get("uploadUrl") or "")
+        if not asset or not upload_url:
+            continue
+        upload_media_file(upload_url, asset)
+        uploaded[filename] = {
+            "filename": filename,
+            "mimeType": upload.get("mimeType") or asset["mimeType"],
+            "sha256": upload.get("sha256") or asset["sha256"],
+            "sizeBytes": upload.get("sizeBytes") or asset["sizeBytes"],
+            "storageBucket": upload.get("storageBucket") or "",
+            "storagePath": upload.get("storagePath") or "",
+        }
+    return uploaded
+
+
+def collect_media_payload(
+    cards: List[Dict[str, Any]],
+    *,
+    cfg: Optional[Dict[str, Any]] = None,
+    deck_id: str = "",
+    dry_run: bool = False,
+    upload_large: bool = True,
+    include_inline: bool = True,
+) -> Dict[str, Dict[str, Any]]:
+    payload: Dict[str, Dict[str, Any]] = {}
+    assets = local_media_assets(cards)
+    for filename, asset in assets.items():
+        if not include_inline or int(asset.get("sizeBytes") or 0) > MAX_INLINE_MEDIA_BYTES:
+            continue
+        try:
+            with open(str(asset["path"]), "rb") as media_file:
+                data = media_file.read()
+        except OSError:
+            continue
+        payload[filename] = {
+            "filename": filename,
+            "mimeType": asset["mimeType"],
+            "sha256": asset["sha256"],
+            "sizeBytes": asset["sizeBytes"],
+            "dataBase64": base64.b64encode(data).decode("ascii"),
+        }
+    if upload_large and not dry_run and cfg and deck_id:
+        payload.update(upload_large_media_assets(assets, cfg=cfg, deck_id=deck_id))
     return payload
 
 
@@ -615,12 +718,23 @@ def _configured_batch_size(cfg: Dict[str, Any]) -> int:
         return DEFAULT_CONFIG["batch_size"]
 
 
-def sync_payload_chunks(cards: List[Dict[str, Any]], *, dry_run: bool, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+def sync_payload_chunks(
+    cards: List[Dict[str, Any]],
+    *,
+    dry_run: bool,
+    cfg: Dict[str, Any],
+    media: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     if not cards:
         raise RuntimeError("No Anki notes matched the selected deck/filter.")
 
     max_cards = _configured_batch_size(cfg)
-    media = collect_media_payload(cards)
+    media = media if media is not None else collect_media_payload(
+        cards,
+        cfg=cfg,
+        deck_id=str(cfg.get("deck_id", "") or "").strip(),
+        dry_run=dry_run,
+    )
 
     def media_for(chunk: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
         refs = {ref for card in chunk for ref in (card.get("mediaRefs") or [])}
@@ -700,7 +814,8 @@ def _visible_deck_ids(me: Dict[str, Any]) -> set[str]:
 
 def create_platform_deck_from_anki(cfg: Optional[Dict[str, Any]] = None, cards: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     cfg = cfg or config()
-    payloads = sync_payload_chunks(cards or collect_cards(), dry_run=False, cfg=cfg)
+    source_cards = cards or collect_cards()
+    payloads = sync_payload_chunks(source_cards, dry_run=False, cfg=cfg)
     created = request_json("POST", "/api/decks/sync/from-anki", payloads[0], cfg=cfg)
     new_deck_id = str((created.get("deck") or {}).get("id") or created.get("state", {}).get("activeDeckId") or "").strip()
     if not new_deck_id:
@@ -710,6 +825,17 @@ def create_platform_deck_from_anki(cfg: Optional[Dict[str, Any]] = None, cards: 
     responses = [created]
     for payload in payloads[1:]:
         responses.append(request_json("POST", f"/api/decks/{new_deck_id}/sync/cards", payload, cfg=next_config))
+    large_media = collect_media_payload(
+        source_cards,
+        cfg=next_config,
+        deck_id=new_deck_id,
+        dry_run=False,
+        upload_large=True,
+        include_inline=False,
+    )
+    if large_media:
+        for payload in sync_payload_chunks(source_cards, dry_run=False, cfg=next_config, media=large_media):
+            request_json("POST", f"/api/decks/{new_deck_id}/sync/cards", payload, cfg=next_config)
     return combine_sync_responses(responses)
 
 

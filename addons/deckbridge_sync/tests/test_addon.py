@@ -283,6 +283,42 @@ class TestMediaSync(unittest.TestCase):
         self.assertEqual(payload['image.png']['sha256'], 'ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56')
         self.assertEqual(payload['image.png']['dataBase64'], 'cG5nLWJ5dGVz')
 
+    @patch('deckbridge_sync.upload_media_file')
+    @patch('deckbridge_sync.request_json')
+    @patch('deckbridge_sync.media_dir')
+    def test_collect_media_payload_uploads_large_media_file(self, mock_media_dir, mock_request, mock_upload):
+        with tempfile.TemporaryDirectory() as media_root:
+            mock_media_dir.return_value = media_root
+            image_path = os.path.join(media_root, 'large.png')
+            with open(image_path, 'wb') as image_file:
+                image_file.write(b'x' * 800_000)
+
+            expected_sha = 'cafb091ba391cae6f99dac0e615c4b76614b5bf6d8c33c70f5569b75bf8c3218'
+            mock_request.return_value = {
+                'uploads': [{
+                    'filename': 'large.png',
+                    'mimeType': 'image/png',
+                    'sha256': expected_sha,
+                    'sizeBytes': 800_000,
+                    'storageBucket': 'deckbridge-media',
+                    'storagePath': f'deck-1/{expected_sha}/large.png',
+                    'uploadUrl': 'https://storage.example/upload/sign/large.png?token=signed',
+                }]
+            }
+
+            payload = collect_media_payload(
+                [{'id': 'anki-1', 'mediaRefs': ['large.png']}],
+                cfg={**DEFAULT_CONFIG, 'deck_id': 'deck-1'},
+                deck_id='deck-1',
+                dry_run=False,
+            )
+
+        mock_request.assert_called_once()
+        mock_upload.assert_called_once()
+        self.assertEqual(payload['large.png']['storageBucket'], 'deckbridge-media')
+        self.assertEqual(payload['large.png']['storagePath'], f'deck-1/{expected_sha}/large.png')
+        self.assertNotIn('dataBase64', payload['large.png'])
+
     @patch('deckbridge_sync.media_dir', side_effect=RuntimeError('media unavailable'))
     def test_collect_media_payload_skips_inaccessible_media_dir(self, _mock_media_dir):
         self.assertEqual(collect_media_payload([{'id': 'anki-1', 'mediaRefs': ['image.png']}]), {})

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { createClient } from '@supabase/supabase-js';
 import { createAuth } from './auth.mjs';
 import { requireContributor, requireEditor, requireOwner, requireReviewer, resolveSuggestionDeck } from './rbac.mjs';
-import { deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeParsedDeck, normalizeSuggestionInput, safeMediaMimeType } from './domain.mjs';
+import { deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeMediaUploadFiles, normalizeParsedDeck, normalizeSuggestionInput, safeMediaMimeType } from './domain.mjs';
 import { AppError, errorPayload, fail } from './errors.mjs';
 import { checkAnki, pullDeck, pushDeck } from './ankiConnect.mjs';
 import { createApkg, parseApkg } from './ankiPackage.mjs';
@@ -272,6 +272,7 @@ export function createApp(options = {}) {
     }
   }));
   app.use('/api/decks/upload', rateLimiters.upload);
+  app.use('/api/decks/:deckId/media/uploads', rateLimiters.upload);
   app.use('/api/decks/:deckId/sync/cards', rateLimiters.sync);
   app.use('/api/decks/:deckId/analytics', rateLimiters.analytics);
   app.use('/api/notifications', rateLimiters.read);
@@ -827,8 +828,14 @@ export function createApp(options = {}) {
       const deckState = await repository.getDeckState(req.user, deckId);
       const deck = deckState.decks[0];
       const asset = deck?.media?.[filename];
-      if (!asset?.dataBase64) fail(404, 'media_not_found', 'Media asset not found');
+      if (!asset?.dataBase64 && !asset?.storagePath) fail(404, 'media_not_found', 'Media asset not found');
       const mimeType = safeMediaMimeType(asset.mimeType);
+      if (asset.storagePath) {
+        if (!repository.createMediaDownload) fail(404, 'media_not_found', 'Media asset not found');
+        const download = await repository.createMediaDownload(req.user, deckId, asset);
+        res.redirect(302, download.url);
+        return;
+      }
       const headers = {
         'Content-Type': mimeType,
         'Cache-Control': 'private, max-age=3600',
@@ -841,6 +848,20 @@ export function createApp(options = {}) {
         ...headers
       });
       res.send(Buffer.from(asset.dataBase64, 'base64'));
+    } catch (err) { next(err); }
+  });
+
+  app.post('/api/decks/:deckId/media/uploads', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.createMediaUploadTargets) {
+        fail(501, 'media_upload_unavailable', 'Large media upload is not available for this repository');
+      }
+      const files = normalizeMediaUploadFiles(req.body.files);
+      if (!files.length) fail(400, 'invalid_media_upload', 'At least one valid media file is required');
+      res.status(201).json({
+        uploads: await repository.createMediaUploadTargets(req.user, deckId, files)
+      });
     } catch (err) { next(err); }
   });
 
