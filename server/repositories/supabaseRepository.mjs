@@ -839,16 +839,17 @@ export function createSupabaseRepository(options = {}) {
         if (deckError) throw deckError;
       }
 
-      return {
+      const response = {
         result: {
           syncedAt: result.syncedAt,
           source: lastAddonSync.source,
           client: lastAddonSync.client,
           stats: result.stats,
           conflicts: result.conflicts
-        },
-        state: await getDeckRows(user, deck.id)
+        }
       };
+      if (syncInput.returnState !== false) response.state = await getDeckRows(user, deck.id);
+      return response;
     }
   };
 }

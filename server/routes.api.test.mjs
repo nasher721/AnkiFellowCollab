@@ -881,6 +881,22 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
   assert.equal(dryRun.body.state.sync.lastAddonSync.stats.dryRun, true);
   assert.equal(dryRun.body.state.sync.lastAddonSync.source, 'DeckBridge Sync preview');
 
+  const lightweight = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      returnState: false,
+      conflictPolicy: 'overwrite-platform',
+      source: 'DeckBridge Sync lightweight response',
+      cards: [{
+        id: 'anki-9002',
+        ankiNoteId: 9002,
+        fields: { Front: 'Large-note sync should not echo deck state', Back: 'Only return the sync result.' }
+      }]
+    }), 'you', 'You').expect(200);
+
+  assert.equal(lightweight.body.result.stats.created, 1);
+  assert.equal('state' in lightweight.body, false);
+
   const batchId = 'test-batch-1';
   await asUser(request(app)
     .post('/api/decks/deck-demo-zanki/sync/cards')

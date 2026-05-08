@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { inflateSync } from 'node:zlib';
 
 export const nowIso = () => new Date().toISOString();
 
@@ -16,6 +17,7 @@ export function cleanText(value, fallback = '', maxLength = 4000) {
 const MAX_ADDON_MEDIA_ASSETS = 300;
 const MAX_ADDON_MEDIA_BYTES = 5 * 1024 * 1024;
 const MAX_ADDON_STORAGE_MEDIA_BYTES = 100 * 1024 * 1024;
+const MAX_ADDON_FIELD_BYTES = 20 * 1024 * 1024;
 const SAFE_MEDIA_MIME_TYPES = new Set([
   'image/png',
   'image/jpeg',
@@ -120,9 +122,52 @@ function cleanFields(fields) {
   return Object.fromEntries(
     Object.entries(fields)
       .slice(0, 80)
-      .map(([key, value]) => [cleanText(key, '', 120), cleanText(value, '', 12000)])
+      .map(([key, value]) => [cleanText(key, '', 120), cleanText(value, '', MAX_ADDON_FIELD_BYTES)])
       .filter(([key]) => key)
   );
+}
+
+function decodeCompressedField(fieldName, payload = {}) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  if (payload.encoding !== 'zlib+base64') return null;
+  const rawBase64 = String(payload.data || '').replace(/\s+/g, '');
+  if (!rawBase64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(rawBase64)) return null;
+  const compressed = Buffer.from(rawBase64, 'base64');
+  if (!compressed.length || compressed.length > MAX_ADDON_FIELD_BYTES) {
+    throw new Error(`Compressed field ${fieldName} is too large`);
+  }
+
+  let inflated;
+  try {
+    inflated = inflateSync(compressed, { maxOutputLength: MAX_ADDON_FIELD_BYTES });
+  } catch {
+    throw new Error(`Compressed field ${fieldName} could not be decoded`);
+  }
+  const expectedBytes = Number(payload.originalBytes);
+  if (Number.isFinite(expectedBytes) && expectedBytes > 0 && inflated.byteLength !== expectedBytes) {
+    throw new Error(`Compressed field ${fieldName} failed size verification`);
+  }
+  const expectedSha256 = cleanSha256(payload.sha256 || payload.sha);
+  if (expectedSha256 && createHash('sha256').update(inflated).digest('hex') !== expectedSha256) {
+    throw new Error(`Compressed field ${fieldName} failed checksum verification`);
+  }
+  return inflated.toString('utf8');
+}
+
+function expandedAddonFields(card = {}) {
+  const fields = card.fields && typeof card.fields === 'object' && !Array.isArray(card.fields)
+    ? { ...card.fields }
+    : {};
+  const compressedFields = card.compressedFields && typeof card.compressedFields === 'object' && !Array.isArray(card.compressedFields)
+    ? card.compressedFields
+    : {};
+  for (const [rawName, payload] of Object.entries(compressedFields).slice(0, 80)) {
+    const fieldName = cleanText(rawName, '', 120);
+    if (!fieldName) continue;
+    const decoded = decodeCompressedField(fieldName, payload);
+    if (decoded !== null) fields[fieldName] = decoded;
+  }
+  return fields;
 }
 
 function isSafeMediaFilename(value) {
@@ -222,7 +267,7 @@ export function normalizeMediaUploadFiles(files = []) {
 }
 
 function normalizeAddonCard(card, index) {
-  const fields = cleanFields(card.fields);
+  const fields = cleanFields(expandedAddonFields(card));
   if (!Object.keys(fields).length) {
     throw new Error(`Sync card ${index + 1} must include fields`);
   }
@@ -275,6 +320,7 @@ export function normalizeAddonSyncInput(body = {}) {
     dryRun: Boolean(body.dryRun),
     allowCreate: body.allowCreate !== false,
     conflictPolicy,
+    returnState: body.returnState !== false,
     source: cleanText(body.source, 'DeckBridge Anki add-on', 120),
     client: body.client && typeof body.client === 'object' ? {
       name: cleanText(body.client.name, 'DeckBridge Anki add-on', 120),

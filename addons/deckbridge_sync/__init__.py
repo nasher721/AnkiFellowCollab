@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from typing import Any, Dict, Iterable, List, Optional
 
 try:
@@ -82,6 +83,7 @@ CONFIG_KEY = "deckbridge"
 DEFAULT_PLATFORM_URL = "https://anki-collab.vercel.app"
 MAX_SYNC_REQUEST_BYTES = 3_500_000
 MAX_INLINE_MEDIA_BYTES = 750_000
+COMPRESS_FIELD_AFTER_BYTES = 64_000
 LEGACY_LOCAL_PLATFORM_URLS = {
     "http://localhost:4175",
     "http://127.0.0.1:4175",
@@ -512,6 +514,41 @@ def media_refs_from_fields(fields: Dict[str, str]) -> List[str]:
     return refs
 
 
+def _compressed_field_payload(value: str) -> Optional[Dict[str, Any]]:
+    raw = str(value or "").encode("utf-8")
+    if len(raw) < COMPRESS_FIELD_AFTER_BYTES:
+        return None
+    compressed = zlib.compress(raw, 9)
+    encoded = base64.b64encode(compressed).decode("ascii")
+    if len(encoded) + 240 >= len(raw):
+        return None
+    return {
+        "encoding": "zlib+base64",
+        "data": encoded,
+        "originalBytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def compress_large_card_fields(card: Dict[str, Any]) -> Dict[str, Any]:
+    fields = card.get("fields") or {}
+    if not isinstance(fields, dict):
+        return card
+    next_fields: Dict[str, str] = {}
+    compressed_fields: Dict[str, Dict[str, Any]] = {}
+    for name, value in fields.items():
+        text = str(value or "")
+        compressed = _compressed_field_payload(text)
+        if compressed:
+            next_fields[str(name)] = ""
+            compressed_fields[str(name)] = compressed
+        else:
+            next_fields[str(name)] = text
+    if not compressed_fields:
+        return card
+    return {**card, "fields": next_fields, "compressedFields": compressed_fields}
+
+
 def media_dir() -> str:
     try:
         return str(mw.col.media.dir())
@@ -688,12 +725,13 @@ def sync_payload(
     cfg = config()
     deck_name = active_local_deck()
     payload = {
-        "cards": collect_cards() if cards is None else cards,
+        "cards": [compress_large_card_fields(card) for card in (collect_cards() if cards is None else cards)],
         "deckName": deck_name,
         "deckPath": deck_name,
         "dryRun": dry_run,
         "allowCreate": True,
         "conflictPolicy": cfg.get("conflict_policy", "detect"),
+        "returnState": False,
         "source": ADDON_NAME,
         "client": {
             "name": ADDON_NAME,

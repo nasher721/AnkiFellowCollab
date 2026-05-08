@@ -469,15 +469,16 @@ export function createApp(options = {}) {
       if (!repository.uploadDeck) fail(501, 'deck_create_unavailable', 'Deck creation is not available for this repository');
       const { deck, result } = normalizeAddonDeckCreateInput(req.body, req.user);
       const state = await repository.uploadDeck(req.user, deck);
-      res.status(201).json({
+      const response = {
         deck: {
           id: deck.id,
           name: deck.name,
           cardCount: deck.cards.length
         },
-        result,
-        state
-      });
+        result
+      };
+      if (req.body?.returnState !== false) response.state = state;
+      res.status(201).json(response);
     } catch (error) {
       next(error);
     }

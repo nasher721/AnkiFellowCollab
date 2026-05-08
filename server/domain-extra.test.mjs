@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
 import {
   normalizeParsedDeck,
   normalizeSuggestionInput,
@@ -45,6 +47,30 @@ test('normalizeAddonSyncInput validates card count', () => {
 test('normalizeAddonSyncInput defaults conflictPolicy to detect', () => {
   const result = normalizeAddonSyncInput({ cards: [{ fields: { Front: 'test' } }] });
   assert.equal(result.conflictPolicy, 'detect');
+});
+
+test('normalizeAddonSyncInput expands compressed fields without truncating', () => {
+  const field = '<section>high-yield neuro ICU explanation</section>'.repeat(500);
+  const bytes = Buffer.from(field, 'utf8');
+  const result = normalizeAddonSyncInput({
+    returnState: false,
+    cards: [{
+      fields: { Text: '', Extra: 'board pearl' },
+      compressedFields: {
+        Text: {
+          encoding: 'zlib+base64',
+          data: deflateSync(bytes).toString('base64'),
+          originalBytes: bytes.byteLength,
+          sha256: createHash('sha256').update(bytes).digest('hex')
+        }
+      }
+    }]
+  });
+
+  assert.equal(result.returnState, false);
+  assert.equal(result.cards[0].fields.Text, field);
+  assert.equal(result.cards[0].fields.Extra, 'board pearl');
+  assert.equal(result.cards[0].fields.Text.length > 12000, true);
 });
 
 test('mergeAddonCards creates new cards', () => {

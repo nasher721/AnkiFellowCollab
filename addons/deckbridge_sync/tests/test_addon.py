@@ -4,6 +4,8 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+import base64
+import zlib
 from io import BytesIO
 from unittest.mock import MagicMock, patch
 
@@ -592,16 +594,33 @@ class TestTokenValidation(unittest.TestCase):
     def test_sync_payload_chunks_splits_by_request_size(self, mock_config):
         cfg = {**DEFAULT_CONFIG, 'local_deck': 'Local Deck', 'batch_size': 5000}
         mock_config.return_value = cfg
-        cards = [
-            {'id': 'anki-1', 'fields': {'Front': 'A' * 1_800_000}},
-            {'id': 'anki-2', 'fields': {'Front': 'B' * 1_800_000}},
-            {'id': 'anki-3', 'fields': {'Front': 'C'}},
-        ]
+        cards = [{'id': f'anki-{index}', 'fields': {'Front': f'{index}-' + ('A' * 50_000)}} for index in range(80)]
 
         payloads = sync_payload_chunks(cards, dry_run=False, cfg=cfg)
 
-        self.assertEqual(len(payloads), 2)
-        self.assertEqual([len(payload['cards']) for payload in payloads], [1, 2])
+        self.assertGreater(len(payloads), 1)
+        self.assertEqual(sum(len(payload['cards']) for payload in payloads), 80)
+        for payload in payloads:
+            self.assertLessEqual(len(json.dumps(payload, separators=(',', ':')).encode('utf-8')), 3_500_000)
+
+    @patch('deckbridge_sync.config')
+    def test_sync_payload_chunks_compresses_oversized_single_note_fields(self, mock_config):
+        cfg = {**DEFAULT_CONFIG, 'local_deck': 'Local Deck', 'batch_size': 5000}
+        mock_config.return_value = cfg
+        large_field = '<div class="explanation">nimodipine pearl</div>' * 100_000
+        cards = [{'id': 'anki-large', 'fields': {'Text': large_field, 'Extra': 'keep me'}}]
+
+        payloads = sync_payload_chunks(cards, dry_run=False, cfg=cfg)
+
+        self.assertEqual(len(payloads), 1)
+        card = payloads[0]['cards'][0]
+        self.assertEqual(card['fields']['Text'], '')
+        self.assertEqual(card['fields']['Extra'], 'keep me')
+        compressed = card['compressedFields']['Text']
+        decoded = zlib.decompress(base64.b64decode(compressed['data'])).decode('utf-8')
+        self.assertEqual(decoded, large_field)
+        self.assertFalse(payloads[0]['returnState'])
+        self.assertLess(len(json.dumps(payloads[0], separators=(',', ':')).encode('utf-8')), 3_500_000)
 
     @patch('deckbridge_sync.request_json')
     @patch('deckbridge_sync.validate_token')

@@ -401,16 +401,17 @@ export function createLocalRepository() {
         }
       }
       await saveState(state);
-      return {
+      const response = {
         result: {
           syncedAt: result.syncedAt,
           source: lastAddonSync.source,
           client: lastAddonSync.client,
           stats: result.stats,
           conflicts: result.conflicts
-        },
-        state: await this.getDeckState(user, deck.id)
+        }
       };
+      if (syncInput.returnState !== false) response.state = await this.getDeckState(user, deck.id);
+      return response;
     },
 
     async setActiveDeck(user, deckId) {
