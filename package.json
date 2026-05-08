@@ -5,14 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "dev:server": "node server/index.mjs",
+    "dev:server": "node --env-file .env server/index.mjs",
     "dev:web": "vite --host 0.0.0.0",
+    "build:local-server:web": "tsc && node --env-file .env.local-server node_modules/vite/bin/vite.js build",
+    "build:local-server": "npm run build:local-server:web && npm run package:anki-addon",
     "build": "tsc && vite build",
-    "start": "NODE_ENV=production node server/index.mjs",
+    "start": "node server/start-production.mjs",
+    "start:local-server": "node --env-file .env.local-server server/start-production.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "package:anki-addon": "node scripts/package-anki-addon.mjs",
+    "migrate:state:local-server": "node --env-file .env.local-server scripts/migrate-state-to-supabase.mjs",
     "migrate:state": "node scripts/migrate-state-to-supabase.mjs",
-    "test": "node --test server/*.test.mjs",
+    "test": "node --test server/*.test.mjs; node .github/setup.js",
     "test:api": "node --test server/*.api.test.mjs",
     "test:frontend": "vitest run",
     "test:e2e": "playwright test"
@@ -21,6 +25,7 @@
     "@playwright/test": "^1.59.1",
     "@supabase/supabase-js": "^2.105.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.1",
@@ -29,12 +34,14 @@
     "react-dom": "^19.2.1",
     "supertest": "^7.2.2",
     "typescript": "^5.9.3",
-    "vite": "^7.2.7"
+    "vite": "^7.2.7",
+    "web-vitals": "^4.2.4"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "jsdom": "^29.1.1",
+    "rollup-plugin-visualizer": "^5.14.0",
     "vitest": "^4.1.5"
   }
 }
