@@ -3012,19 +3012,27 @@ button:disabled {
   background: #f8fafc;
 }
 
+.conflict-header > * {
+  min-width: 0;
+}
+
 .conflict-header-stacked {
   align-items: flex-start;
 }
 
 .conflict-header strong {
   display: block;
+  min-width: 0;
   font-size: 13px;
   color: #172033;
+  overflow-wrap: anywhere;
 }
 
 .conflict-header small {
+  min-width: 0;
   color: var(--muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .conflict-progress {
@@ -3261,6 +3269,8 @@ button:disabled {
   }
 
   .format-toolbar button,
+  .card-editor-input,
+  .card-editor-textarea,
   .bulk-tag-input,
   .conflict-controls select {
     min-height: 44px;
@@ -3275,6 +3285,16 @@ button:disabled {
   .conflict-header {
     display: grid;
     align-items: start;
+    gap: 8px;
+  }
+
+  .conflict-progress,
+  .conflict-decision {
+    margin: 6px 6px 0 0;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    vertical-align: middle;
   }
 
   .conflict-controls {
