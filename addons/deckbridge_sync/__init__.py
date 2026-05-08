@@ -76,7 +76,7 @@ except ImportError:
 
 
 ADDON_NAME = "DeckBridge Sync"
-DEFAULT_ADDON_VERSION = "0.2.0"
+DEFAULT_ADDON_VERSION = "0.2.1"
 TRACKING_MODEL = "DeckBridge Sync"
 TRACKING_TAG_PREFIX = "deckbridge_card_"
 CONFIG_KEY = "deckbridge"
@@ -84,6 +84,10 @@ DEFAULT_PLATFORM_URL = "https://anki-collab.vercel.app"
 MAX_SYNC_REQUEST_BYTES = 3_500_000
 MAX_INLINE_MEDIA_BYTES = 750_000
 COMPRESS_FIELD_AFTER_BYTES = 64_000
+DEFAULT_TIMEOUT_SECONDS = 120
+MIN_REQUEST_TIMEOUT_SECONDS = 5
+MIN_SYNC_TIMEOUT_SECONDS = 120
+MIN_MEDIA_UPLOAD_TIMEOUT_SECONDS = 120
 LEGACY_LOCAL_PLATFORM_URLS = {
     "http://localhost:4175",
     "http://127.0.0.1:4175",
@@ -105,7 +109,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "local_deck": "",
     "conflict_policy": "detect",
     "auto_sync_minutes": 0,
-    "timeout_seconds": 30,
+    "timeout_seconds": DEFAULT_TIMEOUT_SECONDS,
     "batch_size": 250,
     "tag_filter": "",
     "include_suspended": True,
@@ -226,7 +230,7 @@ def _stored_from_flat(flat: Dict[str, Any], base: Optional[Dict[str, Any]] = Non
         "email": str(flat.get("email", base_config.get("email", "")) or "").strip(),
         "autoSync": bool(flat.get("autoSync", base_config.get("autoSync", False))),
         "auto_sync_minutes": int(flat.get("auto_sync_minutes", base_config.get("auto_sync_minutes", 0)) or 0),
-        "timeout_seconds": int(flat.get("timeout_seconds", base_config.get("timeout_seconds", 30)) or 30),
+        "timeout_seconds": int(flat.get("timeout_seconds", base_config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)) or DEFAULT_TIMEOUT_SECONDS),
         "batch_size": int(flat.get("batch_size", base_config.get("batch_size", 250)) or 250),
         "tag_filter": str(flat.get("tag_filter", base_config.get("tag_filter", "")) or "").strip(),
         "include_suspended": bool(flat.get("include_suspended", base_config.get("include_suspended", True))),
@@ -373,6 +377,7 @@ def request_json(
     payload: Optional[Dict[str, Any]] = None,
     cfg: Optional[Dict[str, Any]] = None,
     include_auth: bool = True,
+    timeout_floor: int = MIN_REQUEST_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     cfg = cfg or config()
     body = json.dumps(payload or {}).encode("utf-8") if payload is not None else None
@@ -382,7 +387,7 @@ def request_json(
     if include_auth and cfg.get("api_token"):
         headers["Authorization"] = f"Bearer {cfg['api_token']}"
     request = urllib.request.Request(platform_url(cfg, path), data=body, headers=headers, method=method)
-    timeout = max(5, int(cfg.get("timeout_seconds") or 30))
+    timeout = max(int(timeout_floor), int(cfg.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS))
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
@@ -395,7 +400,12 @@ def request_json(
         except json.JSONDecodeError:
             message = detail or str(error)
         raise RuntimeError(f"DeckBridge API {error.code}: {message}") from error
-    except (urllib.error.URLError, socket.timeout) as error:
+    except socket.timeout as error:
+        raise RuntimeError(
+            f"DeckBridge timed out after {timeout} seconds while waiting for {method} {path}. "
+            "The server may still be processing this deck chunk; wait a moment, then try the push again."
+        ) from error
+    except urllib.error.URLError as error:
         raise RuntimeError(f"DeckBridge is unreachable: {error}") from error
 
 
@@ -605,7 +615,7 @@ def upload_media_file(upload_url: str, asset: Dict[str, Any]) -> None:
         },
         method="PUT",
     )
-    timeout = max(30, int(config().get("timeout_seconds") or 30))
+    timeout = max(MIN_MEDIA_UPLOAD_TIMEOUT_SECONDS, int(config().get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS))
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             response.read()
@@ -634,7 +644,13 @@ def upload_large_media_assets(
     ]
     if not large_assets or not deck_id:
         return {}
-    response = request_json("POST", f"/api/decks/{deck_id}/media/uploads", {"files": large_assets}, cfg=cfg)
+    response = request_json(
+        "POST",
+        f"/api/decks/{deck_id}/media/uploads",
+        {"files": large_assets},
+        cfg=cfg,
+        timeout_floor=MIN_SYNC_TIMEOUT_SECONDS,
+    )
     uploads = response.get("uploads") or []
     uploaded: Dict[str, Dict[str, Any]] = {}
     for upload in uploads:
@@ -854,7 +870,13 @@ def create_platform_deck_from_anki(cfg: Optional[Dict[str, Any]] = None, cards: 
     cfg = cfg or config()
     source_cards = cards or collect_cards()
     payloads = sync_payload_chunks(source_cards, dry_run=False, cfg=cfg)
-    created = request_json("POST", "/api/decks/sync/from-anki", payloads[0], cfg=cfg)
+    created = request_json(
+        "POST",
+        "/api/decks/sync/from-anki",
+        payloads[0],
+        cfg=cfg,
+        timeout_floor=MIN_SYNC_TIMEOUT_SECONDS,
+    )
     new_deck_id = str((created.get("deck") or {}).get("id") or created.get("state", {}).get("activeDeckId") or "").strip()
     if not new_deck_id:
         raise RuntimeError("DeckBridge created a deck but did not return its deck ID.")
@@ -862,7 +884,13 @@ def create_platform_deck_from_anki(cfg: Optional[Dict[str, Any]] = None, cards: 
     save_config(next_config)
     responses = [created]
     for payload in payloads[1:]:
-        responses.append(request_json("POST", f"/api/decks/{new_deck_id}/sync/cards", payload, cfg=next_config))
+        responses.append(request_json(
+            "POST",
+            f"/api/decks/{new_deck_id}/sync/cards",
+            payload,
+            cfg=next_config,
+            timeout_floor=MIN_SYNC_TIMEOUT_SECONDS,
+        ))
     large_media = collect_media_payload(
         source_cards,
         cfg=next_config,
@@ -873,7 +901,13 @@ def create_platform_deck_from_anki(cfg: Optional[Dict[str, Any]] = None, cards: 
     )
     if large_media:
         for payload in sync_payload_chunks(source_cards, dry_run=False, cfg=next_config, media=large_media):
-            request_json("POST", f"/api/decks/{new_deck_id}/sync/cards", payload, cfg=next_config)
+            request_json(
+                "POST",
+                f"/api/decks/{new_deck_id}/sync/cards",
+                payload,
+                cfg=next_config,
+                timeout_floor=MIN_SYNC_TIMEOUT_SECONDS,
+            )
     return combine_sync_responses(responses)
 
 
@@ -898,7 +932,12 @@ def post_cards(*, dry_run: bool = False) -> Dict[str, Any]:
     elif not deck_id:
         raise RuntimeError("No DeckBridge deck is selected yet. Use Push Anki deck to DeckBridge to create one from Anki first.")
     responses = [
-        request_json("POST", f"/api/decks/{cfg['deck_id']}/sync/cards", payload)
+        request_json(
+            "POST",
+            f"/api/decks/{cfg['deck_id']}/sync/cards",
+            payload,
+            timeout_floor=MIN_SYNC_TIMEOUT_SECONDS,
+        )
         for payload in sync_payload_chunks(cards, dry_run=dry_run, cfg=cfg)
     ]
     return combine_sync_responses(responses)

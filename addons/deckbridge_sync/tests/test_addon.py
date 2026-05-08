@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 import sys
 import tempfile
 import unittest
@@ -38,6 +39,7 @@ from deckbridge_sync import (
     platform_url,
     post_cards,
     pull_to_anki,
+    request_json,
     save_config,
     safe_tag,
     sync_payload_chunks,
@@ -253,7 +255,7 @@ class TestApplyAutoconfig(unittest.TestCase):
 
 class TestVersion(unittest.TestCase):
     def test_manifest_is_version_source(self):
-        self.assertEqual(addon_manifest()['version'], '0.2.0')
+        self.assertEqual(addon_manifest()['version'], '0.2.1')
         self.assertEqual(ADDON_VERSION, addon_manifest()['version'])
 
 
@@ -345,12 +347,53 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertEqual(DEFAULT_CONFIG['local_deck'], '')
         self.assertEqual(DEFAULT_CONFIG['conflict_policy'], 'detect')
         self.assertEqual(DEFAULT_CONFIG['auto_sync_minutes'], 0)
+        self.assertEqual(DEFAULT_CONFIG['timeout_seconds'], 120)
         self.assertEqual(DEFAULT_CONFIG['sync_on_profile_open'], False)
         self.assertEqual(DEFAULT_CONFIG['sync_on_close'], False)
 
     def test_legacy_local_default_is_migrated_to_hosted_url(self):
         flat = _flat_from_stored({'url': 'http://localhost:4175', 'deckMappings': []})
         self.assertEqual(flat['platform_url'], 'https://anki-collab.vercel.app')
+
+
+class TestRequestTimeouts(unittest.TestCase):
+    @patch('deckbridge_sync.urllib.request.urlopen')
+    def test_request_json_honors_configured_timeout_for_normal_api_calls(self, mock_urlopen):
+        mock_urlopen.return_value = FakeResponse({'ok': True})
+
+        result = request_json(
+            'GET',
+            '/api/me',
+            cfg={**DEFAULT_CONFIG, 'api_token': '', 'timeout_seconds': 7},
+        )
+
+        self.assertEqual(result, {'ok': True})
+        self.assertEqual(mock_urlopen.call_args.kwargs['timeout'], 7)
+
+    @patch('deckbridge_sync.urllib.request.urlopen')
+    def test_request_json_uses_sync_timeout_floor_for_old_saved_configs(self, mock_urlopen):
+        mock_urlopen.return_value = FakeResponse({'result': {'stats': {'created': 1}}})
+
+        request_json(
+            'POST',
+            '/api/decks/deck-1/sync/cards',
+            {'cards': [{'id': 'anki-1'}]},
+            cfg={**DEFAULT_CONFIG, 'api_token': '', 'timeout_seconds': 30},
+            timeout_floor=120,
+        )
+
+        self.assertEqual(mock_urlopen.call_args.kwargs['timeout'], 120)
+
+    @patch('deckbridge_sync.urllib.request.urlopen', side_effect=socket.timeout('The read operation timed out'))
+    def test_request_json_timeout_error_names_wait_and_retry_behavior(self, _mock_urlopen):
+        with self.assertRaisesRegex(RuntimeError, r'timed out after 120 seconds.*try the push again'):
+            request_json(
+                'POST',
+                '/api/decks/deck-1/sync/cards',
+                {'cards': [{'id': 'anki-1'}]},
+                cfg={**DEFAULT_CONFIG, 'api_token': '', 'timeout_seconds': 30},
+                timeout_floor=120,
+            )
 
 
 class TestPlatformUrl(unittest.TestCase):
