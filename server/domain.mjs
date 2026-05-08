@@ -281,6 +281,7 @@ function normalizeAddonCard(card, index) {
   const ankiNoteId = Number.isFinite(Number(card.ankiNoteId)) ? Number(card.ankiNoteId) : null;
   const noteType = cleanText(card.type || card.noteType || card.modelName, 'Basic', 120);
 
+  const clozeOrd = Number.isFinite(Number(card.clozeOrd)) ? Number(card.clozeOrd) : undefined;
   return {
     id: cleanText(card.id, ankiNoteId ? `anki-${ankiNoteId}` : `anki-${randomUUID()}`, 160),
     ankiNoteId,
@@ -296,7 +297,11 @@ function normalizeAddonCard(card, index) {
     suspended: Boolean(card.suspended),
     mediaRefs: Array.isArray(card.mediaRefs) ? card.mediaRefs.map((ref) => cleanText(ref, '', 500)).filter(Boolean) : [],
     sourceDeckName: cleanText(card.sourceDeckName || card.deckName, '', 240) || null,
-    sourceDeckPath: cleanText(card.sourceDeckPath || card.deckPath, '', 500) || null
+    sourceDeckPath: cleanText(card.sourceDeckPath || card.deckPath, '', 500) || null,
+    ...(card.templateFront != null ? { templateFront: cleanText(card.templateFront, '', 120000) } : {}),
+    ...(card.templateBack != null ? { templateBack: cleanText(card.templateBack, '', 120000) } : {}),
+    ...(card.modelCss != null ? { modelCss: cleanText(card.modelCss, '', 120000) } : {}),
+    ...(clozeOrd !== undefined ? { clozeOrd } : {})
   };
 }
 
@@ -452,9 +457,14 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
 
     const changed = !sameJson(existing.fields, incoming.fields)
       || !sameJson(existing.tags, incoming.tags)
+      || existing.due !== incoming.due
       || existing.state !== incoming.state
       || existing.suspended !== incoming.suspended
-      || existing.type !== incoming.type;
+      || existing.type !== incoming.type
+      || (Object.hasOwn(incoming, 'templateFront') && existing.templateFront !== incoming.templateFront)
+      || (Object.hasOwn(incoming, 'templateBack') && existing.templateBack !== incoming.templateBack)
+      || (Object.hasOwn(incoming, 'modelCss') && existing.modelCss !== incoming.modelCss)
+      || (Object.hasOwn(incoming, 'clozeOrd') && existing.clozeOrd !== incoming.clozeOrd);
     if (!changed) {
       result.stats.skipped += 1;
       for (const ref of incoming.mediaRefs || []) mediaToApply.add(ref);
@@ -493,7 +503,11 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
       suspended: incoming.suspended,
       mediaRefs: incoming.mediaRefs,
       sourceDeckName: incoming.sourceDeckName || existing.sourceDeckName,
-      sourceDeckPath: incoming.sourceDeckPath || existing.sourceDeckPath
+      sourceDeckPath: incoming.sourceDeckPath || existing.sourceDeckPath,
+      templateFront: Object.hasOwn(incoming, 'templateFront') ? incoming.templateFront : existing.templateFront,
+      templateBack: Object.hasOwn(incoming, 'templateBack') ? incoming.templateBack : existing.templateBack,
+      modelCss: Object.hasOwn(incoming, 'modelCss') ? incoming.modelCss : existing.modelCss,
+      clozeOrd: Object.hasOwn(incoming, 'clozeOrd') ? incoming.clozeOrd : existing.clozeOrd
     }, actorName, syncedAt);
     result.updatedCards.push(updated);
     result.stats.updated += 1;

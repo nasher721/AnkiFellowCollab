@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 import hashlib
 import json
 import mimetypes
@@ -115,6 +116,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "include_suspended": True,
     "create_missing_notes": True,
     "pull_overwrites_local": False,
+    "pull_scheduling_on_sync": True,
     "sync_on_profile_open": False,
     "sync_on_close": False,
 }
@@ -132,6 +134,7 @@ DEFAULT_STORED_CONFIG: Dict[str, Any] = {
     "include_suspended": DEFAULT_CONFIG["include_suspended"],
     "create_missing_notes": DEFAULT_CONFIG["create_missing_notes"],
     "pull_overwrites_local": DEFAULT_CONFIG["pull_overwrites_local"],
+    "pull_scheduling_on_sync": DEFAULT_CONFIG["pull_scheduling_on_sync"],
     "sync_on_profile_open": DEFAULT_CONFIG["sync_on_profile_open"],
     "sync_on_close": DEFAULT_CONFIG["sync_on_close"],
 }
@@ -236,6 +239,7 @@ def _stored_from_flat(flat: Dict[str, Any], base: Optional[Dict[str, Any]] = Non
         "include_suspended": bool(flat.get("include_suspended", base_config.get("include_suspended", True))),
         "create_missing_notes": bool(flat.get("create_missing_notes", base_config.get("create_missing_notes", True))),
         "pull_overwrites_local": bool(flat.get("pull_overwrites_local", base_config.get("pull_overwrites_local", False))),
+        "pull_scheduling_on_sync": bool(flat.get("pull_scheduling_on_sync", base_config.get("pull_scheduling_on_sync", True))),
         "sync_on_profile_open": bool(flat.get("sync_on_profile_open", base_config.get("sync_on_profile_open", False))),
         "sync_on_close": bool(flat.get("sync_on_close", base_config.get("sync_on_close", False))),
     }
@@ -277,6 +281,7 @@ def _flat_from_stored(stored: Dict[str, Any]) -> Dict[str, Any]:
         "include_suspended": stored.get("include_suspended", DEFAULT_CONFIG["include_suspended"]),
         "create_missing_notes": stored.get("create_missing_notes", DEFAULT_CONFIG["create_missing_notes"]),
         "pull_overwrites_local": stored.get("pull_overwrites_local", DEFAULT_CONFIG["pull_overwrites_local"]),
+        "pull_scheduling_on_sync": stored.get("pull_scheduling_on_sync", DEFAULT_CONFIG["pull_scheduling_on_sync"]),
         "sync_on_profile_open": stored.get("sync_on_profile_open", DEFAULT_CONFIG["sync_on_profile_open"]),
         "sync_on_close": stored.get("sync_on_close", DEFAULT_CONFIG["sync_on_close"]),
     }
@@ -704,6 +709,8 @@ def collect_media_payload(
 
 def note_to_card(note: Any) -> Dict[str, Any]:
     model = note.note_type()
+    templates = model.get("tmpls") or []
+    template = templates[0] if templates and isinstance(templates[0], dict) else {}
     field_names = list(note.keys())
     state = note_state(note)
     fields = {name: str(note[name]) for name in field_names}
@@ -723,6 +730,9 @@ def note_to_card(note: Any) -> Dict[str, Any]:
         "modifiedBy": "Anki",
         "sourceDeckName": active_local_deck(),
         "sourceDeckPath": active_local_deck(),
+        "templateFront": str(template.get("qfmt") or ""),
+        "templateBack": str(template.get("afmt") or ""),
+        "modelCss": str(model.get("css") or ""),
     }
 
 
@@ -943,6 +953,85 @@ def post_cards(*, dry_run: bool = False) -> Dict[str, Any]:
     return combine_sync_responses(responses)
 
 
+def _parse_due_date(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value).replace("Z", "+00:00")
+        due = datetime.fromisoformat(text)
+        return due if due.tzinfo else due.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _scheduler_today() -> int:
+    try:
+        return int(getattr(mw.col.sched, "today", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _due_offset_days(next_due: Any) -> int:
+    due = _parse_due_date(next_due)
+    if due is None:
+        return 0
+    now = datetime.now(timezone.utc)
+    return max(0, int((due.date() - now.date()).days))
+
+
+def _update_card(card: Any) -> None:
+    if hasattr(mw.col, "update_card"):
+        mw.col.update_card(card)
+        return
+    if hasattr(card, "flush"):
+        card.flush()
+
+
+def apply_scheduling_update(update: Dict[str, Any]) -> str:
+    note = find_tracked_note({"id": update.get("cardId"), "ankiNoteId": update.get("ankiNoteId")})
+    if note is None:
+        return "skipped"
+    interval = max(1, int(float(update.get("intervalDays") or 1)))
+    ease = max(1300, int(float(update.get("easeFactor") or 2.5) * 1000))
+    repetitions = max(0, int(update.get("repetitions") or 0))
+    due = _scheduler_today() + _due_offset_days(update.get("nextDue"))
+    changed = 0
+    for card in note.cards():
+        if getattr(card, "queue", 0) < 0:
+            continue
+        card.ivl = interval
+        card.factor = ease
+        card.reps = max(int(getattr(card, "reps", 0) or 0), repetitions)
+        card.due = due
+        card.queue = 2
+        card.type = 2
+        _update_card(card)
+        changed += 1
+    return "updated" if changed else "skipped"
+
+
+def pull_scheduling_from_platform() -> Dict[str, int]:
+    cfg = config()
+    deck_id = str(cfg.get("deck_id", "") or "").strip()
+    if not deck_id:
+        return {"updated": 0, "skipped": 0}
+    response = request_json("GET", f"/api/decks/{deck_id}/sync/scheduling", cfg=cfg)
+    stats = {"updated": 0, "skipped": 0}
+    for update in response.get("updates", []) or []:
+        action = apply_scheduling_update(update)
+        stats[action] = stats.get(action, 0) + 1
+    if stats["updated"]:
+        mw.col.save()
+        mw.reset()
+    return stats
+
+
+def sync_scheduling_if_enabled() -> Dict[str, int]:
+    if not config().get("pull_scheduling_on_sync", True):
+        return {"updated": 0, "skipped": 0}
+    return pull_scheduling_from_platform()
+
+
 def ensure_deck(name: str) -> int:
     deck_id = mw.col.decks.id(name)
     mw.col.decks.select(deck_id)
@@ -1055,6 +1144,9 @@ def show_result(prefix: str, payload: Dict[str, Any]) -> None:
         f"Skipped: {stats.get('skipped', 0)}\n"
         f"Conflicts: {stats.get('conflicts', len(conflicts))}"
     )
+    scheduling = payload.get("scheduling")
+    if scheduling:
+        message += f"\nSRS scheduling updated: {scheduling.get('updated', 0)}"
     if conflicts:
         message += "\n\nConflicts were recorded in DeckBridge for review."
     showInfo(message, title=ADDON_NAME)
@@ -1093,7 +1185,12 @@ def preview_push() -> None:
 
 
 def push_to_platform() -> None:
-    run_guarded("Push", lambda: show_result("Anki deck synced to DeckBridge.", post_cards(dry_run=False)))
+    def task() -> None:
+        pushed = post_cards(dry_run=False)
+        pushed["scheduling"] = sync_scheduling_if_enabled()
+        show_result("Anki deck synced to DeckBridge.", pushed)
+
+    run_guarded("Push", task)
 
 
 def pull_to_anki() -> None:
@@ -1114,10 +1211,12 @@ def bidirectional_sync() -> None:
         if conflicts:
             show_result("Push recorded conflicts. Pull was skipped.", pushed)
             return
+        scheduling = sync_scheduling_if_enabled()
         pulled = pull_from_platform()
         showInfo(
             "Bidirectional sync complete.\n\n"
             f"Platform push updated {pushed.get('result', {}).get('stats', {}).get('updated', 0)} card(s).\n"
+            f"SRS scheduling updated {scheduling['updated']} Anki card(s).\n"
             f"Anki pull created {pulled['created']} and updated {pulled['updated']} note(s).",
             title=ADDON_NAME,
         )
@@ -1186,6 +1285,8 @@ class SettingsDialog(QDialog):
         self.create_missing_notes.setChecked(bool(cfg["create_missing_notes"]))
         self.pull_overwrites_local = QCheckBox()
         self.pull_overwrites_local.setChecked(bool(cfg["pull_overwrites_local"]))
+        self.pull_scheduling_on_sync = QCheckBox()
+        self.pull_scheduling_on_sync.setChecked(bool(cfg["pull_scheduling_on_sync"]))
         self.sync_on_profile_open = QCheckBox()
         self.sync_on_profile_open.setChecked(bool(cfg["sync_on_profile_open"]))
         self.sync_on_close = QCheckBox()
@@ -1214,6 +1315,7 @@ class SettingsDialog(QDialog):
         sync_form.addRow("Include suspended cards", self.include_suspended)
         sync_form.addRow("Create missing Anki notes on pull", self.create_missing_notes)
         sync_form.addRow("Pull overwrites local notes", self.pull_overwrites_local)
+        sync_form.addRow("Pull web SRS scheduling on sync", self.pull_scheduling_on_sync)
         sync_form.addRow("Pull from DeckBridge after saving", self.pull_after_save)
         sync_form.addRow("Sync on profile open", self.sync_on_profile_open)
         sync_form.addRow("Sync before profile close", self.sync_on_close)
@@ -1279,6 +1381,7 @@ class SettingsDialog(QDialog):
             "include_suspended": self.include_suspended.isChecked(),
             "create_missing_notes": self.create_missing_notes.isChecked(),
             "pull_overwrites_local": self.pull_overwrites_local.isChecked(),
+            "pull_scheduling_on_sync": self.pull_scheduling_on_sync.isChecked(),
             "sync_on_profile_open": self.sync_on_profile_open.isChecked(),
             "sync_on_close": self.sync_on_close.isChecked(),
         }

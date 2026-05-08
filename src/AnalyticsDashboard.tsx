@@ -9,6 +9,29 @@ interface Props {
   currentVisibility?: string;
 }
 
+function AnalyticsSkeleton() {
+  return (
+    <div className="analytics-view" aria-busy="true" aria-label="Loading analytics">
+      <div className="analytics-header">
+        <div className="analytics-skeleton analytics-skeleton-title" />
+        <div className="analytics-skeleton analytics-skeleton-control" />
+      </div>
+      <div className="analytics-grid" aria-hidden="true">
+        {Array.from({ length: 6 }, (_, index) => (
+          <div className="analytics-card analytics-skeleton-card" key={index}>
+            <span className="analytics-skeleton analytics-skeleton-value" />
+            <span className="analytics-skeleton analytics-skeleton-label" />
+          </div>
+        ))}
+      </div>
+      <div className="analytics-section analytics-skeleton-section" aria-hidden="true">
+        <div className="analytics-skeleton analytics-skeleton-heading" />
+        <div className="analytics-skeleton analytics-skeleton-bar" />
+      </div>
+    </div>
+  );
+}
+
 export function AnalyticsDashboard({ deckId, deckName, isOwner, onSetVisibility, currentVisibility = 'private' }: Props) {
   const [analytics, setAnalytics] = useState<DeckAnalytics | null>(null);
   const [loading, setLoading] = useState(true);
@@ -42,7 +65,7 @@ export function AnalyticsDashboard({ deckId, deckName, isOwner, onSetVisibility,
     }
   }
 
-  if (loading) return <div className="analytics-loading">Loading analytics…</div>;
+  if (loading) return <AnalyticsSkeleton />;
   if (error) return <div className="analytics-error">{error}</div>;
   if (!analytics) return null;
 

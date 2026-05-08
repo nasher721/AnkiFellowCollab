@@ -77,7 +77,11 @@ function toCard(row) {
     suspended: Boolean(row.suspended),
     mediaRefs: row.media_refs || [],
     sourceDeckName: row.source_deck_name || null,
-    sourceDeckPath: row.source_deck_path || null
+    sourceDeckPath: row.source_deck_path || null,
+    templateFront: row.template_front || undefined,
+    templateBack: row.template_back || undefined,
+    modelCss: row.model_css || undefined,
+    clozeOrd: row.cloze_ord ?? undefined
   };
 }
 
@@ -358,7 +362,11 @@ export function createSupabaseRepository(options = {}) {
             suspended: card.suspended,
             media_refs: card.mediaRefs || [],
             source_deck_name: card.sourceDeckName,
-            source_deck_path: card.sourceDeckPath
+            source_deck_path: card.sourceDeckPath,
+            template_front: card.templateFront,
+            template_back: card.templateBack,
+            model_css: card.modelCss,
+            cloze_ord: card.clozeOrd
           })));
           if (cardError) throw cardError;
         }
@@ -375,7 +383,7 @@ export function createSupabaseRepository(options = {}) {
     },
 
     async createSuggestion(user, payload) {
-      await assertMembership(user.id, payload.deckId, 'editor');
+      await assertMembership(user.id, payload.deckId, 'contributor');
       const { data: card, error: cardError } = await supabase.from('cards').select('*').eq('id', payload.cardId).eq('deck_id', payload.deckId).single();
       if (cardError || !card) fail(404, 'card_not_found', 'Card not found');
       const createdAt = nowIso();
@@ -402,6 +410,35 @@ export function createSupabaseRepository(options = {}) {
         created_at: createdAt
       });
       return getDeckRows(user, payload.deckId);
+    },
+
+    async updateModelTemplate(user, deckId, modelName, patch) {
+      await assertMembership(user.id, deckId, 'owner');
+      const now = nowIso();
+      const { data: rows, error: selectError } = await supabase
+        .from('cards')
+        .select('id')
+        .eq('deck_id', deckId)
+        .eq('model_name', modelName);
+      if (selectError) throw selectError;
+      if (!rows?.length) fail(404, 'model_not_found', 'Model not found in this deck');
+      const { error } = await supabase.from('cards').update({
+        template_front: patch.templateFront,
+        template_back: patch.templateBack,
+        model_css: patch.modelCss,
+        modified_at: now,
+        modified_by: user.name
+      }).eq('deck_id', deckId).eq('model_name', modelName);
+      if (error) throw error;
+      await supabase.from('activity').insert({
+        id: `act-${randomUUID()}`,
+        deck_id: deckId,
+        user_id: user.id,
+        kind: 'template',
+        text: `${user.name} updated the ${modelName} model template`,
+        created_at: now
+      });
+      return getDeckRows(user, deckId);
     },
 
     async decideSuggestion(user, suggestionId, decision) {
@@ -777,7 +814,11 @@ export function createSupabaseRepository(options = {}) {
               suspended: card.suspended,
               media_refs: card.mediaRefs || [],
               source_deck_name: card.sourceDeckName,
-              source_deck_path: card.sourceDeckPath
+              source_deck_path: card.sourceDeckPath,
+              template_front: card.templateFront,
+              template_back: card.templateBack,
+              model_css: card.modelCss,
+              cloze_ord: card.clozeOrd
             })));
             if (error) throw error;
           }
@@ -797,7 +838,11 @@ export function createSupabaseRepository(options = {}) {
             suspended: card.suspended,
             media_refs: card.mediaRefs || [],
             source_deck_name: card.sourceDeckName,
-            source_deck_path: card.sourceDeckPath
+            source_deck_path: card.sourceDeckPath,
+            template_front: card.templateFront,
+            template_back: card.templateBack,
+            model_css: card.modelCss,
+            cloze_ord: card.clozeOrd
           }).eq('id', card.id).eq('deck_id', deck.id);
           if (error) throw error;
         }

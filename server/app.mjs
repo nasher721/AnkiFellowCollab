@@ -7,7 +7,7 @@ import path from 'node:path';
 import { createClient } from '@supabase/supabase-js';
 import { createAuth } from './auth.mjs';
 import { requireContributor, requireEditor, requireOwner, requireReviewer, resolveSuggestionDeck } from './rbac.mjs';
-import { deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeMediaUploadFiles, normalizeParsedDeck, normalizeSuggestionInput, safeMediaMimeType } from './domain.mjs';
+import { cleanText, deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeMediaUploadFiles, normalizeParsedDeck, normalizeSuggestionInput, safeMediaMimeType, tagList } from './domain.mjs';
 import { AppError, errorPayload, fail } from './errors.mjs';
 import { checkAnki, pullDeck, pushDeck } from './ankiConnect.mjs';
 import { createApkg, parseApkg } from './ankiPackage.mjs';
@@ -557,6 +557,21 @@ export function createApp(options = {}) {
     } catch (err) { next(err); }
   });
 
+  app.patch('/api/decks/:deckId/models/:modelName/template', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.updateModelTemplate) fail(501, 'template_editor_unavailable', 'Template editing is unavailable');
+      const modelName = cleanShortText(req.params.modelName, '', 160);
+      if (!modelName) fail(400, 'invalid_model_name', 'Model name is required');
+      const patch = {
+        templateFront: cleanText(req.body.templateFront, '{{Front}}', 120000) || '{{Front}}',
+        templateBack: cleanText(req.body.templateBack, '{{FrontSide}}<hr id=answer>{{Back}}', 120000) || '{{FrontSide}}<hr id=answer>{{Back}}',
+        modelCss: cleanText(req.body.modelCss, '', 120000)
+      };
+      res.json(await repository.updateModelTemplate(req.user, deckId, modelName, patch));
+    } catch (err) { next(err); }
+  });
+
   // --- Comments ---
 
   app.get('/api/suggestions/:id/comments', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireContributor(auth.supabase), async (req, res, next) => {
@@ -761,6 +776,82 @@ export function createApp(options = {}) {
     return str;
   }
 
+  function parseDelimitedText(content, filename = '') {
+    const delimiter = /\.tsv$/i.test(filename) ? '\t' : ',';
+    const text = String(content ?? '').replace(/^\uFEFF/, '');
+    const rows = [];
+    let row = [];
+    let value = '';
+    let quoted = false;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      const next = text[index + 1];
+      if (quoted) {
+        if (char === '"' && next === '"') {
+          value += '"';
+          index += 1;
+        } else if (char === '"') {
+          quoted = false;
+        } else {
+          value += char;
+        }
+        continue;
+      }
+      if (char === '"') {
+        quoted = true;
+      } else if (char === delimiter) {
+        row.push(value);
+        value = '';
+      } else if (char === '\n') {
+        row.push(value);
+        rows.push(row);
+        row = [];
+        value = '';
+      } else if (char !== '\r') {
+        value += char;
+      }
+    }
+    if (value || row.length) {
+      row.push(value);
+      rows.push(row);
+    }
+    const [headers = [], ...records] = rows.filter((item) => item.some((cell) => String(cell).trim()));
+    return {
+      headers: headers.map((header) => cleanText(header, '', 120)),
+      records
+    };
+  }
+
+  function normalizeImportedTags(value) {
+    return Array.from(new Set(tagList(String(value || '').replace(/;/g, ' ')).map((tag) => cleanText(tag, '', 80)).filter(Boolean))).slice(0, 100);
+  }
+
+  function importedSuggestionPayload(card, headers, row) {
+    const normalizedHeaders = headers.map((header) => header.trim().toLowerCase());
+    const idIndex = normalizedHeaders.indexOf('card id');
+    if (idIndex < 0) fail(400, 'missing_card_id_column', 'CSV/TSV must include a Card ID column');
+    const tagsIndex = normalizedHeaders.indexOf('tags');
+    const ignored = new Set(['card id', 'note type', 'state', 'tags']);
+    const nextFields = {};
+    for (const [fieldName, currentValue] of Object.entries(card.fields || {})) {
+      nextFields[fieldName] = String(currentValue ?? '');
+    }
+    for (let index = 0; index < headers.length; index += 1) {
+      const header = headers[index];
+      if (!header || ignored.has(header.trim().toLowerCase())) continue;
+      nextFields[header] = cleanText(row[index] ?? '', '', 4000);
+    }
+    const nextTags = tagsIndex >= 0 ? normalizeImportedTags(row[tagsIndex]) : [...(card.tags || [])];
+    const changed = JSON.stringify(nextFields) !== JSON.stringify(card.fields || {})
+      || JSON.stringify(nextTags) !== JSON.stringify(card.tags || []);
+    if (!changed) return null;
+    return normalizeSuggestionInput({
+      reason: 'Bulk spreadsheet import',
+      proposedFields: nextFields,
+      proposedTags: nextTags
+    }, card);
+  }
+
   app.get('/api/decks/:deckId/export/csv', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
       const deckId = deckIdFromRequest(req);
@@ -792,6 +883,49 @@ export function createApp(options = {}) {
         'Cache-Control': 'private, max-age=60'
       });
       res.send(csv);
+    } catch (err) { next(err); }
+  });
+
+  app.post('/api/decks/:deckId/suggestions/import', validateDeckIdParam, auth.requireUser, requireContributor(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      const content = typeof req.body.content === 'string' ? req.body.content : '';
+      if (!content.trim()) fail(400, 'missing_import_content', 'CSV/TSV content is required');
+      if (content.length > 2_000_000) fail(413, 'import_too_large', 'CSV/TSV import is limited to 2 MB');
+      const filename = cleanShortText(req.body.filename, 'cards.csv', 240);
+      const deckState = await repository.getDeckState(req.user, deckId);
+      const deck = deckState.decks[0];
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+      const { headers, records } = parseDelimitedText(content, filename);
+      if (!headers.length) fail(400, 'missing_import_header', 'CSV/TSV import must include a header row');
+      const idIndex = headers.map((header) => header.trim().toLowerCase()).indexOf('card id');
+      if (idIndex < 0) fail(400, 'missing_card_id_column', 'CSV/TSV must include a Card ID column');
+      const cardsById = new Map(deck.cards.map((card) => [card.id, card]));
+      const created = [];
+      const skipped = [];
+      const limit = 200;
+      for (const row of records.slice(0, limit)) {
+        const cardId = cleanText(row[idIndex], '', 200);
+        const card = cardsById.get(cardId);
+        if (!card) {
+          skipped.push({ cardId, reason: 'card_not_found' });
+          continue;
+        }
+        const payload = importedSuggestionPayload(card, headers, row);
+        if (!payload) {
+          skipped.push({ cardId, reason: 'unchanged' });
+          continue;
+        }
+        await repository.createSuggestion(req.user, { deckId, cardId, ...payload });
+        created.push(cardId);
+      }
+      const state = await repository.getDeckState(req.user, deckId);
+      res.status(201).json({
+        imported: created.length,
+        skipped,
+        truncated: records.length > limit,
+        state
+      });
     } catch (err) { next(err); }
   });
 
@@ -1513,6 +1647,42 @@ export function createApp(options = {}) {
         lastRating: p.last_rating,
         updatedAt: p.updated_at
       })) });
+    } catch (err) { next(err); }
+  });
+
+  app.get('/api/decks/:deckId/sync/scheduling', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      const deckState = await repository.getDeckState(req.user, deckId);
+      const deck = deckState.decks[0];
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+      if (!auth.supabase) {
+        res.json({ updates: [] });
+        return;
+      }
+      const { data, error } = await auth.supabase.from('study_progress')
+        .select('*')
+        .eq('user_id', req.user.id)
+        .eq('deck_id', deckId)
+        .order('updated_at', { ascending: false })
+        .limit(500);
+      if (error) fail(500, 'scheduling_sync_error', error.message);
+      const cardsById = new Map(deck.cards.map((card) => [card.id, card]));
+      res.json({
+        updates: (data || []).map((row) => {
+          const card = cardsById.get(row.card_id);
+          return {
+            cardId: row.card_id,
+            ankiNoteId: card?.ankiNoteId ?? null,
+            intervalDays: row.interval_days,
+            easeFactor: Number(row.ease_factor),
+            repetitions: row.repetitions,
+            nextDue: row.next_due,
+            lastRating: row.last_rating,
+            updatedAt: row.updated_at
+          };
+        }).filter((row) => row.ankiNoteId || row.cardId)
+      });
     } catch (err) { next(err); }
   });
 

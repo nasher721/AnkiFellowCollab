@@ -35,7 +35,9 @@ from deckbridge_sync import (
     local_deck_names,
     media_refs_from_fields,
     normalize_platform_url,
+    note_to_card,
     open_settings,
+    pull_scheduling_from_platform,
     platform_url,
     post_cards,
     pull_to_anki,
@@ -48,6 +50,7 @@ from deckbridge_sync import (
     validate_token,
     TRACKING_TAG_PREFIX,
     _flat_from_stored,
+    apply_scheduling_update,
     _handle_url_scheme,
 )
 
@@ -257,6 +260,94 @@ class TestVersion(unittest.TestCase):
     def test_manifest_is_version_source(self):
         self.assertEqual(addon_manifest()['version'], '0.2.1')
         self.assertEqual(ADDON_VERSION, addon_manifest()['version'])
+
+
+class FakeCard:
+    def __init__(self):
+        self.due = 0
+        self.queue = 2
+        self.type = 2
+        self.ivl = 1
+        self.factor = 2500
+        self.reps = 0
+        self.flushed = False
+
+    def flush(self):
+        self.flushed = True
+
+
+class FakeNote:
+    id = 101
+    tags = ['DeckBridge']
+    mod = 1760000000
+
+    def __init__(self):
+        self.card = FakeCard()
+        self.values = {'Front': '<b>Front</b>', 'Back': 'Back'}
+
+    def note_type(self):
+        return {
+            'name': 'Basic',
+            'tmpls': [{'qfmt': '{{Front}}', 'afmt': '{{FrontSide}}<hr>{{Back}}'}],
+            'css': '.card { color: red; }',
+        }
+
+    def keys(self):
+        return self.values.keys()
+
+    def __getitem__(self, key):
+        return self.values[key]
+
+    def __contains__(self, key):
+        return key in self.values
+
+    def cards(self):
+        return [self.card]
+
+
+class TestSchedulingSync(unittest.TestCase):
+    def test_note_to_card_includes_model_template_and_css(self):
+        card = note_to_card(FakeNote())
+
+        self.assertEqual(card['templateFront'], '{{Front}}')
+        self.assertEqual(card['templateBack'], '{{FrontSide}}<hr>{{Back}}')
+        self.assertEqual(card['modelCss'], '.card { color: red; }')
+
+    @patch('deckbridge_sync.mw')
+    def test_apply_scheduling_update_sets_review_card_values(self, mock_mw):
+        note = FakeNote()
+        mock_mw.col.get_note.return_value = note
+        mock_mw.col.sched.today = 100
+        mock_mw.col.update_card.side_effect = lambda card: setattr(card, 'updated', True)
+
+        result = apply_scheduling_update({
+            'cardId': 'anki-101',
+            'ankiNoteId': 101,
+            'intervalDays': 12,
+            'easeFactor': 2.6,
+            'repetitions': 5,
+            'nextDue': '2026-05-18T00:00:00.000Z',
+        })
+
+        self.assertEqual(result, 'updated')
+        self.assertEqual(note.card.ivl, 12)
+        self.assertEqual(note.card.factor, 2600)
+        self.assertEqual(note.card.reps, 5)
+        self.assertEqual(note.card.queue, 2)
+        self.assertEqual(note.card.type, 2)
+        self.assertGreaterEqual(note.card.due, 100)
+
+    @patch('deckbridge_sync.apply_scheduling_update', side_effect=['updated', 'skipped'])
+    @patch('deckbridge_sync.request_json')
+    @patch('deckbridge_sync.config')
+    def test_pull_scheduling_from_platform_counts_updates(self, mock_config, mock_request, _mock_apply):
+        mock_config.return_value = {**DEFAULT_CONFIG, 'deck_id': 'deck-1'}
+        mock_request.return_value = {'updates': [{'cardId': 'a'}, {'cardId': 'b'}]}
+
+        result = pull_scheduling_from_platform()
+
+        self.assertEqual(result, {'updated': 1, 'skipped': 1})
+        self.assertEqual(mock_request.call_args[0][1], '/api/decks/deck-1/sync/scheduling')
 
 
 class TestMediaSync(unittest.TestCase):

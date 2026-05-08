@@ -114,7 +114,7 @@ export interface Suggestion {
   proposedTags: string[];
 }
 
-export type ActivityKind = 'import' | 'export' | 'sync' | 'suggestion' | 'accepted' | 'rejected' | 'revision' | 'study' | 'share';
+export type ActivityKind = 'import' | 'export' | 'sync' | 'suggestion' | 'accepted' | 'rejected' | 'revision' | 'study' | 'share' | 'template';
 
 export interface Activity {
   id: string;

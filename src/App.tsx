@@ -104,6 +104,31 @@ function fieldValue(card: DeckCard | undefined, key: string) {
   return card.fields[key] || card.fields[key.toLowerCase()] || '';
 }
 
+function stripHtml(value: string) {
+  if (typeof document !== 'undefined') {
+    const element = document.createElement('div');
+    element.innerHTML = value;
+    return element.textContent || element.innerText || '';
+  }
+  return value.replace(/<[^>]*>/g, ' ');
+}
+
+function searchableCardText(card: DeckCard, deckId: string) {
+  const frontHtml = renderCardHtml(card, deckId, 'front', undefined, card.clozeOrd);
+  const backHtml = renderCardHtml(card, deckId, 'back', frontHtml, card.clozeOrd);
+  return [
+    card.id,
+    card.ankiNoteId,
+    card.type,
+    card.modelName,
+    card.state,
+    card.tags.join(' '),
+    ...Object.values(card.fields),
+    stripHtml(frontHtml),
+    stripHtml(backHtml)
+  ].join(' ').toLowerCase();
+}
+
 function packageLabel(addonPackage: AddonPackageState) {
   if (addonPackage.loading) return 'Checking package';
   if (addonPackage.error) return 'Package check failed';
@@ -442,6 +467,86 @@ function OwnerAttentionPanel({
   );
 }
 
+function ModelTemplateEditor({ deck, busy, onSave }: {
+  deck: Deck;
+  busy: boolean;
+  onSave: (modelName: string, payload: { templateFront: string; templateBack: string; modelCss: string }) => void;
+}) {
+  const models = useMemo(() => (
+    Array.from(new Set(deck.cards.map((card) => card.modelName || card.type || 'Basic'))).sort()
+  ), [deck.cards]);
+  const [selectedModel, setSelectedModel] = useState(models[0] || '');
+  const modelCards = useMemo(
+    () => deck.cards.filter((card) => (card.modelName || card.type || 'Basic') === selectedModel),
+    [deck.cards, selectedModel]
+  );
+  const previewCard = modelCards[0];
+  const [templateFront, setTemplateFront] = useState('');
+  const [templateBack, setTemplateBack] = useState('');
+  const [modelCss, setModelCss] = useState('');
+
+  useEffect(() => {
+    if (!models.includes(selectedModel)) setSelectedModel(models[0] || '');
+  }, [models, selectedModel]);
+
+  useEffect(() => {
+    setTemplateFront(previewCard?.templateFront || '{{Front}}');
+    setTemplateBack(previewCard?.templateBack || '{{FrontSide}}<hr id=answer>{{Back}}');
+    setModelCss(previewCard?.modelCss || '');
+  }, [previewCard?.id, previewCard?.templateFront, previewCard?.templateBack, previewCard?.modelCss]);
+
+  if (!models.length || !previewCard) {
+    return <EmptyState message="This deck has no cards to preview." />;
+  }
+
+  const draftCard: DeckCard = {
+    ...previewCard,
+    templateFront,
+    templateBack,
+    modelCss
+  };
+  const frontHtml = renderCardHtml(draftCard, deck.id, 'front', undefined, draftCard.clozeOrd);
+
+  return (
+    <div className="model-editor">
+      <div className="model-editor-header">
+        <div>
+          <small>Model editor</small>
+          <strong>{selectedModel}</strong>
+        </div>
+        <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} aria-label="Select card model">
+          {models.map((model) => <option key={model} value={model}>{model}</option>)}
+        </select>
+      </div>
+      <div className="model-editor-grid">
+        <section>
+          <label>
+            <span>Front template</span>
+            <textarea value={templateFront} onChange={(event) => setTemplateFront(event.target.value)} rows={8} spellCheck={false} />
+          </label>
+          <label>
+            <span>Back template</span>
+            <textarea value={templateBack} onChange={(event) => setTemplateBack(event.target.value)} rows={8} spellCheck={false} />
+          </label>
+          <label>
+            <span>Model CSS</span>
+            <textarea value={modelCss} onChange={(event) => setModelCss(event.target.value)} rows={8} spellCheck={false} />
+          </label>
+          <button className="button primary" disabled={busy} onClick={() => onSave(selectedModel, { templateFront, templateBack, modelCss })}>
+            Save template
+          </button>
+        </section>
+        <section className="model-preview">
+          <small>Preview card</small>
+          <strong>{fieldValue(previewCard, 'Front') || Object.values(previewCard.fields)[0] || previewCard.id}</strong>
+          <AnkiCardRenderer card={draftCard} deckId={deck.id} side="front" frontHtml={frontHtml} clozeOrd={draftCard.clozeOrd} />
+          <AnkiCardRenderer card={draftCard} deckId={deck.id} side="back" frontHtml={frontHtml} clozeOrd={draftCard.clozeOrd} />
+        </section>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
@@ -470,7 +575,7 @@ export default function App() {
   const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(new Set());
   const [bulkAction, setBulkAction] = useState<'tag-add' | 'tag-remove' | 'delete' | null>(null);
   const [bulkTagInput, setBulkTagInput] = useState('');
-  const [activeTab, setActiveTab] = useState<'overview' | 'study' | 'cards' | 'stats' | 'analytics' | 'activity' | 'settings'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'study' | 'cards' | 'models' | 'stats' | 'analytics' | 'activity' | 'settings'>('overview');
   const [showStudy, setShowStudy] = useState(false);
   const [studyApprovedOnly, setStudyApprovedOnly] = useState(true);
   const [reviewTab, setReviewTab] = useState<'changes' | 'discussion'>('changes');
@@ -490,6 +595,7 @@ export default function App() {
   const toastTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const retainConflictReviewSnapshot = useRef(false);
   const overviewTabRef = useRef<HTMLButtonElement>(null);
+  const suggestionImportRef = useRef<HTMLInputElement>(null);
   const activeDeck = state?.decks.find((deck) => deck.id === state.activeDeckId) || state?.decks[0];
 
   function applyAuthoritativeState(next: AppState) {
@@ -633,12 +739,7 @@ export default function App() {
   const filteredCards = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return (activeDeck?.cards || []).filter((card) => {
-      const textMatch = !normalized || [
-        card.type,
-        card.state,
-        card.tags.join(' '),
-        ...Object.values(card.fields)
-      ].join(' ').toLowerCase().includes(normalized);
+      const textMatch = !normalized || searchableCardText(card, activeDeck?.id || '').includes(normalized);
       const tagMatch = tagFilter === 'All' || card.tags.includes(tagFilter);
       const stateMatch = cardStateFilter === 'All' || card.state === cardStateFilter;
       return textMatch && tagMatch && stateMatch;
@@ -757,6 +858,26 @@ export default function App() {
     if (!file) return;
     refreshWith(api.uploadDeck(file), `Imported ${file.name}`);
     event.target.value = '';
+  }
+
+  async function importSuggestionSpreadsheet(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file || !activeDeck) return;
+    setBusy(true);
+    try {
+      const content = await file.text();
+      const result = await api.importSuggestionSpreadsheet(activeDeck.id, file.name, content);
+      applyAuthoritativeState(result.state);
+      const suffix = result.truncated ? ' First 200 changed rows were imported.' : '';
+      pushToast(`Imported ${result.imported} suggestion${result.imported === 1 ? '' : 's'}.${suffix}`, 'success');
+      setReviewStatusFilter('pending');
+      setReviewAuthorFilter('All');
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Import failed', 'error');
+    } finally {
+      setBusy(false);
+      event.target.value = '';
+    }
   }
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
@@ -1196,6 +1317,7 @@ export default function App() {
                   } catch (e) { pushToast(e instanceof Error ? e.message : 'Export failed', 'error'); }
                   finally { setBusy(false); }
                 }} disabled={busy}>.csv (Spreadsheet)</button>
+                <button onClick={() => suggestionImportRef.current?.click()} disabled={busy || !canSuggest}>Upload spreadsheet changes</button>
                 <button onClick={async () => {
                   if (!activeDeck) return;
                   try {
@@ -1213,6 +1335,13 @@ export default function App() {
                 }} disabled={busy}>Activity Log (.csv)</button>
               </div>
             </div>
+            <input
+              ref={suggestionImportRef}
+              type="file"
+              accept=".csv,.tsv,text/csv,text/tab-separated-values"
+              onChange={importSuggestionSpreadsheet}
+              hidden
+            />
           </div>
         </header>
 
@@ -1223,6 +1352,7 @@ export default function App() {
               <button ref={overviewTabRef} className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
               <button className={activeTab === 'study' ? 'active' : ''} onClick={() => setActiveTab('study')}>Study</button>
               <button className={activeTab === 'cards' ? 'active' : ''} onClick={() => setActiveTab('cards')}>Cards</button>
+              {canManageDeck ? <button className={activeTab === 'models' ? 'active' : ''} onClick={() => setActiveTab('models')}>Models</button> : null}
               <button className={activeTab === 'stats' ? 'active' : ''} onClick={() => setActiveTab('stats')}>Stats</button>
               <button className={activeTab === 'analytics' ? 'active' : ''} onClick={() => setActiveTab('analytics')}>Analytics</button>
               <button className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab('activity')}>Activity</button>
@@ -1271,6 +1401,14 @@ export default function App() {
                 deckName={activeDeck.name}
                 activities={state.activity}
                 suggestionStats={suggestionStats}
+              />
+            ) : null}
+
+            {activeTab === 'models' && activeDeck && canManageDeck ? (
+              <ModelTemplateEditor
+                deck={activeDeck}
+                busy={busy}
+                onSave={(modelName, payload) => refreshWith(api.updateModelTemplate(activeDeck.id, modelName, payload), `${modelName} template updated`)}
               />
             ) : null}
 

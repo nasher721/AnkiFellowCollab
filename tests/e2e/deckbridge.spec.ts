@@ -1,4 +1,63 @@
 import { expect, test } from '@playwright/test';
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+
+async function createMinimalApkg(apkgPath: string) {
+  const script = String.raw`
+import json, os, sqlite3, sys, time, zipfile
+
+apkg_path = sys.argv[1]
+workdir = os.path.dirname(apkg_path)
+db_path = os.path.join(workdir, 'collection.anki2')
+if os.path.exists(db_path):
+    os.remove(db_path)
+
+model_id = 1607392319000
+deck_id = 2059400110
+note_id = 1777777777000
+card_id = 1777777777001
+now = int(time.time())
+models = {
+    str(model_id): {
+        'id': model_id,
+        'name': 'Basic',
+        'flds': [{'name': 'Front'}, {'name': 'Back'}],
+        'tmpls': [{
+            'name': 'Card 1',
+            'qfmt': '{{Front}}',
+            'afmt': '{{FrontSide}}<hr id=answer>{{Back}}',
+        }],
+        'css': '.card { font-family: Arial; }',
+    }
+}
+decks = {str(deck_id): {'id': deck_id, 'name': 'Actual Upload Deck'}}
+
+con = sqlite3.connect(db_path)
+con.execute('create table col (models text, decks text)')
+con.execute('create table notes (id integer, guid text, mid integer, mod integer, usn integer, tags text, flds text, sfld text, csum integer, flags integer, data text)')
+con.execute('create table cards (id integer, nid integer, did integer, ord integer, mod integer, usn integer, type integer, queue integer, due integer, ivl integer, factor integer, reps integer, lapses integer, left integer, odue integer, odid integer, flags integer, data text)')
+con.execute('insert into col (models, decks) values (?, ?)', (json.dumps(models), json.dumps(decks)))
+con.execute(
+    'insert into notes values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    (note_id, 'actual-upload-guid', model_id, now, -1, 'Actual Upload', 'Actual APKG front\x1fActual APKG back', 'Actual APKG front', 0, 0, ''),
+)
+con.execute(
+    'insert into cards values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    (card_id, note_id, deck_id, 0, now, -1, 0, 0, 0, 0, 2500, 0, 0, 0, 0, 0, 0, ''),
+)
+con.commit()
+con.close()
+
+with zipfile.ZipFile(apkg_path, 'w', compression=zipfile.ZIP_DEFLATED) as package:
+    package.write(db_path, 'collection.anki2')
+`;
+  await execFileAsync('python3', ['-c', script, apkgPath]);
+}
 
 test.describe('Workspace', () => {
   test.beforeEach(async ({ page }) => {
@@ -58,7 +117,9 @@ test.describe('Review Queue', () => {
   });
 
   test('displays suggestion diff', async ({ page }) => {
-    await expect(page.getByText('ANCA autoantibody')).toBeVisible();
+    await expect(
+      page.frameLocator('.card-preview-comparison iframe').nth(2).getByText(/ANCA autoantibody/)
+    ).toBeVisible();
   });
 
   test('owner can accept suggestion', async ({ page }) => {
@@ -248,7 +309,7 @@ test.describe('Tabs', () => {
     await page.getByRole('button', { name: 'Start study session' }).click();
     await expect(page.locator('.study-overlay')).toBeVisible();
 
-    await page.getByRole('button', { name: /Card question/ }).click();
+    await page.locator('.study-card').click();
     const againButton = page.getByRole('button', { name: 'Rate Again' });
     await expect(againButton).toBeVisible();
     await againButton.focus();
@@ -263,7 +324,7 @@ test.describe('Tabs', () => {
     await page.getByRole('button', { name: 'Start study session' }).click();
     await expect(page.locator('.study-overlay')).toBeVisible();
 
-    await page.getByRole('button', { name: /Card question/ }).click();
+    await page.locator('.study-card').click();
     await page.keyboard.press('1');
 
     await expect(page.getByText(/Card 2 of/)).toBeVisible();
@@ -283,8 +344,36 @@ test.describe('Tabs', () => {
   });
 
   test('switches to Analytics tab', async ({ page }) => {
+    let requestedAnalytics = false;
+    await page.route('**/api/decks/deck-demo-zanki/analytics', async (route) => {
+      requestedAnalytics = true;
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          analytics: {
+            suggestions: { total: 4, accepted: 2, rejected: 1, pending: 1, acceptanceRate: 50 },
+            stars: 3,
+            leaderboard: [{ name: 'Maya Patel', total: 3, accepted: 2 }],
+            cards: { total: 12, byState: { New: 7, Review: 5 } },
+            study: {
+              sessions: { total: 1, durationSeconds: 180, cardsStudied: 12, cardsCorrect: 9, accuracyRate: 75 },
+              weeklyTrend: [{ date: '2026-05-08', count: 12 }],
+              strugglingCards: []
+            }
+          }
+        })
+      });
+    });
+
     await page.getByRole('button', { name: 'Analytics' }).click();
     await expect(page.getByRole('button', { name: 'Analytics' })).toHaveClass(/active/);
+    await expect(page.locator('[aria-label="Loading analytics"]')).toBeVisible();
+    await expect.poll(() => requestedAnalytics).toBe(true);
+    await expect(page.locator('[aria-label="Loading analytics"]')).toHaveCount(0);
+    await expect(page.getByText('Acceptance rate')).toBeVisible();
+    await expect(page.locator('.leaderboard-name', { hasText: 'Maya Patel' })).toBeVisible();
   });
 
   test('switches to Activity tab', async ({ page }) => {
@@ -298,6 +387,7 @@ test.describe('Tabs', () => {
     await page.route('**/api/decks/deck-demo-zanki/share-links', async (route) => {
       if (route.request().method() === 'GET') {
         listedShareLinks = true;
+        await new Promise((resolve) => setTimeout(resolve, 1200));
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -331,7 +421,9 @@ test.describe('Tabs', () => {
 
     await page.getByRole('button', { name: 'Settings' }).click();
     await expect(page.getByText('Deck settings')).toBeVisible();
+    await expect(page.locator('.settings-note[role="status"]')).toHaveText('Checking share links...');
     await expect.poll(() => listedShareLinks).toBe(true);
+    await expect(page.locator('.settings-note[role="status"]')).toHaveCount(0);
     await page.getByRole('button', { name: 'Create share link' }).click();
     await expect.poll(() => createdShareLink).toBe(true);
     await expect(page.getByLabel('Deck share link')).toHaveValue(/\/share\/share-token-abc/);
@@ -497,6 +589,17 @@ test.describe('Connect Anki Wizard', () => {
       'href',
       'anki://deckbridge?url=http%3A%2F%2F127.0.0.1%3A5174&token=db_test_token&deckId=deck-visible&localDeck=Zanki%20Step%202%20CK%3A%3ACardiology&conflictPolicy=overwrite-platform'
     );
+
+    await page.getByRole('button', { name: 'Manual setup' }).click();
+    await expect(page.getByRole('heading', { name: 'Manual setup' })).toBeVisible();
+    await expect(page.getByText('Platform URL')).toBeVisible();
+    await expect(page.getByText('API Token')).toBeVisible();
+    await expect(page.getByText('db_test_token')).toBeVisible();
+    await page.getByRole('button', { name: /Prove sync/ }).click();
+    await expect(page.getByText('Step 4: Prove Sync')).toBeVisible();
+    await expect(page.getByText('Waiting for add-on proof')).toBeVisible();
+    await page.getByRole('button', { name: '← Back' }).click();
+    await expect(page.getByText('Step 3: Map Your Deck')).toBeVisible();
   });
 
   test('continues from mapping into first sync proof', async ({ page }) => {
@@ -638,5 +741,27 @@ test.describe('Connect Anki Wizard', () => {
     await expect(wizard.getByText('No DeckBridge decks are visible to this token.')).toBeVisible();
     await expect(wizard.getByLabel('DeckBridge Deck')).toHaveCount(0);
     await expect(wizard.getByText('DeckBridge deck ID: Select a deck')).toBeVisible();
+  });
+});
+
+test.describe('Deck upload', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+  });
+
+  test('uploads an actual .apkg file through the Upload button', async ({ page }) => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'deckbridge-apkg-'));
+    const apkgPath = path.join(tempDir, 'actual-upload.apkg');
+
+    try {
+      await createMinimalApkg(apkgPath);
+      await page.setInputFiles('#deck-upload', apkgPath);
+
+      await expect(page.getByText('Imported actual-upload.apkg')).toBeVisible();
+      await expect(page.getByRole('button', { name: /Actual Upload Deck/ })).toBeVisible();
+      await expect(page.getByRole('row', { name: /Actual APKG front/ })).toBeVisible();
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });

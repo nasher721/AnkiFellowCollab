@@ -367,6 +367,19 @@ export const api = {
     const filename = response.headers.get('Content-Disposition')?.match(/filename="(.+?)"/)?.[1] || 'deck.csv';
     return { blob, filename };
   },
+  importSuggestionSpreadsheet: (deckId: string, filename: string, content: string) =>
+    jsonRequest<{ imported: number; skipped: Array<{ cardId: string; reason: string }>; truncated: boolean; state: AppState }>(
+      `/api/decks/${deckId}/suggestions/import`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ filename, content })
+      }
+    ),
+  updateModelTemplate: (deckId: string, modelName: string, payload: { templateFront: string; templateBack: string; modelCss: string }) =>
+    jsonRequest<AppState>(`/api/decks/${deckId}/models/${encodeURIComponent(modelName)}/template`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    }),
   exportActivityCsv: async (deckId: string) => {
     const response = await fetch(`/api/decks/${deckId}/export/activity`, {
       headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
@@ -389,8 +402,10 @@ export const api = {
       body: JSON.stringify({ visibility })
     }),
   shareLinks: {
-    list: (deckId: string) =>
-      jsonRequest<{ shareLinks: ShareLink[] }>(`/api/decks/${deckId}/share-links`),
+    list: (deckId: string, options?: Pick<RequestInit, 'signal'>) =>
+      jsonRequest<{ shareLinks: ShareLink[] }>(`/api/decks/${deckId}/share-links`, {
+        signal: options?.signal
+      }),
     create: (deckId: string, payload?: { label?: string; password?: string; expiresAt?: string | null }) =>
       jsonRequest<{ shareLink: ShareLink }>(`/api/decks/${deckId}/share-links`, {
         method: 'POST',

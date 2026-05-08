@@ -1151,6 +1151,94 @@ test('study session API persists and lists sessions without changing progress co
     });
 });
 
+test('spreadsheet import creates one pending suggestion per changed row', async () => {
+  const { app } = await createTestApp();
+
+  const csv = [
+    'Card ID,Note Type,State,Tags,Front,Back',
+    '"card-hpylori","Basic (and reverse)","Learning","GI; Step2; Updated","First-line treatment for H. pylori infection?","Bismuth quadruple therapy plus local resistance review."',
+    '"card-anca","Basic","Learning","Rheumatology; Step2","Microscopic polyangiitis is most strongly associated with which autoantibody?","p-ANCA (myeloperoxidase)"'
+  ].join('\n');
+
+  const imported = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/import')
+    .send({ filename: 'deck.csv', content: csv }), 'maya', 'Maya Patel')
+    .expect(201);
+
+  assert.equal(imported.body.imported, 1);
+  assert.equal(imported.body.skipped.length, 1);
+  const suggestion = imported.body.state.suggestions.find((item) => item.cardId === 'card-hpylori');
+  assert.equal(suggestion.status, 'pending');
+  assert.equal(suggestion.proposedFields.Back, 'Bismuth quadruple therapy plus local resistance review.');
+  assert.deepEqual(suggestion.proposedTags, ['GI', 'Step2', 'Updated']);
+});
+
+test('owner can update model templates and CSS for matching cards', async () => {
+  const { app } = await createTestApp();
+
+  const updated = await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/models/Basic/template')
+    .send({
+      templateFront: '<section>{{Front}}</section>',
+      templateBack: '{{FrontSide}}<hr>{{Back}}',
+      modelCss: '.card { font-size: 22px; }'
+    }), 'you', 'You')
+    .expect(200);
+
+  const card = updated.body.decks[0].cards.find((item) => item.id === 'card-anca');
+  assert.equal(card.templateFront, '<section>{{Front}}</section>');
+  assert.equal(card.templateBack, '{{FrontSide}}<hr>{{Back}}');
+  assert.equal(card.modelCss, '.card { font-size: 22px; }');
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/models/Basic/template')
+    .send({ templateFront: '{{Front}}', templateBack: '{{Back}}', modelCss: '' }), 'maya', 'Maya Patel')
+    .expect(403);
+});
+
+test('scheduling sync endpoint returns web study progress mapped to Anki note ids', async () => {
+  const { app, supabase } = await createTokenTestApp();
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'overwrite-platform',
+      cards: [{
+        id: 'anki-srs-1',
+        ankiNoteId: 4242,
+        type: 'Basic',
+        modelName: 'Basic',
+        fieldOrder: ['Front', 'Back'],
+        fields: { Front: 'SRS front', Back: 'SRS back' },
+        tags: ['SRS'],
+        state: 'Review',
+        suspended: false
+      }]
+    }), 'you', 'You').expect(200);
+
+  supabase.tables.study_progress = [{
+    id: 'progress-1',
+    user_id: 'you',
+    deck_id: 'deck-demo-zanki',
+    card_id: 'anki-srs-1',
+    interval_days: 9,
+    ease_factor: 2.7,
+    repetitions: 4,
+    next_due: '2026-05-18T00:00:00.000Z',
+    last_rating: 4,
+    updated_at: '2026-05-08T15:00:00.000Z'
+  }];
+
+  const scheduling = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/sync/scheduling'), 'you', 'You')
+    .expect(200);
+
+  assert.equal(scheduling.body.updates.length, 1);
+  assert.equal(scheduling.body.updates[0].ankiNoteId, 4242);
+  assert.equal(scheduling.body.updates[0].intervalDays, 9);
+  assert.equal(scheduling.body.updates[0].easeFactor, 2.7);
+});
+
 test('share link API creates owner links and redacts password hashes', async () => {
   const { app } = await createTestApp();
 

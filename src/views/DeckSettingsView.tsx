@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, type DeckInvite, type ShareLink } from '../api';
 import type { Deck } from '../types';
 
@@ -15,6 +15,8 @@ export interface DeckSettingsViewProps {
 function shareLinkUrl(token: string) {
   return `${window.location.origin}/share/${encodeURIComponent(token)}`;
 }
+
+const SHARE_LINK_LOAD_TIMEOUT_MS = 8000;
 
 async function copyText(value: string) {
   await navigator.clipboard.writeText(value);
@@ -37,32 +39,47 @@ export function DeckSettingsView({
   const [inviteRole, setInviteRole] = useState<DeckInvite['role']>('contributor');
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteError, setInviteError] = useState('');
+  const activeShareRequestRef = useRef(0);
   const primaryShareLink = shareLinks.find((link) => !link.disabledAt) || shareLinks[0] || null;
   const primaryShareUrl = primaryShareLink ? shareLinkUrl(primaryShareLink.token) : '';
+
+  const loadShareLinks = useCallback(async (signal?: AbortSignal) => {
+    const requestId = activeShareRequestRef.current + 1;
+    activeShareRequestRef.current = requestId;
+    setShareLoading(true);
+    setShareError('');
+    try {
+      const { shareLinks: links } = await api.shareLinks.list(deck.id, { signal });
+      if (activeShareRequestRef.current !== requestId) return;
+      setShareLinks(links);
+    } catch (err) {
+      if (activeShareRequestRef.current !== requestId) return;
+      if (err instanceof Error && err.name === 'AbortError') {
+        setShareError('Share links are taking longer than expected. Retry to check again.');
+      } else {
+        setShareError(err instanceof Error ? err.message : 'Unable to load share links');
+      }
+    } finally {
+      if (activeShareRequestRef.current === requestId) setShareLoading(false);
+    }
+  }, [deck.id]);
 
   useEffect(() => {
     if (!canReview) {
       setShareLinks([]);
       setShareError('');
+      setShareLoading(false);
       return;
     }
-    let mounted = true;
-    setShareLoading(true);
-    setShareError('');
-    api.shareLinks.list(deck.id)
-      .then(({ shareLinks: links }) => {
-        if (mounted) setShareLinks(links);
-      })
-      .catch((err) => {
-        if (mounted) setShareError(err instanceof Error ? err.message : 'Unable to load share links');
-      })
-      .finally(() => {
-        if (mounted) setShareLoading(false);
-      });
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), SHARE_LINK_LOAD_TIMEOUT_MS);
+    loadShareLinks(controller.signal);
     return () => {
-      mounted = false;
+      window.clearTimeout(timeout);
+      activeShareRequestRef.current += 1;
+      controller.abort();
     };
-  }, [canReview, deck.id]);
+  }, [canReview, deck.id, loadShareLinks]);
 
   useEffect(() => {
     if (!canReview) { setInvites([]); return; }
@@ -151,13 +168,23 @@ export function DeckSettingsView({
         <section>
           <h3>Share link</h3>
           <div className="copy-row">
-            <input readOnly value={primaryShareUrl} placeholder={shareLoading ? 'Loading share links...' : 'Create a tokenized share link'} aria-label="Deck share link" />
+            <input readOnly value={primaryShareUrl} placeholder="Create a tokenized share link" aria-label="Deck share link" aria-busy={shareLoading} />
             <button className="button secondary" onClick={() => copy(primaryShareUrl, 'Share link copied')} disabled={!primaryShareUrl}>Copy</button>
           </div>
           <button className="button secondary" onClick={createShareLink} disabled={!canReview || shareLoading}>
             {primaryShareLink ? 'Create another share link' : 'Create share link'}
           </button>
-          {shareError ? <p className="settings-note">{shareError}</p> : null}
+          {shareLoading ? <p className="settings-note" role="status">Checking share links...</p> : null}
+          {shareError ? (
+            <p className="settings-note error">
+              {shareError}
+              {canReview ? (
+                <button className="inline-link-button" type="button" onClick={() => loadShareLinks()}>
+                  Retry
+                </button>
+              ) : null}
+            </p>
+          ) : null}
           {!canReview ? <p className="settings-note">Owner access is required to create share links.</p> : null}
           <small>Share URLs use backend-generated tokens. Public access depends on the share route and backend availability.</small>
         </section>

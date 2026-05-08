@@ -206,6 +206,30 @@ export function createLocalRepository() {
       return this.getDeckState(user, deck.id);
     },
 
+    async updateModelTemplate(user, deckId, modelName, patch) {
+      const state = await loadState();
+      ensureCollections(state);
+      const { deck } = requireRole(state, user.id, deckId, 'owner');
+      const now = nowIso();
+      const matched = deck.cards.filter((card) => (card.modelName || card.type || 'Basic') === modelName);
+      if (!matched.length) fail(404, 'model_not_found', 'Model not found in this deck');
+      for (const card of matched) {
+        card.templateFront = patch.templateFront;
+        card.templateBack = patch.templateBack;
+        card.modelCss = patch.modelCss;
+        card.modifiedAt = now;
+        card.modifiedBy = user.name;
+      }
+      state.activity.unshift({
+        id: `act-${randomUUID()}`,
+        kind: 'template',
+        text: `${user.name} updated the ${modelName} model template`,
+        at: now
+      });
+      await saveState(state);
+      return this.getDeckState(user, deck.id);
+    },
+
     async decideSuggestion(user, suggestionId, decision) {
       const state = await loadState();
       ensureCollections(state);
