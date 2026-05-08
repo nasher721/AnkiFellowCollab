@@ -73,7 +73,7 @@ function isInteractiveShortcutTarget(target: EventTarget | null) {
     tagName === 'textarea' ||
     tagName === 'select' ||
     target.isContentEditable ||
-    target.closest('[role="button"]') !== null
+    (target.closest('[role="button"]') !== null && target.closest('.study-card') === null)
   );
 }
 

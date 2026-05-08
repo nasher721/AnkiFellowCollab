@@ -1402,7 +1402,7 @@ export default function App() {
 
               <div className="card-table" role="table">
                 <div className="table-header" role="row">
-                  <span>
+                  <span role="columnheader">
                     <input
                       type="checkbox"
                       aria-label="Select all on page"
@@ -1416,16 +1416,17 @@ export default function App() {
                       }}
                     />
                   </span>
-                  <span>Card</span>
-                  <span>Note Type</span>
-                  <span>Tags</span>
-                  <span>Due</span>
-                  <span>State</span>
-                  <span>Last Modified</span>
+                  <span role="columnheader">Card</span>
+                  <span role="columnheader">Note Type</span>
+                  <span role="columnheader">Tags</span>
+                  <span role="columnheader">Due</span>
+                  <span role="columnheader">State</span>
+                  <span role="columnheader">Last Modified</span>
                 </div>
                 {pagedCards.length ? pagedCards.map((card) => (
                   editingCardId === card.id ? (
-                    <div key={card.id} className="table-row editing">
+                    <div key={card.id} className="table-row editing" role="row">
+                      <div role="cell" className="table-editor-cell">
                       <CardEditor
                         card={card}
                         canSuggest={canSuggest}
@@ -1443,6 +1444,7 @@ export default function App() {
                         }}
                         onCancel={() => setEditingCardId(null)}
                       />
+                      </div>
                     </div>
                   ) : (
                   <div
@@ -1463,20 +1465,22 @@ export default function App() {
                     tabIndex={0}
                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCardSelection(card.id); } }}
                   >
-                    <span
-                      className={`checkbox${selectedCardIds.has(card.id) ? ' checked' : ''}`}
-                      onClick={(e) => { e.stopPropagation(); toggleCardSelection(card.id); }}
-                      aria-label={selectedCardIds.has(card.id) ? 'Deselect card' : 'Select card'}
-                      role="checkbox"
-                      aria-checked={selectedCardIds.has(card.id)}
-                      tabIndex={-1}
-                    />
-                    <span className="card-front">{fieldValue(card, 'Front') || Object.values(card.fields)[0]}</span>
-                    <span>{card.type}</span>
-                    <span className="tag-list">{card.tags.slice(0, 2).map((tag) => <em key={tag}>{tag}</em>)}</span>
-                    <span>{card.due ?? '-'}</span>
-                    <span><b className={`state-chip ${statusColors[card.state] || 'neutral'}`}>{card.state}</b></span>
-                    <span><small>{relativeTime(card.modifiedAt)}<br />{card.modifiedBy}</small></span>
+                    <span role="cell">
+                      <span
+                        className={`checkbox${selectedCardIds.has(card.id) ? ' checked' : ''}`}
+                        onClick={(e) => { e.stopPropagation(); toggleCardSelection(card.id); }}
+                        aria-label={selectedCardIds.has(card.id) ? 'Deselect card' : 'Select card'}
+                        role="checkbox"
+                        aria-checked={selectedCardIds.has(card.id)}
+                        tabIndex={-1}
+                      />
+                    </span>
+                    <span role="cell" className="card-front">{fieldValue(card, 'Front') || Object.values(card.fields)[0]}</span>
+                    <span role="cell">{card.type}</span>
+                    <span role="cell" className="tag-list">{card.tags.slice(0, 2).map((tag) => <em key={tag}>{tag}</em>)}</span>
+                    <span role="cell">{card.due ?? '-'}</span>
+                    <span role="cell"><b className={`state-chip ${statusColors[card.state] || 'neutral'}`}>{card.state}</b></span>
+                    <span role="cell"><small>{relativeTime(card.modifiedAt)}<br />{card.modifiedBy}</small></span>
                   </div>
                   )
                 )) : <EmptyState message="No cards match the current filters." />}
@@ -1639,15 +1643,6 @@ export default function App() {
                 <div
                   className={`queue-item ${suggestion.id === selectedSuggestion?.id ? 'active' : ''}`}
                   key={suggestion.id}
-                  onClick={() => setSelectedSuggestionId(suggestion.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      setSelectedSuggestionId(suggestion.id);
-                    }
-                  }}
-                  role="button"
-                  tabIndex={0}
                 >
                   {canReview && suggestion.status === 'pending' ? (
                     <input
@@ -1664,12 +1659,18 @@ export default function App() {
                       aria-label={`${selectedSuggestionIds.has(suggestion.id) ? 'Deselect' : 'Select'} ${suggestion.authorName}'s suggestion`}
                     />
                   ) : <span className="queue-select-spacer" aria-hidden="true" />}
-                  <span className="avatar">{initials(suggestion.authorName)}</span>
-                  <span>
-                    <strong>{suggestion.authorName}</strong>
-                    <small>{relativeTime(suggestion.createdAt)}</small>
-                  </span>
-                  <b className={`queue-status ${suggestion.status}`}>{suggestion.status}</b>
+                  <button
+                    type="button"
+                    className="queue-item-main"
+                    onClick={() => setSelectedSuggestionId(suggestion.id)}
+                  >
+                    <span className="avatar">{initials(suggestion.authorName)}</span>
+                    <span>
+                      <strong>{suggestion.authorName}</strong>
+                      <small>{relativeTime(suggestion.createdAt)}</small>
+                    </span>
+                    <b className={`queue-status ${suggestion.status}`}>{suggestion.status}</b>
+                  </button>
                 </div>
               )) : <EmptyState message="No suggestions match the queue filters." />}
             </div>

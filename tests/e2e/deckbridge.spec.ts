@@ -258,6 +258,18 @@ test.describe('Tabs', () => {
     await expect(page.getByText('0% accuracy')).toBeVisible();
   });
 
+  test('study card keeps rating shortcuts after click reveal focus', async ({ page }) => {
+    await page.getByRole('button', { name: 'Study' }).click();
+    await page.getByRole('button', { name: 'Start study session' }).click();
+    await expect(page.locator('.study-overlay')).toBeVisible();
+
+    await page.getByRole('button', { name: /Card question/ }).click();
+    await page.keyboard.press('1');
+
+    await expect(page.getByText(/Card 2 of/)).toBeVisible();
+    await expect(page.getByText('0% accuracy')).toBeVisible();
+  });
+
   test('switches to Cards tab', async ({ page }) => {
     await page.getByRole('button', { name: 'Cards', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Cards', exact: true })).toHaveClass(/active/);
