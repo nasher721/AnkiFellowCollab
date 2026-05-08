@@ -94,7 +94,11 @@ export function normalizeParsedDeck(parsed, sourceName = 'Imported Deck') {
       suspended: Boolean(card.suspended),
       mediaRefs: Array.isArray(card.mediaRefs) ? card.mediaRefs.map(String) : [],
       sourceDeckName: card.deckName || parsed?.deck_name || deckName,
-      sourceDeckPath: card.deckPath || parsed?.deck_path || null
+      sourceDeckPath: card.deckPath || parsed?.deck_path || null,
+      ...(card.templateFront != null ? { templateFront: String(card.templateFront) } : {}),
+      ...(card.templateBack != null ? { templateBack: String(card.templateBack) } : {}),
+      ...(card.modelCss != null ? { modelCss: String(card.modelCss) } : {}),
+      ...(Number.isFinite(Number(card.clozeOrd)) ? { clozeOrd: Number(card.clozeOrd) } : {}),
     };
   });
 

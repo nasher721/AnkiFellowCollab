@@ -1,7 +1,7 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import type { DeckCard } from './types';
 import { api } from './api';
-import { renderMediaHtml } from './media';
+import { AnkiCardRenderer, renderCardHtml } from './AnkiCardRenderer';
 import {
   type CardProgress,
   type Rating,
@@ -21,9 +21,6 @@ interface Props {
   onClose: () => void;
 }
 
-function fieldVal(card: DeckCard, key: string) {
-  return card.fields[key] ?? card.fields[key.toLowerCase()] ?? Object.values(card.fields)[0] ?? '';
-}
 
 const RATING_LABELS: Record<Rating, string> = {
   1: 'Again',
@@ -132,6 +129,10 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
 
   const currentCardId = queue[queueIndex];
   const currentCard = cards.find((c) => c.id === currentCardId);
+  const frontHtml = useMemo(
+    () => currentCard ? renderCardHtml(currentCard, deckId, 'front', undefined, currentCard.clozeOrd) : '',
+    [currentCard, deckId],
+  );
 
   // Persist whenever progress changes
   useEffect(() => {
@@ -370,18 +371,23 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
           }}
         >
           <div className="study-card-face study-card-front">
-            <div
-              className="study-card-content"
-              dangerouslySetInnerHTML={{ __html: renderMediaHtml(deckId, fieldVal(currentCard, 'Front')) }}
+            <AnkiCardRenderer
+              card={currentCard}
+              deckId={deckId}
+              side="front"
+              clozeOrd={currentCard.clozeOrd}
             />
             {!flipped && <span className="study-flip-hint">Click or press Space to reveal</span>}
           </div>
           {flipped && (
             <div className="study-card-face study-card-back">
               <hr className="study-divider" />
-              <div
-                className="study-card-content"
-                dangerouslySetInnerHTML={{ __html: renderMediaHtml(deckId, fieldVal(currentCard, 'Back')) }}
+              <AnkiCardRenderer
+                card={currentCard}
+                deckId={deckId}
+                side="back"
+                frontHtml={frontHtml}
+                clozeOrd={currentCard.clozeOrd}
               />
             </div>
           )}
