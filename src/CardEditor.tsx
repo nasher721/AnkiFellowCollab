@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useId, useRef } from 'react';
 import type { DeckCard } from './types';
 
 interface Props {
@@ -38,6 +38,7 @@ function FormattingToolbar({ textareaId }: { textareaId: string }) {
 
 export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props) {
   const fieldNames = card.fieldOrder?.length ? card.fieldOrder : Object.keys(card.fields);
+  const editorId = useId();
   const [fields, setFields] = useState<Record<string, string>>(() => ({ ...card.fields }));
   const [tagsInput, setTagsInput] = useState(card.tags.join(', '));
   const [reason, setReason] = useState('');
@@ -89,28 +90,33 @@ export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props
       </div>
 
       <div className="card-editor-fields">
-        {fieldNames.map((name, i) => (
-          <div className="card-editor-field" key={name}>
-            <label htmlFor={`card-edit-${name.toLowerCase()}`}>{name}</label>
-            {(name.toLowerCase() === 'front' || name.toLowerCase() === 'back') && (
-              <FormattingToolbar textareaId={`card-edit-${name.toLowerCase()}`} />
-            )}
-            <textarea
-              id={`card-edit-${name.toLowerCase()}`}
-              ref={i === 0 ? firstRef : undefined}
-              className="card-editor-textarea"
-              value={fields[name] ?? ''}
-              onChange={(e) => setField(name, e.target.value)}
-              rows={name.toLowerCase() === 'front' ? 3 : 5}
-              aria-label={name}
-            />
-          </div>
-        ))}
+        {fieldNames.map((name, i) => {
+          const fieldId = `${editorId}-field-${i}`;
+          const normalizedName = name.toLowerCase();
+
+          return (
+            <div className="card-editor-field" key={`${name}-${i}`}>
+              <label htmlFor={fieldId}>{name}</label>
+              {(normalizedName === 'front' || normalizedName === 'back') && (
+                <FormattingToolbar textareaId={fieldId} />
+              )}
+              <textarea
+                id={fieldId}
+                ref={i === 0 ? firstRef : undefined}
+                className="card-editor-textarea"
+                value={fields[name] ?? ''}
+                onChange={(e) => setField(name, e.target.value)}
+                rows={normalizedName === 'front' ? 3 : 5}
+                aria-label={name}
+              />
+            </div>
+          );
+        })}
 
         <div className="card-editor-field">
-          <label htmlFor="editor-tags">Tags <small>(comma-separated)</small></label>
+          <label htmlFor={`${editorId}-tags`}>Tags <small>(comma-separated)</small></label>
           <input
-            id="editor-tags"
+            id={`${editorId}-tags`}
             className="card-editor-input"
             value={tagsInput}
             onChange={(e) => { setTagsInput(e.target.value); setError(''); }}
@@ -119,9 +125,9 @@ export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props
         </div>
 
         <div className="card-editor-field">
-          <label htmlFor="editor-reason">Reason for change <small>(required)</small></label>
+          <label htmlFor={`${editorId}-reason`}>Reason for change <small>(required)</small></label>
           <textarea
-            id="editor-reason"
+            id={`${editorId}-reason`}
             className="card-editor-textarea"
             value={reason}
             onChange={(e) => { setReason(e.target.value); setError(''); }}

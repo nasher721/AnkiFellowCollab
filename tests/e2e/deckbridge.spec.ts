@@ -243,6 +243,21 @@ test.describe('Tabs', () => {
     await expect(page.getByRole('button', { name: 'Overview' })).toBeFocused();
   });
 
+  test('rating button Enter activation is not overridden by global shortcuts', async ({ page }) => {
+    await page.getByRole('button', { name: 'Study' }).click();
+    await page.getByRole('button', { name: 'Start study session' }).click();
+    await expect(page.locator('.study-overlay')).toBeVisible();
+
+    await page.getByRole('button', { name: /Card question/ }).click();
+    const againButton = page.getByRole('button', { name: 'Rate Again' });
+    await expect(againButton).toBeVisible();
+    await againButton.focus();
+    await page.keyboard.press('Enter');
+
+    await expect(page.getByText(/Card 2 of/)).toBeVisible();
+    await expect(page.getByText('0% accuracy')).toBeVisible();
+  });
+
   test('switches to Cards tab', async ({ page }) => {
     await page.getByRole('button', { name: 'Cards', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Cards', exact: true })).toHaveClass(/active/);

@@ -63,10 +63,18 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])'
 ].join(',');
 
-function isEditableShortcutTarget(target: EventTarget | null) {
+function isInteractiveShortcutTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
   const tagName = target.tagName.toLowerCase();
-  return tagName === 'input' || tagName === 'textarea' || tagName === 'select' || target.isContentEditable;
+  return (
+    tagName === 'button' ||
+    tagName === 'a' ||
+    tagName === 'input' ||
+    tagName === 'textarea' ||
+    tagName === 'select' ||
+    target.isContentEditable ||
+    target.closest('[role="button"]') !== null
+  );
 }
 
 function getFocusableElements(container: HTMLElement) {
@@ -214,7 +222,11 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
         }
         return;
       }
-      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || isEditableShortcutTarget(e.target)) return;
+      if (e.key === 'Escape') {
+        onClose();
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || isInteractiveShortcutTarget(e.target)) return;
       if (e.key === ' ' || e.key === 'Enter') {
         if (!flipped) setFlipped(true);
         else rate(3);
@@ -225,7 +237,6 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
         else if (e.key === '4') rate(4);
       }
       if (e.key === 's') skipCard();
-      if (e.key === 'Escape') onClose();
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -351,7 +362,12 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
           role="button"
           tabIndex={0}
           aria-label={flipped ? 'Card answer' : 'Card question — click to reveal'}
-          onKeyDown={(e) => e.key === 'Enter' && !flipped && setFlipped(true)}
+          onKeyDown={(e) => {
+            if ((e.key === 'Enter' || e.key === ' ') && !flipped) {
+              e.preventDefault();
+              setFlipped(true);
+            }
+          }}
         >
           <div className="study-card-face study-card-front">
             <div
