@@ -105,7 +105,7 @@ port = 54324
 [storage]
 enabled = true
 # The maximum file size allowed (e.g. "5MB", "500KB").
-file_size_limit = "50MiB"
+file_size_limit = "15GiB"
 
 # Uncomment to configure local storage buckets
 # [storage.buckets.images]
@@ -116,12 +116,12 @@ file_size_limit = "50MiB"
 
 [storage.buckets."deckbridge-exports"]
 public = false
-file_size_limit = "50MiB"
+file_size_limit = "15GiB"
 allowed_mime_types = ["application/octet-stream"]
 
 [storage.buckets."deckbridge-media"]
 public = false
-file_size_limit = "100MiB"
+file_size_limit = "15GiB"
 allowed_mime_types = ["image/png", "image/jpeg", "image/gif", "image/webp", "audio/mpeg", "audio/wav", "audio/ogg", "audio/mp4", "video/mp4", "application/octet-stream"]
 
 # Allow connections via S3 compatible clients

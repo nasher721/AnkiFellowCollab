@@ -339,25 +339,29 @@ export function createSupabaseRepository(options = {}) {
       });
       if (memberError) throw memberError;
       if (deck.cards.length) {
-        const { error: cardError } = await supabase.from('cards').insert(deck.cards.map((card) => ({
-          id: card.id,
-          deck_id: deck.id,
-          anki_note_id: card.ankiNoteId,
-          note_type: card.type,
-          model_name: card.modelName || card.type,
-          field_order: card.fieldOrder || Object.keys(card.fields || {}),
-          fields: card.fields,
-          tags: card.tags,
-          due: card.due,
-          state: card.state,
-          modified_at: card.modifiedAt,
-          modified_by: card.modifiedBy,
-          suspended: card.suspended,
-          media_refs: card.mediaRefs || [],
-          source_deck_name: card.sourceDeckName,
-          source_deck_path: card.sourceDeckPath
-        })));
-        if (cardError) throw cardError;
+        const chunkSize = 2000;
+        for (let i = 0; i < deck.cards.length; i += chunkSize) {
+          const chunk = deck.cards.slice(i, i + chunkSize);
+          const { error: cardError } = await supabase.from('cards').insert(chunk.map((card) => ({
+            id: card.id,
+            deck_id: deck.id,
+            anki_note_id: card.ankiNoteId,
+            note_type: card.type,
+            model_name: card.modelName || card.type,
+            field_order: card.fieldOrder || Object.keys(card.fields || {}),
+            fields: card.fields,
+            tags: card.tags,
+            due: card.due,
+            state: card.state,
+            modified_at: card.modifiedAt,
+            modified_by: card.modifiedBy,
+            suspended: card.suspended,
+            media_refs: card.mediaRefs || [],
+            source_deck_name: card.sourceDeckName,
+            source_deck_path: card.sourceDeckPath
+          })));
+          if (cardError) throw cardError;
+        }
       }
       await supabase.from('activity').insert({
         id: `act-${randomUUID()}`,
@@ -754,25 +758,29 @@ export function createSupabaseRepository(options = {}) {
 
       if (!syncInput.dryRun) {
         if (result.createdCards.length) {
-          const { error } = await supabase.from('cards').insert(result.createdCards.map((card) => ({
-            id: card.id,
-            deck_id: deck.id,
-            anki_note_id: card.ankiNoteId,
-            note_type: card.type,
-            model_name: card.modelName || card.type,
-            field_order: card.fieldOrder || Object.keys(card.fields || {}),
-            fields: card.fields,
-            tags: card.tags,
-            due: card.due,
-            state: card.state,
-            modified_at: card.modifiedAt,
-            modified_by: card.modifiedBy,
-            suspended: card.suspended,
-            media_refs: card.mediaRefs || [],
-            source_deck_name: card.sourceDeckName,
-            source_deck_path: card.sourceDeckPath
-          })));
-          if (error) throw error;
+          const chunkSize = 2000;
+          for (let i = 0; i < result.createdCards.length; i += chunkSize) {
+            const chunk = result.createdCards.slice(i, i + chunkSize);
+            const { error } = await supabase.from('cards').insert(chunk.map((card) => ({
+              id: card.id,
+              deck_id: deck.id,
+              anki_note_id: card.ankiNoteId,
+              note_type: card.type,
+              model_name: card.modelName || card.type,
+              field_order: card.fieldOrder || Object.keys(card.fields || {}),
+              fields: card.fields,
+              tags: card.tags,
+              due: card.due,
+              state: card.state,
+              modified_at: card.modifiedAt,
+              modified_by: card.modifiedBy,
+              suspended: card.suspended,
+              media_refs: card.mediaRefs || [],
+              source_deck_name: card.sourceDeckName,
+              source_deck_path: card.sourceDeckPath
+            })));
+            if (error) throw error;
+          }
         }
         for (const card of result.updatedCards) {
           const { error } = await supabase.from('cards').update({
