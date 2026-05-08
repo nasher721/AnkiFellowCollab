@@ -12,7 +12,7 @@ import { DiscoverView } from './DiscoverView';
 import { AnalyticsDashboard } from './AnalyticsDashboard';
 import { ActivityTimeline } from './ActivityTimeline';
 import { TemplateGallery } from './TemplateGallery';
-import { ConflictResolution } from './ConflictResolution';
+import { ConflictResolution, type Conflict } from './ConflictResolution';
 
 interface Toast {
   id: string;
@@ -476,6 +476,7 @@ export default function App() {
   const [reviewTab, setReviewTab] = useState<'changes' | 'discussion'>('changes');
   const [reviewStatusFilter, setReviewStatusFilter] = useState<'pending' | 'accepted' | 'rejected' | 'revision' | 'all'>('pending');
   const [reviewAuthorFilter, setReviewAuthorFilter] = useState('All');
+  const [conflictReviewSnapshot, setConflictReviewSnapshot] = useState<Conflict[]>([]);
   const [topView, setTopView] = useState<'workspace' | 'discover' | 'templates'>('workspace');
   const [deckVisibility, setDeckVisibility] = useState<Record<string, string>>({});
   const [copiedShare, setCopiedShare] = useState('');
@@ -679,6 +680,20 @@ export default function App() {
     lastAddonSync: null,
     conflicts: []
   };
+  const activeSyncConflicts = syncSnapshot.conflicts;
+  const pendingConflictIds = useMemo(() => activeSyncConflicts.map((conflict) => conflict.id), [activeSyncConflicts]);
+  useEffect(() => {
+    if (!activeSyncConflicts.length) return;
+
+    setConflictReviewSnapshot((previous) => {
+      const previousIds = new Set(previous.map((conflict) => conflict.id));
+      const isResolutionShrink = previous.length > 0 &&
+        activeSyncConflicts.length < previous.length &&
+        activeSyncConflicts.every((conflict) => previousIds.has(conflict.id));
+
+      return isResolutionShrink ? previous : activeSyncConflicts;
+    });
+  }, [activeSyncConflicts]);
   const syncHealth = useMemo(() => deriveSyncHealth({
     activeDeck,
     addonPackage,
@@ -1256,9 +1271,10 @@ export default function App() {
               />
             ) : null}
 
-            {state.sync.conflicts.length ? (
+            {conflictReviewSnapshot.length ? (
               <ConflictResolution
-                conflicts={state.sync.conflicts}
+                conflicts={conflictReviewSnapshot}
+                pendingConflictIds={pendingConflictIds}
                 onResolve={(conflictId, resolution) => {
                   setState(prev => prev ? {
                     ...prev,
@@ -1271,6 +1287,7 @@ export default function App() {
                     pushToast(resolution === 'local' ? 'Kept local version' : 'Applied incoming changes', 'info');
                   }
                 }}
+                onClearReview={() => setConflictReviewSnapshot([])}
               />
             ) : null}
 

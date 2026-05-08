@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 interface Conflict {
   id: string;
@@ -12,7 +12,9 @@ interface Conflict {
 
 interface Props {
   conflicts: Conflict[];
+  pendingConflictIds?: string[];
   onResolve: (conflictId: string, resolution: 'local' | 'incoming' | 'skip') => void;
+  onClearReview?: () => void;
 }
 
 type Resolution = 'local' | 'incoming' | 'skip';
@@ -23,6 +25,8 @@ interface StoredDecision {
   deckId: string;
   cardId: string;
   source: string;
+  detectedAt: string;
+  fingerprint: string;
 }
 
 type StoredDecisions = Record<string, StoredDecision>;
@@ -40,22 +44,43 @@ function hashParts(parts: string[]) {
   return Math.abs(hash).toString(36);
 }
 
+function stableRecordFingerprint(record: Record<string, string>) {
+  return Object.keys(record)
+    .sort()
+    .map((key) => `${key}:${record[key]}`)
+    .join('\u001f');
+}
+
+function getConflictFingerprint(conflict: Conflict) {
+  return hashParts([
+    conflict.id,
+    conflict.deckId,
+    conflict.cardId,
+    conflict.source,
+    conflict.detectedAt,
+    stableRecordFingerprint(conflict.localFields),
+    stableRecordFingerprint(conflict.incomingFields)
+  ]);
+}
+
 function getStorageKey(conflicts: Conflict[]) {
   const deckIds = Array.from(new Set(conflicts.map((conflict) => conflict.deckId).filter(Boolean))).sort();
+  const conflictSetFingerprint = hashParts(conflicts
+    .map((conflict) => getConflictFingerprint(conflict))
+    .sort());
 
   if (deckIds.length) {
-    return `${STORAGE_PREFIX}:deck:${deckIds.join(',')}`;
+    return `${STORAGE_PREFIX}:deck:${deckIds.join(',')}:set:${conflictSetFingerprint}`;
   }
 
-  const conflictIds = conflicts.map((conflict) => conflict.id).sort();
-  return `${STORAGE_PREFIX}:set:${hashParts(conflictIds)}`;
+  return `${STORAGE_PREFIX}:set:${conflictSetFingerprint}`;
 }
 
 function isResolution(value: unknown): value is Resolution {
   return value === 'local' || value === 'incoming' || value === 'skip';
 }
 
-function readStoredDecisions(storageKey: string): StoredDecisions {
+function readStoredDecisions(storageKey: string, conflicts: Conflict[]): StoredDecisions {
   if (typeof window === 'undefined') return {};
 
   try {
@@ -63,15 +88,22 @@ function readStoredDecisions(storageKey: string): StoredDecisions {
     if (!raw) return {};
 
     const parsed = JSON.parse(raw) as Record<string, Partial<StoredDecision>>;
+    const conflictFingerprints = new Map(conflicts.map((conflict) => [conflict.id, getConflictFingerprint(conflict)]));
+
     return Object.fromEntries(
       Object.entries(parsed)
-        .filter(([, decision]) => isResolution(decision?.resolution))
+        .filter(([conflictId, decision]) => (
+          isResolution(decision?.resolution) &&
+          decision.fingerprint === conflictFingerprints.get(conflictId)
+        ))
         .map(([conflictId, decision]) => [conflictId, {
           resolution: decision.resolution as Resolution,
           decidedAt: decision.decidedAt || '',
           deckId: decision.deckId || '',
           cardId: decision.cardId || '',
-          source: decision.source || ''
+          source: decision.source || '',
+          detectedAt: decision.detectedAt || '',
+          fingerprint: decision.fingerprint || ''
         }])
     );
   } catch {
@@ -122,11 +154,13 @@ function highlightDiff(local: string, incoming: string, side: 'local' | 'incomin
   })}</>;
 }
 
-function ConflictResolution({ conflicts, onResolve }: Props) {
+function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearReview }: Props) {
   const storageKey = useMemo(() => getStorageKey(conflicts), [conflicts]);
+  const pendingIds = useMemo(() => new Set(pendingConflictIds || conflicts.map((item) => item.id)), [conflicts, pendingConflictIds]);
   const [view, setView] = useState<'unresolved' | 'all'>('unresolved');
-  const [decisions, setDecisions] = useState<StoredDecisions>(() => readStoredDecisions(storageKey));
+  const [decisions, setDecisions] = useState<StoredDecisions>(() => readStoredDecisions(storageKey, conflicts));
   const [index, setIndex] = useState(0);
+  const replayedRef = useRef<Set<string>>(new Set());
   const visibleConflicts = useMemo(() => {
     if (view === 'all') return conflicts;
     return conflicts.filter((item) => !decisions[item.id]);
@@ -134,12 +168,24 @@ function ConflictResolution({ conflicts, onResolve }: Props) {
   const conflict = visibleConflicts[index];
   const decidedCount = conflicts.filter((item) => decisions[item.id]).length;
   const unresolvedCount = conflicts.length - decidedCount;
+  const pendingCount = conflicts.filter((item) => pendingIds.has(item.id)).length;
 
   useEffect(() => {
-    setDecisions(readStoredDecisions(storageKey));
+    setDecisions(readStoredDecisions(storageKey, conflicts));
     setIndex(0);
     setView('unresolved');
+    replayedRef.current = new Set();
   }, [storageKey]);
+
+  useEffect(() => {
+    conflicts.forEach((item) => {
+      const decision = decisions[item.id];
+      if (!decision || !pendingIds.has(item.id) || replayedRef.current.has(item.id)) return;
+
+      replayedRef.current.add(item.id);
+      onResolve(item.id, decision.resolution);
+    });
+  }, [conflicts, decisions, onResolve, pendingIds]);
 
   useEffect(() => {
     setIndex((current) => Math.min(current, Math.max(visibleConflicts.length - 1, 0)));
@@ -153,14 +199,17 @@ function ConflictResolution({ conflicts, onResolve }: Props) {
         decidedAt: new Date().toISOString(),
         deckId: selectedConflict.deckId,
         cardId: selectedConflict.cardId,
-        source: selectedConflict.source
+        source: selectedConflict.source,
+        detectedAt: selectedConflict.detectedAt,
+        fingerprint: getConflictFingerprint(selectedConflict)
       }
     };
 
     setDecisions(nextDecisions);
     writeStoredDecisions(storageKey, nextDecisions);
+    replayedRef.current.add(selectedConflict.id);
     onResolve(selectedConflict.id, resolution);
-    if (index < visibleConflicts.length - 1) setIndex((i) => i + 1);
+    if (view === 'all' && index < visibleConflicts.length - 1) setIndex((i) => i + 1);
   };
 
   const resetProgress = () => {
@@ -178,7 +227,7 @@ function ConflictResolution({ conflicts, onResolve }: Props) {
             <strong>Sync Conflicts</strong>
             <span className="conflict-progress">{unresolvedCount} unresolved</span>
           </div>
-          <small>{decidedCount} saved decision{decidedCount === 1 ? '' : 's'}</small>
+          <small>{decidedCount} saved decision{decidedCount === 1 ? '' : 's'} · {pendingCount} pending</small>
         </div>
         <div className="conflict-empty">
           <strong>No unresolved conflicts in this saved review.</strong>
@@ -190,6 +239,11 @@ function ConflictResolution({ conflicts, onResolve }: Props) {
             <button className="button danger-outline" disabled={!decidedCount} onClick={resetProgress}>
               Reset Progress
             </button>
+            {onClearReview ? (
+              <button className="button secondary" disabled={pendingCount > 0} onClick={onClearReview}>
+                Clear Review
+              </button>
+            ) : null}
           </div>
         </div>
       </div>
