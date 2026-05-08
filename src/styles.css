@@ -2775,6 +2775,7 @@ button:disabled {
 }
 .study-flip-hint { font-size: 0.78rem; color: var(--text-muted, #aaa); margin-top: auto; }
 .study-divider { border: none; border-top: 1px solid var(--border, #e5e7eb); margin: 0; }
+.anki-card-iframe { width: 100%; border: none; min-height: 60px; display: block; border-radius: 6px; background: #fff; }
 
 .study-rating-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
 .study-rating-placeholder { color: var(--text-muted, #aaa); font-size: 0.85rem; justify-content: center; align-items: center; min-height: 48px; }

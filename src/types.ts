@@ -54,6 +54,10 @@ export interface DeckCard {
   mediaRefs?: string[];
   sourceDeckName?: string | null;
   sourceDeckPath?: string | null;
+  templateFront?: string;
+  templateBack?: string;
+  modelCss?: string;
+  clozeOrd?: number;
 }
 
 export interface Deck {

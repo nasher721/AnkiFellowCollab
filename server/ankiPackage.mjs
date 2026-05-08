@@ -56,8 +56,10 @@ with tempfile.TemporaryDirectory() as tempdir:
         deck_name = next((deck.get('name') for deck in decks.values() if deck.get('name')), 'Imported Anki Deck')
     due_by_note = {}
     state_by_note = {}
-    for card in con.execute('select nid, due, queue from cards'):
+    tmpl_ord_by_note = {}
+    for card in con.execute('select nid, due, queue, ord from cards'):
         due_by_note.setdefault(card['nid'], card['due'])
+        tmpl_ord_by_note.setdefault(card['nid'], card['ord'])
         queue = card['queue']
         state_by_note.setdefault(card['nid'], 'Suspended' if queue < 0 else 'New' if queue == 0 else 'Learning' if queue in (1, 3) else 'Review')
     cards = []
@@ -66,6 +68,9 @@ with tempfile.TemporaryDirectory() as tempdir:
         field_names = [field.get('name', f'Field {i+1}') for i, field in enumerate(model.get('flds', []))]
         values = note['flds'].split('\\x1f')
         fields = {field_names[i] if i < len(field_names) else f'Field {i+1}': value for i, value in enumerate(values)}
+        tmpls = model.get('tmpls', [])
+        tmpl_idx = tmpl_ord_by_note.get(note['id'], 0)
+        tmpl = tmpls[tmpl_idx] if tmpls and tmpl_idx < len(tmpls) else (tmpls[0] if tmpls else {})
         cards.append({
             'id': str(note['id']),
             'noteId': note['id'],
@@ -73,7 +78,11 @@ with tempfile.TemporaryDirectory() as tempdir:
             'fields': fields,
             'tags': [tag for tag in note['tags'].split(' ') if tag],
             'due': due_by_note.get(note['id']),
-            'state': state_by_note.get(note['id'], 'New')
+            'state': state_by_note.get(note['id'], 'New'),
+            'templateFront': tmpl.get('qfmt', ''),
+            'templateBack': tmpl.get('afmt', ''),
+            'modelCss': model.get('css', ''),
+            'clozeOrd': tmpl_ord_by_note.get(note['id'], 0),
         })
     print(json.dumps({'deck_name': deck_name, 'cards': cards}))
 `, [apkgPath]);
