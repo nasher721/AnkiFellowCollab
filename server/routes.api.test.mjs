@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import request from 'supertest';
+import { createSeedState } from './domain.mjs';
 import { fail } from './errors.mjs';
 import { resolveTokenUser } from './tokens.mjs';
 
@@ -13,23 +15,26 @@ class FakeSupabase {
       profiles: [],
       user_tokens: []
     };
+    this.errors = [];
   }
 
   from(table) {
-    return new FakeQuery(this.tables, table);
+    return new FakeQuery(this.tables, table, this.errors);
   }
 }
 
 class FakeQuery {
-  constructor(tables, table) {
+  constructor(tables, table, errors = []) {
     this.tables = tables;
     this.table = table;
+    this.errors = errors;
     this.filters = [];
     this.pendingUpdate = null;
     this.pendingDelete = false;
     this.limitCount = null;
     this.rangeBounds = null;
     this.selectOptions = {};
+    this.orderClauses = [];
   }
 
   select(_columns, options = {}) {
@@ -42,7 +47,18 @@ class FakeQuery {
     return this;
   }
 
-  order() {
+  lt(field, value) {
+    this.filters.push({ field, value, op: 'lt' });
+    return this;
+  }
+
+  order(field, options = {}) {
+    this.orderClauses.push({ field, ascending: options.ascending !== false });
+    return this;
+  }
+
+  or(expression) {
+    this.filters.push({ op: 'or', expression });
     return this;
   }
 
@@ -94,6 +110,8 @@ class FakeQuery {
   }
 
   async execute() {
+    const syntheticError = this.syntheticError();
+    if (syntheticError) return { data: null, count: null, error: syntheticError };
     if (this.pendingDelete) {
       const rows = this.tables[this.table];
       const kept = rows.filter((row) => !this.matches(row));
@@ -111,6 +129,12 @@ class FakeQuery {
     return { data: rows, count: this.selectOptions.count ? rows.length : null, error: null };
   }
 
+  syntheticError() {
+    const isHead = Boolean(this.selectOptions.head);
+    const match = this.errors.find((error) => error.table === this.table && (error.head === undefined || error.head === isHead));
+    return match ? { message: match.message || 'Synthetic Supabase error' } : null;
+  }
+
   async maybeSingle() {
     return { data: this.rows()[0] || null, error: null };
   }
@@ -121,20 +145,44 @@ class FakeQuery {
 
   rows() {
     let rows = this.tables[this.table].filter((row) => this.matches(row));
+    rows = this.applyOrder(rows);
     if (this.rangeBounds) rows = rows.slice(this.rangeBounds.from, this.rangeBounds.to + 1);
     if (this.limitCount !== null) rows = rows.slice(0, this.limitCount);
     return rows;
   }
 
+  applyOrder(rows) {
+    if (!this.orderClauses.length) return rows;
+    return [...rows].sort((a, b) => {
+      for (const { field, ascending } of this.orderClauses) {
+        const left = a[field];
+        const right = b[field];
+        if (left === right) continue;
+        const comparison = left > right ? 1 : -1;
+        return ascending ? comparison : -comparison;
+      }
+      return 0;
+    });
+  }
+
   matches(row) {
-    return this.filters.every(({ field, value, op }) => {
+    return this.filters.every(({ field, value, op, expression }) => {
       if (op === 'ilike') return String(row[field] || '').toLowerCase().includes(value);
+      if (op === 'lt') return row[field] < value;
+      if (op === 'or') return this.matchesOr(row, expression);
       return row[field] === value;
     });
   }
+
+  matchesOr(row, expression) {
+    const match = String(expression).match(/^created_at\.lt\.(.+),and\(created_at\.eq\.(.+),id\.lt\.(.+)\)$/);
+    if (!match) throw new Error(`Unsupported fake Supabase or expression: ${expression}`);
+    const [, olderThan, tiedAt, afterId] = match;
+    return row.created_at < olderThan || (row.created_at === tiedAt && row.id < afterId);
+  }
 }
 
-async function createTestApp() {
+async function createTestApp(options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
   process.env.DECKBRIDGE_DATA_DIR = dataDir;
   const { createApp } = await import(`./app.mjs?test=${Date.now()}-${Math.random()}`);
@@ -142,13 +190,15 @@ async function createTestApp() {
     app: createApp({
       production: false,
       repositoryMode: 'local',
+      rateLimits: { disabled: true },
       parseApkg: async () => ({
         deck_name: 'Uploaded Deck',
         cards: [{ id: 'uploaded-card', front: 'Front', back: 'Back', type: 'Basic', tags: ['Upload'] }]
       }),
       createApkg: async (_jsonPath, apkgPath) => {
         await fs.writeFile(apkgPath, 'fake-apkg', 'utf8');
-      }
+      },
+      ...options
     }),
     dataDir
   };
@@ -183,7 +233,7 @@ async function createTokenTestApp(options = {}) {
     }
   };
   return {
-    app: createApp({ production: false, repositoryMode: 'local', auth, ...options }),
+    app: createApp({ production: false, repositoryMode: 'local', auth, rateLimits: { disabled: true }, ...options }),
     supabase
   };
 }
@@ -193,6 +243,18 @@ function asUser(req, id, name = id) {
     .set('x-deckbridge-user-id', id)
     .set('x-deckbridge-user-email', `${id}@example.com`)
     .set('x-deckbridge-user-name', name);
+}
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+async function seedLocalState(dataDir, mutator) {
+  const state = createSeedState();
+  mutator(state);
+  await fs.mkdir(dataDir, { recursive: true });
+  await fs.writeFile(path.join(dataDir, 'state.json'), `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  return state;
 }
 
 test('authenticated API returns current user and visible decks', async () => {
@@ -207,10 +269,141 @@ test('authenticated API returns current user and visible decks', async () => {
   const decks = await asUser(request(app).get('/api/decks'), 'you', 'You').expect(200);
   assert.equal(decks.body.decks.length, 1);
 
-  const collaboratorSession = await asUser(request(app)
+  const contributorSession = await asUser(request(app)
     .patch('/api/session')
-    .send({ role: 'collaborator' }), 'you', 'You').expect(200);
-  assert.equal(collaboratorSession.body.role, 'collaborator');
+    .send({ role: 'contributor' }), 'you', 'You').expect(200);
+  assert.equal(contributorSession.body.role, 'contributor');
+});
+
+test('rate limiting protects read and sync routes with configurable limits', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
+  process.env.DECKBRIDGE_DATA_DIR = dataDir;
+  const { createApp } = await import(`./app.mjs?test=${Date.now()}-${Math.random()}`);
+  const app = createApp({
+    production: false,
+    repositoryMode: 'local',
+    rateLimits: {
+      windowMs: 60_000,
+      readLimit: 1,
+      syncLimit: 1,
+      uploadLimit: 1,
+      analyticsLimit: 1
+    }
+  });
+
+  await asUser(request(app).get('/api/decks'), 'you', 'You').expect(200);
+  const readLimited = await asUser(request(app).get('/api/decks'), 'you', 'You').expect(429);
+  assert.equal(readLimited.body.error.code, 'rate_limited');
+
+  const syncBody = {
+    conflictPolicy: 'overwrite-platform',
+    source: 'DeckBridge Sync rate-limit test',
+    client: { name: 'DeckBridge Sync', version: '0.1.0', fingerprint: 'rate-limit-test' },
+    cards: [{
+      id: 'anki-rate-limit-1',
+      ankiNoteId: 99001,
+      type: 'Basic',
+      modelName: 'Basic',
+      fieldOrder: ['Front', 'Back'],
+      fields: { Front: 'Rate limit front', Back: 'Rate limit back' },
+      tags: ['DeckBridge'],
+      state: 'Review',
+      suspended: false
+    }]
+  };
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send(syncBody), 'you', 'You').expect(200);
+  const syncLimited = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send(syncBody), 'you', 'You').expect(429);
+  assert.equal(syncLimited.body.error.code, 'rate_limited');
+});
+
+test('rate limiting separates forwarded client IPs behind one trusted proxy', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
+  process.env.DECKBRIDGE_DATA_DIR = dataDir;
+  const { createApp } = await import(`./app.mjs?test=${Date.now()}-${Math.random()}`);
+  const app = createApp({
+    production: false,
+    repositoryMode: 'local',
+    trustProxy: 1,
+    rateLimits: {
+      windowMs: 60_000,
+      readLimit: 1,
+      syncLimit: 1,
+      uploadLimit: 1,
+      analyticsLimit: 1
+    }
+  });
+
+  await asUser(request(app)
+    .get('/api/decks')
+    .set('x-forwarded-for', '203.0.113.10'), 'you', 'You').expect(200);
+  const sameIpLimited = await asUser(request(app)
+    .get('/api/decks')
+    .set('x-forwarded-for', '203.0.113.10'), 'you', 'You').expect(429);
+  assert.equal(sameIpLimited.body.error.code, 'rate_limited');
+
+  await asUser(request(app)
+    .get('/api/decks')
+    .set('x-forwarded-for', '203.0.113.11'), 'you', 'You').expect(200);
+
+  const multiHopDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
+  process.env.DECKBRIDGE_DATA_DIR = multiHopDataDir;
+  const multiHopApp = createApp({
+    production: false,
+    repositoryMode: 'local',
+    trustProxy: 1,
+    rateLimits: {
+      windowMs: 60_000,
+      readLimit: 1,
+      syncLimit: 1,
+      uploadLimit: 1,
+      analyticsLimit: 1
+    }
+  });
+
+  await asUser(request(multiHopApp)
+    .get('/api/decks')
+    .set('x-forwarded-for', '198.51.100.1, 203.0.113.10'), 'you', 'You').expect(200);
+  const sameTrustedHopLimited = await asUser(request(multiHopApp)
+    .get('/api/decks')
+    .set('x-forwarded-for', '198.51.100.2, 203.0.113.10'), 'you', 'You').expect(429);
+  assert.equal(sameTrustedHopLimited.body.error.code, 'rate_limited');
+});
+
+test('rate limiting ignores spoofed forwarded IPs without a trusted proxy', async () => {
+  const previousVercel = process.env.VERCEL;
+  delete process.env.VERCEL;
+  try {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
+    process.env.DECKBRIDGE_DATA_DIR = dataDir;
+    const { createApp } = await import(`./app.mjs?test=${Date.now()}-${Math.random()}`);
+    const app = createApp({
+      production: false,
+      repositoryMode: 'local',
+      rateLimits: {
+        windowMs: 60_000,
+        readLimit: 1,
+        syncLimit: 1,
+        uploadLimit: 1,
+        analyticsLimit: 1
+      }
+    });
+
+    await asUser(request(app)
+      .get('/api/decks')
+      .set('x-forwarded-for', '203.0.113.20'), 'you', 'You').expect(200);
+    const spoofedIpLimited = await asUser(request(app)
+      .get('/api/decks')
+      .set('x-forwarded-for', '203.0.113.21'), 'you', 'You').expect(429);
+    assert.equal(spoofedIpLimited.body.error.code, 'rate_limited');
+  } finally {
+    if (previousVercel === undefined) delete process.env.VERCEL;
+    else process.env.VERCEL = previousVercel;
+  }
 });
 
 test('token API creates one-time raw tokens and lists metadata only', async () => {
@@ -340,6 +533,259 @@ test('membership roles gate owner decisions and collaborator suggestions', async
     .expect((res) => {
       assert.equal(res.body.suggestions[0].status, 'accepted');
     });
+});
+
+test('suggestion comments can be listed and resolved in local repository mode', async () => {
+  const { app } = await createTestApp();
+
+  const created = await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/comments')
+    .send({ body: 'This thread is handled by the source edit.' }), 'maya', 'Maya Patel').expect(201);
+
+  assert.equal(created.body.authorId, 'maya');
+  assert.equal(created.body.resolvedAt, null);
+  assert.equal(created.body.resolvedBy, null);
+
+  const listed = await asUser(request(app)
+    .get('/api/suggestions/sugg-anca/comments'), 'you', 'You').expect(200);
+  assert.equal(listed.body.comments.length, 1);
+  assert.equal(listed.body.comments[0].id, created.body.id);
+
+  const resolved = await asUser(request(app)
+    .patch(`/api/suggestions/sugg-anca/comments/${created.body.id}/resolved`)
+    .send({ resolved: true }), 'you', 'You').expect(200);
+  assert.ok(resolved.body.resolvedAt);
+  assert.equal(resolved.body.resolvedBy, 'you');
+
+  const unresolved = await asUser(request(app)
+    .patch(`/api/suggestions/sugg-anca/comments/${created.body.id}/resolved`)
+    .send({ resolved: false }), 'you', 'You').expect(200);
+  assert.equal(unresolved.body.resolvedAt, null);
+  assert.equal(unresolved.body.resolvedBy, null);
+});
+
+test('suggestion comment API rejects non-members, non-reviewer resolution, missing comments, replies, and invalid parents', async () => {
+  const { app } = await createTestApp();
+
+  await asUser(request(app)
+    .get('/api/suggestions/sugg-anca/comments'), 'outsider', 'Outside User')
+    .expect(403)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'forbidden');
+    });
+
+  await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/comments')
+    .send({ body: 'Reply to a missing parent', parentId: 'comment-missing' }), 'you', 'You')
+    .expect(404)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'comment_not_found');
+    });
+
+  const topLevel = await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/comments')
+    .send({ body: 'Thread to resolve' }), 'maya', 'Maya Patel').expect(201);
+
+  await asUser(request(app)
+    .patch(`/api/suggestions/sugg-anca/comments/${topLevel.body.id}/resolved`)
+    .send({ resolved: true }), 'maya', 'Maya Patel')
+    .expect(403)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'forbidden');
+    });
+
+  const reply = await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/comments')
+    .send({ body: 'Reply should not be resolvable', parentId: topLevel.body.id }), 'maya', 'Maya Patel').expect(201);
+
+  await asUser(request(app)
+    .patch(`/api/suggestions/sugg-anca/comments/${reply.body.id}/resolved`)
+    .send({ resolved: true }), 'you', 'You')
+    .expect(404)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'comment_not_found');
+    });
+
+  await asUser(request(app)
+    .patch('/api/suggestions/sugg-anca/comments/comment-missing/resolved')
+    .send({ resolved: true }), 'you', 'You')
+    .expect(404)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'comment_not_found');
+    });
+});
+
+test('single suggestion role access allows reviewers and editors but rejects contributors', async () => {
+  for (const role of ['reviewer', 'editor']) {
+    const { app, dataDir } = await createTestApp();
+    await seedLocalState(dataDir, (state) => {
+      state.collaborators.find((person) => person.id === 'you').role = role;
+    });
+
+    await asUser(request(app)
+      .post('/api/suggestions/sugg-anca/decision')
+      .send({ decision: 'rejected' }), 'you', 'You')
+      .expect(200)
+      .expect((res) => {
+        assert.equal(res.body.suggestions.find((item) => item.id === 'sugg-anca').status, 'rejected');
+      });
+  }
+
+  const { app, dataDir } = await createTestApp();
+  await seedLocalState(dataDir, (state) => {
+    state.collaborators.find((person) => person.id === 'you').role = 'contributor';
+  });
+
+  await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/decision')
+    .send({ decision: 'rejected' }), 'you', 'You')
+    .expect(403)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'forbidden');
+    });
+});
+
+test('bulk suggestion decisions accept multiple pending suggestions for a deck', async () => {
+  const { app } = await createTestApp();
+
+  const first = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions')
+    .send({
+      cardId: 'card-hpylori',
+      reason: 'First change',
+      proposedFields: { Front: 'First bulk update?' },
+      proposedTags: ['GI', 'Bulk']
+    }), 'maya', 'Maya Patel').expect(201);
+  const firstId = first.body.suggestions[0].id;
+
+  const second = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions')
+    .send({
+      cardId: 'card-b12',
+      reason: 'Second change',
+      proposedFields: { Front: 'Second bulk update?' },
+      proposedTags: ['Neurology', 'Bulk']
+    }), 'maya', 'Maya Patel').expect(201);
+  const secondId = second.body.suggestions[0].id;
+
+  const decided = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: [firstId, secondId], decision: 'rejected' }), 'you', 'You').expect(200);
+
+  const statuses = new Map(decided.body.suggestions.map((item) => [item.id, item.status]));
+  assert.equal(statuses.get(firstId), 'rejected');
+  assert.equal(statuses.get(secondId), 'rejected');
+});
+
+test('bulk suggestion validation rejects duplicate and oversized id lists', async () => {
+  const { app } = await createTestApp();
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: 'sugg-anca', decision: 'rejected' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'missing_suggestion_ids');
+    });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: [], decision: 'rejected' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'missing_suggestion_ids');
+    });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: ['sugg-anca', 'sugg-anca'], decision: 'rejected' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'duplicate_suggestion_ids');
+    });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: Array.from({ length: 101 }, (_, index) => `sugg-${index}`), decision: 'rejected' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'too_many_suggestion_ids');
+    });
+
+  for (const invalidId of ['', '   ', 42, 'x'.repeat(201)]) {
+    await asUser(request(app)
+      .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+      .send({ suggestionIds: ['sugg-anca', invalidId], decision: 'rejected' }), 'you', 'You')
+      .expect(400)
+      .expect((res) => {
+        assert.equal(res.body.error.code, 'invalid_suggestion_id');
+      });
+  }
+});
+
+test('bulk suggestion role access allows reviewers and editors but rejects contributors', async () => {
+  for (const role of ['reviewer', 'editor']) {
+    const { app, dataDir } = await createTestApp();
+    await seedLocalState(dataDir, (state) => {
+      state.collaborators.find((person) => person.id === 'you').role = role;
+    });
+
+    await asUser(request(app)
+      .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+      .send({ suggestionIds: ['sugg-anca'], decision: 'rejected' }), 'you', 'You')
+      .expect(200)
+      .expect((res) => {
+        assert.equal(res.body.suggestions.find((item) => item.id === 'sugg-anca').status, 'rejected');
+      });
+  }
+
+  const { app, dataDir } = await createTestApp();
+  await seedLocalState(dataDir, (state) => {
+    state.collaborators.find((person) => person.id === 'you').role = 'contributor';
+  });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: ['sugg-anca'], decision: 'rejected' }), 'you', 'You')
+    .expect(403)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'forbidden');
+    });
+});
+
+test('bulk suggestion decisions apply accepted suggestions in request order', async () => {
+  const { app } = await createTestApp();
+
+  const first = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions')
+    .send({
+      cardId: 'card-hpylori',
+      reason: 'First accepted change',
+      proposedFields: { Front: 'First accepted bulk update?' },
+      proposedTags: ['GI', 'Bulk', 'First']
+    }), 'maya', 'Maya Patel').expect(201);
+  const firstId = first.body.suggestions[0].id;
+
+  const second = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions')
+    .send({
+      cardId: 'card-hpylori',
+      reason: 'Second accepted change',
+      proposedFields: { Front: 'Second accepted bulk update?' },
+      proposedTags: ['GI', 'Bulk', 'Second']
+    }), 'maya', 'Maya Patel').expect(201);
+  const secondId = second.body.suggestions[0].id;
+
+  const decided = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions/bulk-decision')
+    .send({ suggestionIds: [firstId, secondId], decision: 'accepted' }), 'you', 'You').expect(200);
+
+  const card = decided.body.decks[0].cards.find((item) => item.id === 'card-hpylori');
+  const statuses = new Map(decided.body.suggestions.map((item) => [item.id, item.status]));
+  assert.equal(card.fields.Front, 'Second accepted bulk update?');
+  assert.deepEqual(card.tags, ['GI', 'Bulk', 'Second']);
+  assert.equal(statuses.get(firstId), 'accepted');
+  assert.equal(statuses.get(secondId), 'accepted');
 });
 
 test('upload, export, and local-bridge conflict APIs use authenticated deck scope', async () => {
@@ -496,6 +942,78 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
   assert.equal(conflictBatch.body.state.sync.lastAddonSync.stats.conflicts, 2);
 });
 
+test('Anki add-on sync persists media and serves it through authenticated route', async () => {
+  const { app } = await createTestApp();
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+  const filename = 'neuro-image.png';
+
+  const synced = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'overwrite-platform',
+      source: 'DeckBridge Sync media test',
+      cards: [{
+        id: 'anki-media-route-1',
+        ankiNoteId: 9901,
+        fields: { Front: `<img src="${filename}">`, Back: 'Image answer' },
+        mediaRefs: [filename]
+      }],
+      media: {
+        [filename]: {
+          mimeType: 'image/png',
+          sha256: sha256(bytes),
+          dataBase64: bytes.toString('base64')
+        }
+      }
+    }), 'you', 'You').expect(200);
+
+  assert.equal(synced.body.state.decks[0].media[filename].mimeType, 'image/png');
+
+  const media = await asUser(request(app)
+    .get(`/api/decks/deck-demo-zanki/media/${encodeURIComponent(filename)}`), 'you', 'You')
+    .expect(200);
+
+  assert.equal(media.headers['content-type'], 'image/png');
+  assert.equal(media.headers['cache-control'], 'private, max-age=3600');
+  assert.equal(media.headers['x-content-type-options'], 'nosniff');
+  assert.deepEqual(media.body, bytes);
+});
+
+test('Anki add-on sync stores unsafe media mime as octet-stream attachment', async () => {
+  const { app } = await createTestApp();
+  const bytes = Buffer.from('<script>alert(1)</script>');
+  const filename = 'unsafe.html';
+
+  const synced = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'overwrite-platform',
+      cards: [{
+        id: 'anki-media-unsafe-1',
+        ankiNoteId: 9902,
+        fields: { Front: `<img src="${filename}">` },
+        mediaRefs: [filename]
+      }],
+      media: {
+        [filename]: {
+          mimeType: 'text/html',
+          sha256: sha256(bytes),
+          dataBase64: bytes.toString('base64')
+        }
+      }
+    }), 'you', 'You').expect(200);
+
+  assert.equal(synced.body.state.decks[0].media[filename].mimeType, 'application/octet-stream');
+
+  const media = await asUser(request(app)
+    .get(`/api/decks/deck-demo-zanki/media/${encodeURIComponent(filename)}`), 'you', 'You')
+    .expect(200);
+
+  assert.equal(media.headers['content-type'], 'application/octet-stream');
+  assert.equal(media.headers['content-disposition'], 'attachment; filename="unsafe.html"');
+  assert.deepEqual(media.body, bytes);
+});
+
 test('Anki add-on can create the first DeckBridge workspace from a local deck', async () => {
   const { app } = await createTestApp();
 
@@ -577,6 +1095,157 @@ test('share link API creates owner links and redacts password hashes', async () 
   assert.equal(listed.body.shareLinks.length, 1);
   assert.equal(listed.body.shareLinks[0].passwordProtected, true);
   assert.equal(Object.hasOwn(listed.body.shareLinks[0], 'passwordHash'), false);
+});
+
+test('security validation rejects malformed deck ids and session roles', async () => {
+  const { app } = await createTestApp();
+
+  await asUser(request(app)
+    .patch('/api/session')
+    .send({ role: 'admin' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'invalid_role');
+    });
+
+  await asUser(request(app)
+    .post('/api/decks/../../state/export')
+    .send({}), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'invalid_deck_id');
+    });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/share-links')
+    .send({ label: 'Unsafe', passwordHash: 'client-supplied' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'password_hash_not_allowed');
+    });
+});
+
+test('invite API rejects malformed email before storing invite', async () => {
+  const { app } = await createTestApp();
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/invites')
+    .send({ email: 'not-an-email', role: 'contributor' }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'invalid_email');
+    });
+
+  const invites = await asUser(request(app).get('/api/decks/deck-demo-zanki/invites'), 'you', 'You').expect(200);
+  assert.equal(invites.body.invites.length, 0);
+});
+
+test('notifications API supports limit and created_at cursor pagination', async () => {
+  const supabase = new FakeSupabase();
+  supabase.tables.notifications = [
+    { id: 'n1', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'decision', body: 'Oldest', ref_id: null, read: true, created_at: '2026-05-07T12:01:00.000Z' },
+    { id: 'n3', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'comment', body: 'Tied newer', ref_id: null, read: false, created_at: '2026-05-07T12:03:00.000Z' },
+    { id: 'n2', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'reaction', body: 'Middle', ref_id: null, read: false, created_at: '2026-05-07T12:02:00.000Z' },
+    { id: 'n4', user_id: 'you', deck_id: 'deck-demo-zanki', kind: 'comment', body: 'Newest tie', ref_id: 'comment-4', read: false, created_at: '2026-05-07T12:03:00.000Z' }
+  ];
+  const { app } = await createTestApp({
+    auth: {
+      supabase,
+      requireUser(req, _res, next) {
+        req.user = { id: 'you', email: 'you@example.com', name: 'You' };
+        next();
+      }
+    }
+  });
+
+  const first = await request(app)
+    .get('/api/notifications')
+    .query({ limit: 2 })
+    .expect(200);
+  assert.deepEqual(first.body.notifications.map((notification) => notification.id), ['n4', 'n3']);
+  assert.equal(first.body.unread, 3);
+  assert.ok(first.body.nextCursor);
+  assert.equal(first.body.notifications[0].deckId, 'deck-demo-zanki');
+  assert.equal(first.body.notifications[0].refId, 'comment-4');
+  assert.equal(first.body.notifications[0].createdAt, '2026-05-07T12:03:00.000Z');
+  assert.equal(first.body.notifications[0].deck_id, undefined);
+  assert.equal(first.body.notifications[0].ref_id, undefined);
+  assert.equal(first.body.notifications[0].created_at, undefined);
+
+  const second = await request(app)
+    .get('/api/notifications')
+    .query({ limit: 2, cursor: first.body.nextCursor })
+    .expect(200);
+  assert.deepEqual(second.body.notifications.map((notification) => notification.id), ['n2', 'n1']);
+  assert.equal(second.body.nextCursor, null);
+});
+
+test('notifications API reports page query errors', async () => {
+  const supabase = new FakeSupabase();
+  supabase.tables.notifications = [];
+  supabase.errors = [{ table: 'notifications', head: false, message: 'page query failed' }];
+  const { app } = await createTestApp({
+    auth: {
+      supabase,
+      requireUser(req, _res, next) {
+        req.user = { id: 'you', email: 'you@example.com', name: 'You' };
+        next();
+      }
+    }
+  });
+
+  await request(app)
+    .get('/api/notifications')
+    .expect(500)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'notifications_error');
+      assert.equal(res.body.error.message, 'page query failed');
+    });
+});
+
+test('notifications API reports unread count query errors', async () => {
+  const supabase = new FakeSupabase();
+  supabase.tables.notifications = [];
+  supabase.errors = [{ table: 'notifications', head: true, message: 'unread count failed' }];
+  const { app } = await createTestApp({
+    auth: {
+      supabase,
+      requireUser(req, _res, next) {
+        req.user = { id: 'you', email: 'you@example.com', name: 'You' };
+        next();
+      }
+    }
+  });
+
+  await request(app)
+    .get('/api/notifications')
+    .expect(500)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'notifications_error');
+      assert.equal(res.body.error.message, 'unread count failed');
+    });
+});
+
+test('notifications API rejects malformed cursors', async () => {
+  const supabase = new FakeSupabase();
+  supabase.tables.notifications = [];
+  const { app } = await createTestApp({
+    auth: {
+      supabase,
+      requireUser(req, _res, next) {
+        req.user = { id: 'you', email: 'you@example.com', name: 'You' };
+        next();
+      }
+    }
+  });
+
+  await request(app)
+    .get('/api/notifications')
+    .query({ cursor: 'not-a-valid-cursor' })
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'invalid_cursor');
+    });
 });
 
 test('discover API returns real preview fields from public deck cards', async () => {

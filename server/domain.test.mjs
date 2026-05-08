@@ -1,13 +1,25 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import {
   applySuggestion,
   createSeedState,
   deckToCreateDeckJson,
+  mergeAddonCards,
+  normalizeAddonDeckCreateInput,
+  normalizeAddonSyncInput,
   normalizeSuggestionInput,
   normalizeParsedDeck,
   summarizeDeck
 } from './domain.mjs';
+
+function mediaAsset(bytes, mimeType = 'image/png') {
+  return {
+    mimeType,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    dataBase64: bytes.toString('base64')
+  };
+}
 
 test('normalizes parse-deck JSON into canonical cards', () => {
   const deck = normalizeParsedDeck({
@@ -71,4 +83,112 @@ test('normalizes suggestion input and rejects empty no-op suggestions', () => {
   assert.equal(normalized.proposedFields.Extra, '');
 
   assert.throws(() => normalizeSuggestionInput({ proposedFields: {}, proposedTags: card.tags }, card), /Suggestion must/);
+});
+
+test('normalizes add-on sync media payloads and bounds asset count', () => {
+  const bytes = Buffer.from('png-bytes');
+  const asset = mediaAsset(bytes);
+  const input = normalizeAddonSyncInput({
+    cards: [{ id: 'anki-1', fields: { Front: '<img src="image.png">', Back: '[sound:audio.mp3]' } }],
+    media: {
+      'image.png': { filename: ' image.png ', ...asset },
+      'skip.txt': { filename: 'skip.txt', mimeType: 'text/plain', sha256: '', dataBase64: 'not base64!' },
+      ...Object.fromEntries(Array.from({ length: 310 }, (_, index) => [
+        `extra-${index}.png`,
+        { filename: `extra-${index}.png`, ...asset }
+      ]))
+    }
+  });
+
+  assert.equal(input.cards[0].fields.Front, '<img src="image.png">');
+  assert.equal(input.media['image.png'].mimeType, 'image/png');
+  assert.equal(input.media['image.png'].dataBase64, bytes.toString('base64'));
+  assert.equal(input.media['skip.txt'], undefined);
+  assert.equal(Object.keys(input.media).length <= 300, true);
+});
+
+test('normalizes add-on sync media by dropping unsafe filenames and mismatched hashes', () => {
+  const bytes = Buffer.from('png-bytes');
+  const input = normalizeAddonSyncInput({
+    cards: [{ id: 'anki-1', fields: { Front: '<img src="image.png">' } }],
+    media: {
+      '../evil.png': { filename: '../evil.png', ...mediaAsset(bytes) },
+      'nested/evil.png': { filename: 'nested/evil.png', ...mediaAsset(bytes) },
+      'bad-sha.png': { filename: 'bad-sha.png', ...mediaAsset(bytes), sha256: '0'.repeat(64) },
+      'unsafe.html': { filename: 'unsafe.html', ...mediaAsset(bytes, 'text/html') },
+      'safe.png': { filename: 'safe.png', ...mediaAsset(bytes) }
+    }
+  });
+
+  assert.equal(input.media['../evil.png'], undefined);
+  assert.equal(input.media['nested/evil.png'], undefined);
+  assert.equal(input.media['bad-sha.png'], undefined);
+  assert.equal(input.media['unsafe.html'].mimeType, 'application/octet-stream');
+  assert.equal(input.media['safe.png'].sha256, mediaAsset(bytes).sha256);
+});
+
+test('add-on deck creation persists normalized sync media on the new deck', () => {
+  const bytes = Buffer.from('audio-bytes');
+  const { deck } = normalizeAddonDeckCreateInput({
+    deckName: 'Media Deck',
+    cards: [{ id: 'anki-1', fields: { Front: '[sound:clip.mp3]' } }],
+    media: {
+      'clip.mp3': mediaAsset(bytes, 'audio/mpeg')
+    }
+  }, { name: 'User' });
+
+  assert.equal(deck.media['clip.mp3'].filename, 'clip.mp3');
+  assert.equal(deck.media['clip.mp3'].mimeType, 'audio/mpeg');
+  assert.equal(deck.media['clip.mp3'].dataBase64, bytes.toString('base64'));
+});
+
+test('add-on sync merges media into deck only when not dry-run', () => {
+  const deck = createSeedState().decks[0];
+  const bytes = Buffer.from('png-bytes');
+
+  const dryRunInput = normalizeAddonSyncInput({
+    dryRun: true,
+    cards: [{ id: 'anki-media-1', fields: { Front: '<img src="image.png">' }, mediaRefs: ['image.png'] }],
+    media: {
+      'image.png': mediaAsset(bytes)
+    }
+  });
+  mergeAddonCards(deck, dryRunInput, 'Tester');
+  assert.equal(deck.media['image.png'], undefined);
+
+  const syncInput = normalizeAddonSyncInput({
+    conflictPolicy: 'overwrite-platform',
+    cards: [{ id: 'anki-media-1', fields: { Front: '<img src="image.png">' }, mediaRefs: ['image.png'] }],
+    media: {
+      'image.png': mediaAsset(bytes)
+    }
+  });
+  mergeAddonCards(deck, syncInput, 'Tester');
+
+  assert.equal(deck.media['image.png'].mimeType, 'image/png');
+  assert.equal(deck.media['image.png'].dataBase64, bytes.toString('base64'));
+});
+
+test('add-on conflict detection preserves existing same-name media', () => {
+  const deck = createSeedState().decks[0];
+  const originalBytes = Buffer.from('old-png');
+  const incomingBytes = Buffer.from('new-png');
+  deck.media['image.png'] = { filename: 'image.png', ...mediaAsset(originalBytes) };
+
+  const syncInput = normalizeAddonSyncInput({
+    conflictPolicy: 'detect',
+    cards: [{
+      id: 'card-anca',
+      fields: { Front: 'Changed local text', Back: 'p-ANCA (myeloperoxidase)' },
+      mediaRefs: ['image.png']
+    }],
+    media: {
+      'image.png': mediaAsset(incomingBytes)
+    }
+  });
+  const result = mergeAddonCards(deck, syncInput, 'Tester');
+
+  assert.equal(result.stats.conflicts, 1);
+  assert.equal(deck.media['image.png'].sha256, mediaAsset(originalBytes).sha256);
+  assert.equal(result.conflicts[0].incomingMedia['image.png'].sha256, mediaAsset(incomingBytes).sha256);
 });

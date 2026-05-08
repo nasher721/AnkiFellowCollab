@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 export const nowIso = () => new Date().toISOString();
 
@@ -11,6 +11,26 @@ export function tagList(value) {
 export function cleanText(value, fallback = '', maxLength = 4000) {
   const text = String(value ?? fallback).trim();
   return text.slice(0, maxLength);
+}
+
+const MAX_ADDON_MEDIA_ASSETS = 300;
+const MAX_ADDON_MEDIA_BYTES = 5 * 1024 * 1024;
+const SAFE_MEDIA_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'audio/mpeg',
+  'audio/wav',
+  'audio/ogg',
+  'audio/mp4',
+  'video/mp4',
+  'application/octet-stream'
+]);
+
+export function safeMediaMimeType(value) {
+  const mimeType = cleanText(value, 'application/octet-stream', 120).toLowerCase();
+  return SAFE_MEDIA_MIME_TYPES.has(mimeType) ? mimeType : 'application/octet-stream';
 }
 
 export function normalizeSuggestionInput(body, card) {
@@ -104,6 +124,53 @@ function cleanFields(fields) {
   );
 }
 
+function isSafeMediaFilename(value) {
+  return Boolean(
+    value
+    && value.length <= 240
+    && !/[\/\\]/.test(value)
+    && !value.includes('..')
+    && !/[\u0000-\u001f\u007f]/.test(value)
+  );
+}
+
+function normalizeBase64(value) {
+  const compact = String(value || '').replace(/\s+/g, '');
+  return compact.replace(/=+$/g, '');
+}
+
+function normalizeAddonMedia(media) {
+  if (!media || typeof media !== 'object' || Array.isArray(media)) return {};
+  const normalized = {};
+  for (const [key, value] of Object.entries(media)) {
+    if (Object.keys(normalized).length >= MAX_ADDON_MEDIA_ASSETS) break;
+    const asset = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const filename = cleanText(asset.filename || key, '', 240);
+    if (!isSafeMediaFilename(filename)) continue;
+    const rawBase64 = String(asset.dataBase64 || asset.base64 || '').replace(/\s+/g, '');
+    if (!rawBase64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(rawBase64)) continue;
+    let bytes;
+    try {
+      bytes = Buffer.from(rawBase64, 'base64');
+    } catch {
+      continue;
+    }
+    if (!bytes.length || bytes.length > MAX_ADDON_MEDIA_BYTES) continue;
+    const encoded = bytes.toString('base64');
+    if (normalizeBase64(encoded) !== normalizeBase64(rawBase64)) continue;
+    const computedSha256 = createHash('sha256').update(bytes).digest('hex');
+    const providedSha256 = cleanText(asset.sha256 || asset.sha || '', '', 128).toLowerCase();
+    if (providedSha256 && providedSha256 !== computedSha256) continue;
+    normalized[filename] = {
+      filename,
+      mimeType: safeMediaMimeType(asset.mimeType || asset.mime),
+      sha256: computedSha256,
+      dataBase64: encoded
+    };
+  }
+  return normalized;
+}
+
 function normalizeAddonCard(card, index) {
   const fields = cleanFields(card.fields);
   if (!Object.keys(fields).length) {
@@ -154,6 +221,7 @@ export function normalizeAddonSyncInput(body = {}) {
 
   return {
     cards: cards.map(normalizeAddonCard),
+    media: normalizeAddonMedia(body.media),
     dryRun: Boolean(body.dryRun),
     allowCreate: body.allowCreate !== false,
     conflictPolicy,
@@ -200,7 +268,7 @@ export function normalizeAddonDeckCreateInput(body = {}, user = {}) {
       importedAt: createdAt,
       lastSyncedAt: createdAt,
       cards,
-      media: {},
+      media: syncInput.media,
       models: [],
       source: {
         filename: null,
@@ -243,6 +311,9 @@ function copySyncedCard(card, actorName, timestamp) {
 
 export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki add-on') {
   const syncedAt = nowIso();
+  deck.media ||= {};
+  let mediaChanged = false;
+  const mediaToApply = new Set();
   const byId = new Map(deck.cards.map((card) => [card.id, card]));
   const byNoteId = new Map(deck.cards.filter((card) => card.ankiNoteId).map((card) => [String(card.ankiNoteId), card]));
   const result = {
@@ -275,6 +346,7 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
         byId.set(created.id, created);
         if (created.ankiNoteId) byNoteId.set(String(created.ankiNoteId), created);
       }
+      for (const ref of created.mediaRefs || []) mediaToApply.add(ref);
       continue;
     }
 
@@ -285,10 +357,12 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
       || existing.type !== incoming.type;
     if (!changed) {
       result.stats.skipped += 1;
+      for (const ref of incoming.mediaRefs || []) mediaToApply.add(ref);
       continue;
     }
 
     if (syncInput.conflictPolicy === 'detect') {
+      const incomingMediaRefs = Array.isArray(incoming.mediaRefs) ? incoming.mediaRefs : [];
       result.conflicts.push({
         id: `conflict-${randomUUID()}`,
         deckId: deck.id,
@@ -296,7 +370,11 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
         source: syncInput.source,
         detectedAt: syncedAt,
         incomingFields: incoming.fields,
-        localFields: existing.fields
+        localFields: existing.fields,
+        incomingMediaRefs,
+        incomingMedia: Object.fromEntries(incomingMediaRefs
+          .filter((ref) => syncInput.media?.[ref])
+          .map((ref) => [ref, syncInput.media[ref]]))
       });
       result.stats.conflicts += 1;
       continue;
@@ -320,9 +398,20 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
     result.updatedCards.push(updated);
     result.stats.updated += 1;
     if (!syncInput.dryRun) Object.assign(existing, updated);
+    for (const ref of updated.mediaRefs || []) mediaToApply.add(ref);
   }
 
-  if (!syncInput.dryRun && (result.stats.created || result.stats.updated || result.stats.conflicts)) {
+  if (!syncInput.dryRun) {
+    for (const filename of mediaToApply) {
+      const asset = syncInput.media?.[filename];
+      if (asset && !sameJson(deck.media[filename], asset)) {
+        deck.media[filename] = asset;
+        mediaChanged = true;
+      }
+    }
+  }
+
+  if (!syncInput.dryRun && (result.stats.created || result.stats.updated || result.stats.conflicts || mediaChanged)) {
     deck.lastSyncedAt = syncedAt;
   }
   return result;

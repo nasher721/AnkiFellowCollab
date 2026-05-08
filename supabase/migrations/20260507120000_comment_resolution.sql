@@ -1,0 +1,177 @@
+-- Track resolved comment threads on suggestions.
+alter table public.comments
+  add column if not exists resolved_at timestamptz,
+  add column if not exists resolved_by text;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'comments_resolved_by_fkey'
+      and conrelid = 'public.comments'::regclass
+  ) then
+    alter table public.comments
+      add constraint comments_resolved_by_fkey
+      foreign key (resolved_by) references public.profiles(id) on delete set null;
+  end if;
+end $$;
+
+create index if not exists comments_resolved_idx
+  on public.comments (suggestion_id, resolved_at)
+  where resolved_at is not null;
+
+create index if not exists comments_resolved_by_idx
+  on public.comments (resolved_by)
+  where resolved_by is not null;
+
+create or replace function public.enforce_comment_insert_scope()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not exists (
+    select 1
+    from public.suggestions s
+    where s.id = new.suggestion_id
+      and s.deck_id = new.deck_id
+  ) then
+    raise exception 'Comment suggestion must belong to the same deck'
+      using errcode = '23503';
+  end if;
+
+  if new.parent_id is not null and not exists (
+    select 1
+    from public.comments parent
+    where parent.id = new.parent_id
+      and parent.suggestion_id = new.suggestion_id
+      and parent.deck_id = new.deck_id
+  ) then
+    raise exception 'Parent comment must belong to the same suggestion and deck'
+      using errcode = '23503';
+  end if;
+
+  new.resolved_at := null;
+  new.resolved_by := null;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists enforce_comment_insert_scope on public.comments;
+create trigger enforce_comment_insert_scope
+before insert on public.comments
+for each row execute function public.enforce_comment_insert_scope();
+
+do $$
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime')
+    and not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'suggestions'
+  ) then
+    alter publication supabase_realtime add table public.suggestions;
+  end if;
+
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime')
+    and not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'comments'
+  ) then
+    alter publication supabase_realtime add table public.comments;
+  end if;
+end $$;
+
+create or replace function public.enforce_comment_resolution_update()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if old.parent_id is not null then
+    raise exception 'Only top-level comment threads may be resolved'
+      using errcode = '42501';
+  end if;
+
+  if new.id is distinct from old.id
+    or new.suggestion_id is distinct from old.suggestion_id
+    or new.deck_id is distinct from old.deck_id
+    or new.author_id is distinct from old.author_id
+    or new.author_name is distinct from old.author_name
+    or new.body is distinct from old.body
+    or new.parent_id is distinct from old.parent_id
+    or new.created_at is distinct from old.created_at then
+    raise exception 'Only comment resolution fields may be updated'
+      using errcode = '42501';
+  end if;
+
+  if new.resolved_at is null then
+    new.resolved_by := null;
+  else
+    new.resolved_at := now();
+    if auth.uid() is not null then
+      new.resolved_by := auth.uid()::text;
+    elsif current_setting('request.jwt.claim.role', true) = 'service_role' and new.resolved_by is not null then
+      new.resolved_by := new.resolved_by;
+    else
+      raise exception 'Authenticated user required to resolve comments'
+        using errcode = '42501';
+    end if;
+  end if;
+
+  new.updated_at := now();
+
+  return new;
+end;
+$$;
+
+drop trigger if exists enforce_comment_resolution_update on public.comments;
+create trigger enforce_comment_resolution_update
+before update on public.comments
+for each row execute function public.enforce_comment_resolution_update();
+
+revoke update on public.comments from anon, authenticated;
+grant update (resolved_at, resolved_by, updated_at) on public.comments to authenticated;
+
+drop policy if exists "comments insert member" on public.comments;
+create policy "comments insert contributor" on public.comments for insert with check (
+  auth.uid()::text = author_id
+  and exists (
+    select 1
+    from public.deck_members m
+    where m.deck_id = comments.deck_id
+      and m.user_id = auth.uid()::text
+      and m.role in ('owner', 'editor', 'reviewer', 'contributor')
+  )
+);
+
+drop policy if exists "comments update member" on public.comments;
+
+create policy "comments update reviewer" on public.comments for update using (
+  parent_id is null
+  and exists (
+    select 1
+    from public.deck_members m
+    where m.deck_id = comments.deck_id
+      and m.user_id = auth.uid()::text
+      and m.role in ('owner', 'editor', 'reviewer')
+  )
+) with check (
+  parent_id is null
+  and exists (
+    select 1
+    from public.deck_members m
+    where m.deck_id = comments.deck_id
+      and m.user_id = auth.uid()::text
+      and m.role in ('owner', 'editor', 'reviewer')
+  )
+);

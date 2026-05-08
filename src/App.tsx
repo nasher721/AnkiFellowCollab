@@ -1,7 +1,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Session } from '@supabase/supabase-js';
-import { api, setApiAuthToken, type AddonDownloadAvailability, type AddonVersion, type DeckInvite, type ShareLink } from './api';
-import type { AddonSyncResult, AppState, Deck, DeckCard, DeckSummary, Suggestion } from './types';
+import { api, setApiAuthToken, type AddonDownloadAvailability, type AddonVersion } from './api';
+import type { AddonSyncResult, AppState, Deck, DeckCard, Suggestion } from './types';
 import { useRealtime } from './useRealtime';
 import { ConnectAnkiWizard } from './ConnectAnkiWizard';
 import { CardEditor } from './CardEditor';
@@ -12,7 +12,10 @@ import { DiscoverView } from './DiscoverView';
 import { AnalyticsDashboard } from './AnalyticsDashboard';
 import { ActivityTimeline } from './ActivityTimeline';
 import { TemplateGallery } from './TemplateGallery';
-import { ConflictResolution } from './ConflictResolution';
+import { ConflictResolution, type Conflict } from './ConflictResolution';
+import { DeckSettingsView } from './views/DeckSettingsView';
+import { DeckStatsView } from './views/DeckStatsView';
+import { StudyPrepView } from './views/StudyPrepView';
 
 interface Toast {
   id: string;
@@ -100,10 +103,6 @@ function fieldValue(card: DeckCard | undefined, key: string) {
   return card.fields[key] || card.fields[key.toLowerCase()] || '';
 }
 
-function shareLinkUrl(token: string) {
-  return `${window.location.origin}/share/${encodeURIComponent(token)}`;
-}
-
 function packageLabel(addonPackage: AddonPackageState) {
   if (addonPackage.loading) return 'Checking package';
   if (addonPackage.error) return 'Package check failed';
@@ -140,7 +139,7 @@ function deriveSyncHealth({
   sync: AppState['sync'];
 }): SyncHealth {
   const lastAddonSync = sync.lastAddonSync;
-  const conflictCount = sync.conflicts.length || lastAddonSync?.stats.conflicts || 0;
+  const conflictCount = sync.conflicts.length;
   const lastChecked = sync.lastCheckedAt || lastAddonSync?.syncedAt || null;
   const lastSynced = activeDeck?.lastSyncedAt || (!lastAddonSync?.stats.dryRun ? lastAddonSync?.syncedAt : null) || sync.lastPushAt || sync.lastPullAt || null;
   const deckLabel = activeDeck?.name || 'No DeckBridge deck';
@@ -279,7 +278,7 @@ function deriveOwnerAttentionItems({
     items.push({
       id: 'suggestions',
       label: `${pendingSuggestions} suggestion${pendingSuggestions === 1 ? '' : 's'} pending`,
-      detail: canReview ? 'Owner decisions are waiting.' : 'Owner review is still in progress.',
+      detail: canReview ? 'Review decisions are waiting.' : 'Reviewer access is needed.',
       tone: 'warning',
       action: 'suggestions',
       actionLabel: 'Review'
@@ -309,7 +308,7 @@ function deriveOwnerAttentionItems({
     items.push({
       id: 'visibility',
       label: 'Deck is private',
-      detail: canReview ? 'Create a share link when the group is ready.' : 'Owner access controls sharing.',
+      detail: 'Owner access controls sharing.',
       tone: 'neutral',
       action: 'settings',
       actionLabel: 'Settings'
@@ -446,6 +445,8 @@ export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
+  const [selectedSuggestionIds, setSelectedSuggestionIds] = useState<Set<string>>(new Set());
+  const [commentsVersion, setCommentsVersion] = useState(0);
   const [queryInput, setQueryInput] = useState('');
   const query = useDebounce(queryInput, 220);
   const [tagFilter, setTagFilter] = useState('All');
@@ -474,6 +475,7 @@ export default function App() {
   const [reviewTab, setReviewTab] = useState<'changes' | 'discussion'>('changes');
   const [reviewStatusFilter, setReviewStatusFilter] = useState<'pending' | 'accepted' | 'rejected' | 'revision' | 'all'>('pending');
   const [reviewAuthorFilter, setReviewAuthorFilter] = useState('All');
+  const [conflictReviewSnapshot, setConflictReviewSnapshot] = useState<Conflict[]>([]);
   const [topView, setTopView] = useState<'workspace' | 'discover' | 'templates'>('workspace');
   const [deckVisibility, setDeckVisibility] = useState<Record<string, string>>({});
   const [copiedShare, setCopiedShare] = useState('');
@@ -485,7 +487,14 @@ export default function App() {
     error: ''
   });
   const toastTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const retainConflictReviewSnapshot = useRef(false);
+  const overviewTabRef = useRef<HTMLButtonElement>(null);
   const activeDeck = state?.decks.find((deck) => deck.id === state.activeDeckId) || state?.decks[0];
+
+  function applyAuthoritativeState(next: AppState) {
+    retainConflictReviewSnapshot.current = false;
+    setState(next);
+  }
 
   useEffect(() => {
     if (!supabase) return;
@@ -512,7 +521,7 @@ export default function App() {
     if (!authReady || (supabase && !session)) return;
     Promise.all([api.state(), api.health()])
       .then(([next]) => {
-        setState(next);
+        applyAuthoritativeState(next);
         setApiHealth('ok');
         const nextActiveDeck = next.decks.find((deck) => deck.id === next.activeDeckId);
         setSelectedCardId(nextActiveDeck?.cards[0]?.id || null);
@@ -526,7 +535,7 @@ export default function App() {
   useEffect(() => {
     if (supabase && !session) return undefined;
     const timer = window.setInterval(() => {
-      api.ankiStatus().then(() => api.state()).then(setState).catch(() => undefined);
+      api.ankiStatus().then(() => api.state()).then(applyAuthoritativeState).catch(() => undefined);
     }, 15000);
     return () => window.clearInterval(timer);
   }, [session]);
@@ -580,11 +589,12 @@ export default function App() {
   }
 
   const handleSuggestionChange = useCallback(() => {
-    api.state().then(setState).catch(() => undefined);
+    api.state().then(applyAuthoritativeState).catch(() => undefined);
   }, []);
 
   const handleCommentChange = useCallback(() => {
-    api.state().then(setState).catch(() => undefined);
+    setCommentsVersion((version) => version + 1);
+    api.state().then(applyAuthoritativeState).catch(() => undefined);
   }, []);
 
   useRealtime({
@@ -599,15 +609,16 @@ export default function App() {
   const currentMembership = state?.memberships?.find((item) => item.deckId === activeDeck?.id);
   const isDevDemo = import.meta.env.DEV;
   const membershipRole = isDevDemo
-    ? (state?.role === 'owner' ? 'owner' : 'editor')
-    : currentMembership?.role || (state?.role === 'owner' ? 'owner' : 'editor');
-  const canReview = membershipRole === 'owner';
-  const canSuggest = membershipRole === 'owner' || membershipRole === 'editor';
+    ? (state?.role || 'contributor')
+    : currentMembership?.role || (state?.role === 'owner' ? 'owner' : 'contributor');
+  const canReview = ['owner', 'editor', 'reviewer'].includes(membershipRole);
+  const canManageDeck = membershipRole === 'owner';
+  const canSuggest = ['owner', 'editor', 'reviewer', 'contributor'].includes(membershipRole);
   const suggestions = useMemo(
     () => (state?.suggestions || []).filter((item) => item.deckId === activeDeck?.id),
     [state, activeDeck]
   );
-  const pendingSuggestions = suggestions.filter((item) => item.status === 'pending');
+  const pendingSuggestions = useMemo(() => suggestions.filter((item) => item.status === 'pending'), [suggestions]);
   const reviewAuthors = useMemo(() => ['All', ...Array.from(new Set(suggestions.map((item) => item.authorName))).sort()], [suggestions]);
   const queueSuggestions = useMemo(() => suggestions.filter((item) => {
     const statusMatch = reviewStatusFilter === 'all' || item.status === reviewStatusFilter;
@@ -638,10 +649,25 @@ export default function App() {
   const currentStart = filteredCards.length ? (safePage - 1) * pageSize + 1 : 0;
   const currentEnd = Math.min(safePage * pageSize, filteredCards.length);
   const cardsWithPendingSuggestions = useMemo(() => new Set(pendingSuggestions.map((item) => item.cardId)), [pendingSuggestions]);
+
+  useEffect(() => {
+    const pendingIds = new Set(pendingSuggestions.map((item) => item.id));
+    setSelectedSuggestionIds((prev) => {
+      const next = new Set([...prev].filter((id) => pendingIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [pendingSuggestions]);
   const approvedStudyCards = useMemo(() => (activeDeck?.cards || []).filter((card) => (
     !card.suspended && !cardsWithPendingSuggestions.has(card.id)
   )), [activeDeck, cardsWithPendingSuggestions]);
   const studyCards = studyApprovedOnly ? approvedStudyCards : (activeDeck?.cards || []);
+  const closeStudyView = useCallback(() => {
+    setShowStudy(false);
+    setActiveTab('overview');
+    window.requestAnimationFrame(() => {
+      overviewTabRef.current?.focus({ preventScroll: true });
+    });
+  }, []);
   const suggestionStats = useMemo(() => {
     const total = suggestions.length;
     const accepted = suggestions.filter((item) => item.status === 'accepted').length;
@@ -667,6 +693,24 @@ export default function App() {
     lastAddonSync: null,
     conflicts: []
   };
+  const activeSyncConflicts = syncSnapshot.conflicts;
+  const pendingConflictIds = useMemo(() => activeSyncConflicts.map((conflict) => conflict.id), [activeSyncConflicts]);
+  useEffect(() => {
+    setConflictReviewSnapshot((previous) => {
+      if (!activeDeck?.id) return previous.length ? [] : previous;
+      if (previous.some((conflict) => conflict.deckId !== activeDeck.id)) return activeSyncConflicts.length ? activeSyncConflicts : [];
+      if (!activeSyncConflicts.length) {
+        return retainConflictReviewSnapshot.current || !previous.length ? previous : [];
+      }
+
+      const previousIds = new Set(previous.map((conflict) => conflict.id));
+      const isResolutionShrink = previous.length > 0 &&
+        activeSyncConflicts.length < previous.length &&
+        activeSyncConflicts.every((conflict) => previousIds.has(conflict.id));
+
+      return isResolutionShrink ? previous : activeSyncConflicts;
+    });
+  }, [activeDeck?.id, activeSyncConflicts]);
   const syncHealth = useMemo(() => deriveSyncHealth({
     activeDeck,
     addonPackage,
@@ -691,8 +735,8 @@ export default function App() {
     setBusy(true);
     try {
       const result = await task;
-      if (map) setState(map(result));
-      else if (result && typeof result === 'object' && 'decks' in result) setState(result as unknown as AppState);
+      if (map) applyAuthoritativeState(map(result));
+      else if (result && typeof result === 'object' && 'decks' in result) applyAuthoritativeState(result as unknown as AppState);
       pushToast(success, 'success');
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Something went wrong', 'error');
@@ -703,7 +747,7 @@ export default function App() {
 
   async function refreshState() {
     const next = await api.state();
-    setState(next);
+    applyAuthoritativeState(next);
     return next;
   }
 
@@ -734,12 +778,15 @@ export default function App() {
   function switchDeck(deckId: string) {
     setSelectedSuggestionId(null);
     setSelectedCardId(null);
+    setSelectedSuggestionIds(new Set());
+    retainConflictReviewSnapshot.current = false;
+    setConflictReviewSnapshot([]);
     refreshWith(api.session({ activeDeckId: deckId }), 'Deck switched');
   }
 
-  function switchRole(role: 'owner' | 'collaborator') {
+  function switchRole(role: AppState['role']) {
     if (!isDevDemo) return;
-    refreshWith(api.session({ role }), role === 'owner' ? 'Owner review controls enabled' : 'Collaborator suggestion mode enabled');
+    refreshWith(api.session({ role }), ['owner', 'editor', 'reviewer'].includes(role) ? 'Review controls updated' : 'Contributor suggestion mode enabled');
   }
 
   function toggleCardSelection(cardId: string) {
@@ -870,6 +917,28 @@ export default function App() {
     refreshWith(api.decideSuggestion(selectedSuggestion.id, decision), `Suggestion ${decision}`);
   }
 
+  function toggleSuggestionSelection(suggestionId: string) {
+    setSelectedSuggestionIds((prev) => {
+      const next = new Set(prev);
+      next.has(suggestionId) ? next.delete(suggestionId) : next.add(suggestionId);
+      return next;
+    });
+  }
+
+  function clearSuggestionSelection() {
+    setSelectedSuggestionIds(new Set());
+  }
+
+  function bulkDecideSuggestions(decision: 'accepted' | 'rejected' | 'revision') {
+    if (!activeDeck || selectedSuggestionIds.size === 0) return;
+    const ids = [...selectedSuggestionIds];
+    refreshWith(
+      api.bulkDecideSuggestions(activeDeck.id, ids, decision),
+      `${ids.length} suggestion(s) ${decision}`
+    );
+    clearSuggestionSelection();
+  }
+
   async function exportDeck() {
     if (!activeDeck) return;
     setBusy(true);
@@ -882,7 +951,7 @@ export default function App() {
       anchor.click();
       URL.revokeObjectURL(url);
       const next = await api.state();
-      setState(next);
+      applyAuthoritativeState(next);
       pushToast(`Exported ${filename}`, 'success');
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Export failed', 'error');
@@ -1057,7 +1126,7 @@ export default function App() {
             onFork={(deckId, name) => {
               setTopView('workspace');
               pushToast(`Forked "${name}" into your workspace`, 'success');
-              api.state().then(setState).catch(() => undefined);
+              api.state().then(applyAuthoritativeState).catch(() => undefined);
             }}
           />
         </section>
@@ -1069,7 +1138,7 @@ export default function App() {
             onUse={(deckId, name) => {
               setTopView('workspace');
               pushToast(`Created "${name}" from template`, 'success');
-              api.state().then(setState).catch(() => undefined);
+              api.state().then(applyAuthoritativeState).catch(() => undefined);
             }}
           />
         </section>
@@ -1099,7 +1168,9 @@ export default function App() {
             {isDevDemo ? (
               <div className="role-toggle" aria-label="Role selector">
                 <button className={membershipRole === 'owner' ? 'selected' : ''} onClick={() => switchRole('owner')}>Owner</button>
-                <button className={membershipRole !== 'owner' ? 'selected' : ''} onClick={() => switchRole('collaborator')}>Collaborator</button>
+                <button className={membershipRole === 'editor' ? 'selected' : ''} onClick={() => switchRole('editor')}>Editor</button>
+                <button className={membershipRole === 'reviewer' ? 'selected' : ''} onClick={() => switchRole('reviewer')}>Reviewer</button>
+                <button className={membershipRole === 'contributor' ? 'selected' : ''} onClick={() => switchRole('contributor')}>Contributor</button>
               </div>
             ) : null}
             <NotificationsBell />
@@ -1148,7 +1219,7 @@ export default function App() {
           <section className="deck-panel">
             <div className="breadcrumb">Decks <span>/</span> {activeDeck.name}</div>
             <div className="tabs">
-              <button className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
+              <button ref={overviewTabRef} className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
               <button className={activeTab === 'study' ? 'active' : ''} onClick={() => setActiveTab('study')}>Study</button>
               <button className={activeTab === 'cards' ? 'active' : ''} onClick={() => setActiveTab('cards')}>Cards</button>
               <button className={activeTab === 'stats' ? 'active' : ''} onClick={() => setActiveTab('stats')}>Stats</button>
@@ -1187,7 +1258,7 @@ export default function App() {
               <AnalyticsDashboard
                 deckId={activeDeck.id}
                 deckName={activeDeck.name}
-                isOwner={canReview}
+                isOwner={canManageDeck}
                 currentVisibility={activeDeckVisibility}
                 onSetVisibility={(v) => setDeckVisibility((prev) => ({ ...prev, [activeDeck.id]: v }))}
               />
@@ -1206,7 +1277,7 @@ export default function App() {
               <DeckSettingsView
                 deck={activeDeck}
                 visibility={activeDeckVisibility}
-                canReview={canReview}
+                canReview={canManageDeck}
                 embedCode={deckEmbedCode}
                 copiedShare={copiedShare}
                 onCopied={setCopiedShare}
@@ -1219,10 +1290,12 @@ export default function App() {
               />
             ) : null}
 
-            {state.sync.conflicts.length ? (
+            {conflictReviewSnapshot.length ? (
               <ConflictResolution
-                conflicts={state.sync.conflicts}
+                conflicts={conflictReviewSnapshot}
+                pendingConflictIds={pendingConflictIds}
                 onResolve={(conflictId, resolution) => {
+                  retainConflictReviewSnapshot.current = true;
                   setState(prev => prev ? {
                     ...prev,
                     sync: {
@@ -1234,6 +1307,7 @@ export default function App() {
                     pushToast(resolution === 'local' ? 'Kept local version' : 'Applied incoming changes', 'info');
                   }
                 }}
+                onClearReview={() => setConflictReviewSnapshot([])}
               />
             ) : null}
 
@@ -1319,7 +1393,7 @@ export default function App() {
                     <>
                       <button className="button secondary" onClick={() => setBulkAction('tag-add')}>+ Add tag</button>
                       <button className="button secondary" onClick={() => setBulkAction('tag-remove')}>- Remove tag</button>
-                      {canReview && <button className="button danger-outline" onClick={() => setBulkAction('delete')}>Delete</button>}
+                      {canManageDeck && <button className="button danger-outline" onClick={() => setBulkAction('delete')}>Delete</button>}
                     </>
                   )}
                   <button className="button secondary" onClick={() => { setSelectedCardIds(new Set()); setBulkAction(null); }}>Clear selection</button>
@@ -1328,7 +1402,7 @@ export default function App() {
 
               <div className="card-table" role="table">
                 <div className="table-header" role="row">
-                  <span>
+                  <span role="columnheader">
                     <input
                       type="checkbox"
                       aria-label="Select all on page"
@@ -1342,16 +1416,17 @@ export default function App() {
                       }}
                     />
                   </span>
-                  <span>Card</span>
-                  <span>Note Type</span>
-                  <span>Tags</span>
-                  <span>Due</span>
-                  <span>State</span>
-                  <span>Last Modified</span>
+                  <span role="columnheader">Card</span>
+                  <span role="columnheader">Note Type</span>
+                  <span role="columnheader">Tags</span>
+                  <span role="columnheader">Due</span>
+                  <span role="columnheader">State</span>
+                  <span role="columnheader">Last Modified</span>
                 </div>
                 {pagedCards.length ? pagedCards.map((card) => (
                   editingCardId === card.id ? (
-                    <div key={card.id} className="table-row editing">
+                    <div key={card.id} className="table-row editing" role="row">
+                      <div role="cell" className="table-editor-cell">
                       <CardEditor
                         card={card}
                         canSuggest={canSuggest}
@@ -1369,6 +1444,7 @@ export default function App() {
                         }}
                         onCancel={() => setEditingCardId(null)}
                       />
+                      </div>
                     </div>
                   ) : (
                   <div
@@ -1389,20 +1465,22 @@ export default function App() {
                     tabIndex={0}
                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCardSelection(card.id); } }}
                   >
-                    <span
-                      className={`checkbox${selectedCardIds.has(card.id) ? ' checked' : ''}`}
-                      onClick={(e) => { e.stopPropagation(); toggleCardSelection(card.id); }}
-                      aria-label={selectedCardIds.has(card.id) ? 'Deselect card' : 'Select card'}
-                      role="checkbox"
-                      aria-checked={selectedCardIds.has(card.id)}
-                      tabIndex={-1}
-                    />
-                    <span className="card-front">{fieldValue(card, 'Front') || Object.values(card.fields)[0]}</span>
-                    <span>{card.type}</span>
-                    <span className="tag-list">{card.tags.slice(0, 2).map((tag) => <em key={tag}>{tag}</em>)}</span>
-                    <span>{card.due ?? '-'}</span>
-                    <span><b className={`state-chip ${statusColors[card.state] || 'neutral'}`}>{card.state}</b></span>
-                    <span><small>{relativeTime(card.modifiedAt)}<br />{card.modifiedBy}</small></span>
+                    <span role="cell">
+                      <span
+                        className={`checkbox${selectedCardIds.has(card.id) ? ' checked' : ''}`}
+                        onClick={(e) => { e.stopPropagation(); toggleCardSelection(card.id); }}
+                        aria-label={selectedCardIds.has(card.id) ? 'Deselect card' : 'Select card'}
+                        role="checkbox"
+                        aria-checked={selectedCardIds.has(card.id)}
+                        tabIndex={-1}
+                      />
+                    </span>
+                    <span role="cell" className="card-front">{fieldValue(card, 'Front') || Object.values(card.fields)[0]}</span>
+                    <span role="cell">{card.type}</span>
+                    <span role="cell" className="tag-list">{card.tags.slice(0, 2).map((tag) => <em key={tag}>{tag}</em>)}</span>
+                    <span role="cell">{card.due ?? '-'}</span>
+                    <span role="cell"><b className={`state-chip ${statusColors[card.state] || 'neutral'}`}>{card.state}</b></span>
+                    <span role="cell"><small>{relativeTime(card.modifiedAt)}<br />{card.modifiedBy}</small></span>
                   </div>
                   )
                 )) : <EmptyState message="No cards match the current filters." />}
@@ -1543,26 +1621,57 @@ export default function App() {
                       suggestionId={selectedSuggestion.id}
                       currentUserId={state.user?.id || 'you'}
                       currentUserName={state.user?.name || 'You'}
+                      commentsVersion={commentsVersion}
                     />
                   ) : <EmptyState message="Select a suggestion to view its discussion." />
                 )}
               </section>
             ) : <EmptyState message="Select a card to review changes." />}
 
+            {canReview && selectedSuggestionIds.size > 0 ? (
+              <div className="suggestion-bulk-toolbar" role="toolbar" aria-label="Bulk suggestion decisions">
+                <span>{selectedSuggestionIds.size} selected</span>
+                <button className="button secondary" onClick={() => bulkDecideSuggestions('rejected')} disabled={busy}>Reject</button>
+                <button className="button secondary" onClick={() => bulkDecideSuggestions('revision')} disabled={busy}>Request revision</button>
+                <button className="button primary" onClick={() => bulkDecideSuggestions('accepted')} disabled={busy}>Accept</button>
+                <button className="button secondary" onClick={clearSuggestionSelection} disabled={busy}>Clear</button>
+              </div>
+            ) : null}
+
             <div className="queue-list">
               {queueSuggestions.length ? queueSuggestions.map((suggestion) => (
-                <button
+                <div
                   className={`queue-item ${suggestion.id === selectedSuggestion?.id ? 'active' : ''}`}
                   key={suggestion.id}
-                  onClick={() => setSelectedSuggestionId(suggestion.id)}
                 >
-                  <span className="avatar">{initials(suggestion.authorName)}</span>
-                  <span>
-                    <strong>{suggestion.authorName}</strong>
-                    <small>{relativeTime(suggestion.createdAt)}</small>
-                  </span>
-                  <b className={`queue-status ${suggestion.status}`}>{suggestion.status}</b>
-                </button>
+                  {canReview && suggestion.status === 'pending' ? (
+                    <input
+                      type="checkbox"
+                      className="queue-select"
+                      checked={selectedSuggestionIds.has(suggestion.id)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                      }}
+                      onChange={(event) => {
+                        event.stopPropagation();
+                        toggleSuggestionSelection(suggestion.id);
+                      }}
+                      aria-label={`${selectedSuggestionIds.has(suggestion.id) ? 'Deselect' : 'Select'} ${suggestion.authorName}'s suggestion`}
+                    />
+                  ) : <span className="queue-select-spacer" aria-hidden="true" />}
+                  <button
+                    type="button"
+                    className="queue-item-main"
+                    onClick={() => setSelectedSuggestionId(suggestion.id)}
+                  >
+                    <span className="avatar">{initials(suggestion.authorName)}</span>
+                    <span>
+                      <strong>{suggestion.authorName}</strong>
+                      <small>{relativeTime(suggestion.createdAt)}</small>
+                    </span>
+                    <b className={`queue-status ${suggestion.status}`}>{suggestion.status}</b>
+                  </button>
+                </div>
               )) : <EmptyState message="No suggestions match the queue filters." />}
             </div>
 
@@ -1597,7 +1706,7 @@ export default function App() {
           deckId={activeDeck.id}
           cards={studyCards}
           modeLabel={studyApprovedOnly ? 'Approved cards only' : 'All cards'}
-          onClose={() => { setShowStudy(false); setActiveTab('overview'); }}
+          onClose={closeStudyView}
         />
       )}
     </main>
@@ -1627,341 +1736,6 @@ function DiffBlock({ label, before, after }: { label: string; before?: string; a
         <p className="removed">- {before || 'Empty'}</p>
         <p className="added">+ {after || before || 'No suggested change'}</p>
       </div>
-    </div>
-  );
-}
-
-function StudyPrepView({
-  totalCards,
-  studyCards,
-  approvedCards,
-  pendingBlocked,
-  approvedOnly,
-  onApprovedOnlyChange,
-  onStart
-}: {
-  totalCards: number;
-  studyCards: number;
-  approvedCards: number;
-  pendingBlocked: number;
-  approvedOnly: boolean;
-  onApprovedOnlyChange: (value: boolean) => void;
-  onStart: () => void;
-}) {
-  return (
-    <div className="tab-panel study-prep">
-      <div>
-        <h2>Study session</h2>
-        <p>Start a due-card session with local SM-2 progress and server sync when authentication is available.</p>
-      </div>
-      <div className="stat-grid compact">
-        <div><small>Available now</small><strong>{studyCards.toLocaleString()}</strong></div>
-        <div><small>Approved cards</small><strong>{approvedCards.toLocaleString()}</strong></div>
-        <div><small>All cards</small><strong>{totalCards.toLocaleString()}</strong></div>
-        <div><small>Pending review</small><strong>{pendingBlocked.toLocaleString()}</strong></div>
-      </div>
-      <label className="toggle-row">
-        <input
-          type="checkbox"
-          checked={approvedOnly}
-          onChange={(event) => onApprovedOnlyChange(event.target.checked)}
-        />
-        <span>
-          <strong>Study approved cards only</strong>
-          <small>Excludes suspended cards and cards with pending owner-review suggestions.</small>
-        </span>
-      </label>
-      <div className="panel-actions">
-        <button className="button primary" onClick={onStart} disabled={studyCards === 0}>Start study session</button>
-      </div>
-    </div>
-  );
-}
-
-function DeckStatsView({
-  deck,
-  summary,
-  suggestions,
-  filteredCount
-}: {
-  deck: Deck;
-  summary?: DeckSummary;
-  suggestions: { total: number; accepted: number; rejected: number; pending: number; revision: number; acceptanceRate: number };
-  filteredCount: number;
-}) {
-  const stateCounts = deck.cards.reduce<Record<string, number>>((acc, card) => {
-    acc[card.state] = (acc[card.state] || 0) + 1;
-    return acc;
-  }, {});
-  const suspended = deck.cards.filter((card) => card.suspended).length;
-  const noteTypes = summary?.noteTypes?.length ? summary.noteTypes : Array.from(new Set(deck.cards.map((card) => card.type)));
-
-  return (
-    <div className="tab-panel stats-view">
-      <div>
-        <h2>Deck stats</h2>
-        <p>First-pass operational totals from the loaded deck state.</p>
-      </div>
-      <div className="stat-grid">
-        <div><small>Cards</small><strong>{deck.cards.length.toLocaleString()}</strong></div>
-        <div><small>Filtered cards</small><strong>{filteredCount.toLocaleString()}</strong></div>
-        <div><small>Tags</small><strong>{summary?.tagCount.toLocaleString() ?? '0'}</strong></div>
-        <div><small>Note types</small><strong>{noteTypes.length.toLocaleString()}</strong></div>
-        <div><small>Suspended</small><strong>{suspended.toLocaleString()}</strong></div>
-        <div><small>Acceptance rate</small><strong>{suggestions.acceptanceRate}%</strong></div>
-      </div>
-      <div className="stats-columns">
-        <section>
-          <h3>Card states</h3>
-          <div className="state-bar-wrap">
-            {Object.entries(stateCounts).map(([st, count]) => {
-              const pct = deck.cards.length ? Math.round((count / deck.cards.length) * 100) : 0;
-              const color = (statusColors[st] || 'neutral');
-              return (
-                <div className="state-bar-row" key={st}>
-                  <span title={st}>{st}</span>
-                  <div className="state-bar-track">
-                    <div className={`state-bar-fill ${color}`} style={{ width: `${pct}%` }} />
-                  </div>
-                  <strong>{count}</strong>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-        <section>
-          <h3>Suggestion flow</h3>
-          <div className="metric-row"><span>Pending</span><strong>{suggestions.pending}</strong></div>
-          <div className="metric-row"><span>Accepted</span><strong>{suggestions.accepted}</strong></div>
-          <div className="metric-row"><span>Rejected</span><strong>{suggestions.rejected}</strong></div>
-          <div className="metric-row"><span>Needs revision</span><strong>{suggestions.revision}</strong></div>
-        </section>
-        <section>
-          <h3>Note types</h3>
-          <div className="tag-list wide">
-            {noteTypes.map((type) => <em key={type}>{type}</em>)}
-          </div>
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function DeckSettingsView({
-  deck,
-  visibility,
-  canReview,
-  embedCode,
-  copiedShare,
-  onCopied,
-  onSetVisibility
-}: {
-  deck: Deck;
-  visibility: string;
-  canReview: boolean;
-  embedCode: string;
-  copiedShare: string;
-  onCopied: (value: string) => void;
-  onSetVisibility: (value: 'public' | 'private' | 'unlisted') => void;
-}) {
-  const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
-  const [shareLoading, setShareLoading] = useState(false);
-  const [shareError, setShareError] = useState('');
-  const [invites, setInvites] = useState<DeckInvite[]>([]);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState<DeckInvite['role']>('contributor');
-  const [inviteLoading, setInviteLoading] = useState(false);
-  const [inviteError, setInviteError] = useState('');
-  const primaryShareLink = shareLinks.find((link) => !link.disabledAt) || shareLinks[0] || null;
-  const primaryShareUrl = primaryShareLink ? shareLinkUrl(primaryShareLink.token) : '';
-
-  useEffect(() => {
-    if (!canReview) {
-      setShareLinks([]);
-      setShareError('');
-      return;
-    }
-    let mounted = true;
-    setShareLoading(true);
-    setShareError('');
-    api.shareLinks.list(deck.id)
-      .then(({ shareLinks: links }) => {
-        if (mounted) setShareLinks(links);
-      })
-      .catch((err) => {
-        if (mounted) setShareError(err instanceof Error ? err.message : 'Unable to load share links');
-      })
-      .finally(() => {
-        if (mounted) setShareLoading(false);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [canReview, deck.id]);
-
-  useEffect(() => {
-    if (!canReview) { setInvites([]); return; }
-    let mounted = true;
-    api.invites.list(deck.id)
-      .then(({ invites: list }) => { if (mounted) setInvites(list); })
-      .catch(() => { /* invites not available in this mode */ });
-    return () => { mounted = false; };
-  }, [canReview, deck.id]);
-
-  async function sendInvite(e: FormEvent) {
-    e.preventDefault();
-    if (!inviteEmail.trim()) return;
-    setInviteLoading(true);
-    setInviteError('');
-    try {
-      const { invite } = await api.invites.create(deck.id, inviteEmail.trim(), inviteRole);
-      setInvites((prev) => [invite, ...prev]);
-      setInviteEmail('');
-    } catch (err) {
-      setInviteError(err instanceof Error ? err.message : 'Unable to send invite');
-    } finally {
-      setInviteLoading(false);
-    }
-  }
-
-  async function revokeInvite(inviteId: string) {
-    try {
-      await api.invites.revoke(deck.id, inviteId);
-      setInvites((prev) => prev.filter((inv) => inv.id !== inviteId));
-    } catch (err) {
-      setInviteError(err instanceof Error ? err.message : 'Unable to revoke invite');
-    }
-  }
-
-  async function createShareLink() {
-    setShareLoading(true);
-    setShareError('');
-    try {
-      const { shareLink } = await api.shareLinks.create(deck.id, { label: `${deck.name} share link` });
-      setShareLinks((links) => [shareLink, ...links]);
-      const url = shareLinkUrl(shareLink.token);
-      await copy(url, 'Share link created and copied');
-    } catch (err) {
-      setShareError(err instanceof Error ? err.message : 'Unable to create share link');
-    } finally {
-      setShareLoading(false);
-    }
-  }
-
-  async function copy(value: string, label: string) {
-    if (!value) return;
-    try {
-      await navigator.clipboard.writeText(value);
-      onCopied(label);
-      window.setTimeout(() => onCopied(''), 1800);
-    } catch {
-      onCopied('Copy unavailable');
-    }
-  }
-
-  return (
-    <div className="tab-panel settings-view">
-      <div>
-        <h2>Deck settings</h2>
-        <p>Manage collaboration visibility and prepare share surfaces for this deck.</p>
-      </div>
-      <div className="settings-grid">
-        <section>
-          <h3>Access</h3>
-          <label className="settings-field">
-            <span>Visibility</span>
-            <select
-              value={visibility}
-              onChange={(event) => onSetVisibility(event.target.value as 'public' | 'private' | 'unlisted')}
-              disabled={!canReview}
-              aria-label="Deck visibility"
-            >
-              <option value="private">Private</option>
-              <option value="unlisted">Unlisted</option>
-              <option value="public">Public</option>
-            </select>
-          </label>
-          {!canReview ? <p className="settings-note">Owner access is required to change visibility.</p> : null}
-        </section>
-        <section>
-          <h3>Share link</h3>
-          <div className="copy-row">
-            <input readOnly value={primaryShareUrl} placeholder={shareLoading ? 'Loading share links...' : 'Create a tokenized share link'} aria-label="Deck share link" />
-            <button className="button secondary" onClick={() => copy(primaryShareUrl, 'Share link copied')} disabled={!primaryShareUrl}>Copy</button>
-          </div>
-          <button className="button secondary" onClick={createShareLink} disabled={!canReview || shareLoading}>
-            {primaryShareLink ? 'Create another share link' : 'Create share link'}
-          </button>
-          {shareError ? <p className="settings-note">{shareError}</p> : null}
-          {!canReview ? <p className="settings-note">Owner access is required to create share links.</p> : null}
-          <small>Share URLs use backend-generated tokens. Public access depends on the share route and backend availability.</small>
-        </section>
-        <section>
-          <h3>Embed</h3>
-          <textarea readOnly value={embedCode} aria-label="Deck embed code" rows={3} />
-          <button className="button secondary" onClick={() => copy(embedCode, 'Embed code copied')}>Copy embed code</button>
-          <small>Placeholder code for a future embeddable public preview route.</small>
-        </section>
-        {canReview && (
-          <section>
-            <h3>Invite collaborators</h3>
-            <form className="invite-form" onSubmit={sendInvite}>
-              <input
-                type="email"
-                className="invite-email-input"
-                placeholder="colleague@example.com"
-                value={inviteEmail}
-                onChange={(e) => setInviteEmail(e.target.value)}
-                disabled={inviteLoading}
-                aria-label="Invite email address"
-                required
-              />
-              <select
-                className="invite-role-select"
-                value={inviteRole}
-                onChange={(e) => setInviteRole(e.target.value as DeckInvite['role'])}
-                disabled={inviteLoading}
-                aria-label="Invite role"
-              >
-                <option value="viewer">Viewer</option>
-                <option value="contributor">Contributor</option>
-                <option value="reviewer">Reviewer</option>
-                <option value="editor">Editor</option>
-              </select>
-              <button className="button primary" type="submit" disabled={inviteLoading || !inviteEmail.trim()}>
-                {inviteLoading ? 'Sending…' : 'Send invite'}
-              </button>
-            </form>
-            {inviteError && <p className="settings-note error">{inviteError}</p>}
-            <small>
-              Roles: Viewer (read-only) · Contributor (suggest edits) · Reviewer (decide suggestions) · Editor (manage deck)
-            </small>
-            {invites.length > 0 && (
-              <div className="invite-list">
-                <h4>Pending invites</h4>
-                {invites.map((inv) => (
-                  <div key={inv.id} className="invite-row">
-                    <span className="invite-email">{inv.email}</span>
-                    <span className={`role-badge role-${inv.role}`}>{inv.role}</span>
-                    <span className={`invite-status status-${inv.status}`}>{inv.status}</span>
-                    {inv.expiresAt && <span className="invite-expiry">exp. {inv.expiresAt.slice(0, 10)}</span>}
-                    {inv.status === 'pending' && (
-                      <button
-                        className="button danger-outline invite-revoke"
-                        onClick={() => revokeInvite(inv.id)}
-                        aria-label={`Revoke invite for ${inv.email}`}
-                      >
-                        Revoke
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-        )}
-      </div>
-      {copiedShare ? <div className="inline-notice">{copiedShare}</div> : null}
     </div>
   );
 }

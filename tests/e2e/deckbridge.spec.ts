@@ -43,7 +43,7 @@ test.describe('Review Queue', () => {
   });
 
   test('shows pending suggestions', async ({ page }) => {
-    await expect(page.getByText('1 pending suggestions')).toBeVisible();
+    await expect(page.getByText('1 pending')).toBeVisible();
     await expect(page.getByRole('button', { name: /Maya Patel.*pending/ })).toBeVisible();
   });
 
@@ -67,7 +67,7 @@ test.describe('Review Queue', () => {
   });
 
   test('owner can reject suggestion', async ({ page }) => {
-    await page.getByRole('button', { name: 'Collaborator' }).click();
+    await page.getByRole('button', { name: 'Contributor' }).click();
     await page.getByRole('button', { name: /Suggest edit/ }).click();
     await expect(page.getByText(/Suggestion added/)).toBeVisible();
     await page.getByRole('button', { name: 'Owner' }).click();
@@ -76,9 +76,124 @@ test.describe('Review Queue', () => {
   });
 
   test('collaborator can suggest edit', async ({ page }) => {
-    await page.getByRole('button', { name: 'Collaborator' }).click();
+    await page.getByRole('button', { name: 'Contributor' }).click();
     await page.getByRole('button', { name: /Suggest edit/ }).click();
     await expect(page.getByText(/Suggestion added/)).toBeVisible();
+  });
+});
+
+test.describe('Conflict Resolution', () => {
+  test('replays saved conflict decisions when polling rehydrates pending conflicts', async ({ page }) => {
+    const detectedAt = '2026-05-08T12:00:00.000Z';
+    const syncConflict = {
+      id: 'conflict-replay-1',
+      deckId: 'deck-replay',
+      cardId: 'card-replay',
+      source: 'DeckBridge Sync',
+      detectedAt,
+      incomingFields: { Front: 'Incoming front', Back: 'Incoming answer' },
+      localFields: { Front: 'Local front', Back: 'Local answer' }
+    };
+    let serverConflicts = [syncConflict];
+    const buildState = () => ({
+      user: { id: 'you', email: 'you@example.com', name: 'You' },
+      memberships: [{ deckId: 'deck-replay', userId: 'you', role: 'owner', createdAt: detectedAt }],
+      decks: [{
+        id: 'deck-replay',
+        name: 'Replay Deck',
+        description: 'Conflict replay deck',
+        owner: 'You',
+        importedAt: detectedAt,
+        lastSyncedAt: detectedAt,
+        cards: [{ id: 'card-replay', fields: { Front: 'Local front', Back: 'Local answer' }, tags: [], noteType: 'Basic', modifiedAt: detectedAt, modifiedBy: 'Anki', suspended: false }],
+        media: {},
+        source: { filename: 'anki', format: 'anki-addon', deckName: 'Replay Deck', deckPath: 'Replay Deck' }
+      }],
+      summaries: [{
+        id: 'deck-replay',
+        name: 'Replay Deck',
+        description: 'Conflict replay deck',
+        cardCount: 1,
+        noteCount: 1,
+        tagCount: 0,
+        noteTypes: ['Basic'],
+        pendingSuggestions: 0,
+        lastSyncedAt: detectedAt,
+        importedAt: detectedAt
+      }],
+      activeDeckId: 'deck-replay',
+      role: 'owner',
+      collaborators: [{ id: 'you', name: 'You', email: 'you@example.com', role: 'owner', accepted: 0 }],
+      suggestions: [],
+      activity: [],
+      sync: {
+        ankiConnectUrl: null,
+        connected: false,
+        lastCheckedAt: detectedAt,
+        lastPullAt: null,
+        lastPushAt: detectedAt,
+        lastAddonSync: {
+          syncedAt: detectedAt,
+          source: 'DeckBridge Sync',
+          client: { name: 'DeckBridge Sync', version: '0.1.0', fingerprint: 'test-host' },
+          stats: { total: 1, created: 0, updated: 0, skipped: 0, conflicts: 1, dryRun: false }
+        },
+        conflicts: serverConflicts
+      }
+    });
+    let stateRequests = 0;
+    await page.route('**/api/state', async (route) => {
+      stateRequests += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(buildState())
+      });
+    });
+    await page.route('**/api/addon/version', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          name: 'DeckBridge Sync',
+          version: '0.1.0',
+          minVersion: '23.10.0',
+          package: 'deckbridge_sync',
+          downloadUrl: '/api/addon/download'
+        })
+      });
+    });
+    await page.route('**/api/addon/download', async (route) => {
+      if (route.request().method() === 'HEAD') {
+        await route.fulfill({ status: 200 });
+        return;
+      }
+      await route.fallback();
+    });
+    await page.route('**/api/anki/status', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ connected: false })
+      });
+    });
+
+    await page.goto('/');
+    await expect(page.getByText('Conflicts need review')).toBeVisible();
+    await page.getByRole('button', { name: 'Keep Local' }).click();
+    await expect(page.getByText('Conflicts need review')).toHaveCount(0);
+    await expect(page.getByText('No unresolved conflicts in this saved review.')).toBeVisible();
+
+    const requestsAfterDecision = stateRequests;
+    await expect.poll(() => stateRequests, { timeout: 20_000 }).toBeGreaterThan(requestsAfterDecision);
+    await expect(page.getByText('Conflicts need review')).toHaveCount(0);
+    await expect(page.getByText('No unresolved conflicts in this saved review.')).toBeVisible();
+
+    serverConflicts = [];
+    const requestsAfterRehydration = stateRequests;
+    await page.locator('button[title="Check"]').click();
+    await expect.poll(() => stateRequests).toBeGreaterThan(requestsAfterRehydration);
+    await expect(page.getByText('No unresolved conflicts in this saved review.')).toHaveCount(0);
   });
 });
 
@@ -93,6 +208,66 @@ test.describe('Tabs', () => {
     await expect(page.getByLabel('Study approved cards only')).toBeChecked();
     await page.getByRole('button', { name: 'Start study session' }).click();
     await expect(page.locator('.study-overlay')).toBeVisible();
+  });
+
+  test('contains focus inside study dialog and restores focus after close', async ({ page }) => {
+    await page.getByRole('button', { name: 'Study' }).click();
+    await page.getByRole('button', { name: 'Start study session' }).click();
+    const dialog = page.locator('.study-overlay');
+    await expect(dialog).toBeVisible();
+
+    await page.keyboard.press('Shift+Tab');
+    await expect.poll(() => page.evaluate(() => {
+      const active = document.activeElement;
+      return active !== document.body && Boolean(active?.closest('.study-overlay'));
+    })).toBe(true);
+
+    for (let i = 0; i < 8; i += 1) {
+      await page.keyboard.press('Tab');
+      await expect.poll(() => page.evaluate(() => {
+        const active = document.activeElement;
+        return active !== document.body && Boolean(active?.closest('.study-overlay'));
+      })).toBe(true);
+    }
+
+    for (let i = 0; i < 4; i += 1) {
+      await page.keyboard.press('Shift+Tab');
+      await expect.poll(() => page.evaluate(() => {
+        const active = document.activeElement;
+        return active !== document.body && Boolean(active?.closest('.study-overlay'));
+      })).toBe(true);
+    }
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Overview' })).toBeFocused();
+  });
+
+  test('rating button Enter activation is not overridden by global shortcuts', async ({ page }) => {
+    await page.getByRole('button', { name: 'Study' }).click();
+    await page.getByRole('button', { name: 'Start study session' }).click();
+    await expect(page.locator('.study-overlay')).toBeVisible();
+
+    await page.getByRole('button', { name: /Card question/ }).click();
+    const againButton = page.getByRole('button', { name: 'Rate Again' });
+    await expect(againButton).toBeVisible();
+    await againButton.focus();
+    await page.keyboard.press('Enter');
+
+    await expect(page.getByText(/Card 2 of/)).toBeVisible();
+    await expect(page.getByText('0% accuracy')).toBeVisible();
+  });
+
+  test('study card keeps rating shortcuts after click reveal focus', async ({ page }) => {
+    await page.getByRole('button', { name: 'Study' }).click();
+    await page.getByRole('button', { name: 'Start study session' }).click();
+    await expect(page.locator('.study-overlay')).toBeVisible();
+
+    await page.getByRole('button', { name: /Card question/ }).click();
+    await page.keyboard.press('1');
+
+    await expect(page.getByText(/Card 2 of/)).toBeVisible();
+    await expect(page.getByText('0% accuracy')).toBeVisible();
   });
 
   test('switches to Cards tab', async ({ page }) => {

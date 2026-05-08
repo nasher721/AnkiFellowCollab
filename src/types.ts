@@ -1,5 +1,5 @@
-export type DemoRole = 'owner' | 'collaborator';
 export type MembershipRole = 'owner' | 'editor' | 'reviewer' | 'contributor' | 'viewer';
+export type DemoRole = MembershipRole;
 
 export interface User {
   id: string;
@@ -130,6 +130,7 @@ export interface StudySession {
   cardsCorrect: number;
   newCards: number;
   reviewCards: number;
+  metadata: Record<string, unknown>;
   createdAt: string;
 }
 

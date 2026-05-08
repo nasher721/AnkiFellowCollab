@@ -14,6 +14,7 @@
     "migrate:state": "node scripts/migrate-state-to-supabase.mjs",
     "test": "node --test server/*.test.mjs",
     "test:api": "node --test server/*.api.test.mjs",
+    "test:frontend": "vitest run",
     "test:e2e": "playwright test"
   },
   "dependencies": {
@@ -22,6 +23,7 @@
     "@vitejs/plugin-react": "^5.1.1",
     "cors": "^2.8.5",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.5.1",
     "multer": "^2.0.2",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
@@ -31,6 +33,8 @@
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3"
+    "@types/react-dom": "^19.2.3",
+    "jsdom": "^29.1.1",
+    "vitest": "^4.1.5"
   }
 }

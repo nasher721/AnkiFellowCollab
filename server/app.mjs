@@ -7,13 +7,15 @@ import path from 'node:path';
 import { createClient } from '@supabase/supabase-js';
 import { createAuth } from './auth.mjs';
 import { requireContributor, requireEditor, requireOwner, requireReviewer, resolveSuggestionDeck } from './rbac.mjs';
-import { deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeParsedDeck, normalizeSuggestionInput } from './domain.mjs';
+import { deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeParsedDeck, normalizeSuggestionInput, safeMediaMimeType } from './domain.mjs';
 import { AppError, errorPayload, fail } from './errors.mjs';
 import { checkAnki, pullDeck, pushDeck } from './ankiConnect.mjs';
 import { createApkg, parseApkg } from './ankiPackage.mjs';
 import { createRepository } from './repositories/index.mjs';
+import { createRateLimiters } from './rateLimits.mjs';
 import { ensureDataDirs, loadState, paths, saveState } from './store.mjs';
 import { createUserToken, listUserTokens, revokeUserToken } from './tokens.mjs';
+import { assertValidDeckId, assertValidEmail, assertValidSessionRole, deckIdFromRequest, hashSecret } from './security.mjs';
 
 const ADDON_PACKAGE_FILENAME = 'deckbridge-sync.ankiaddon';
 const ADDON_MANIFEST_PATH = path.resolve(process.cwd(), 'addons', 'deckbridge_sync', 'manifest.json');
@@ -60,8 +62,45 @@ function cleanIsoOrNull(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function hashSecret(value) {
-  return crypto.createHash('sha256').update(String(value)).digest('hex');
+function encodeNotificationCursor(row) {
+  return Buffer.from(JSON.stringify({ created_at: row.created_at, id: row.id })).toString('base64url');
+}
+
+function notificationRowToApi(row) {
+  return {
+    id: row.id,
+    deckId: row.deck_id ?? null,
+    kind: row.kind,
+    body: row.body,
+    refId: row.ref_id ?? null,
+    read: Boolean(row.read),
+    createdAt: row.created_at
+  };
+}
+
+function parseNotificationCursor(value) {
+  if (value === undefined) return null;
+  if (typeof value !== 'string' || !value.trim()) fail(400, 'invalid_cursor', 'Invalid notification cursor');
+  const cursor = value.trim();
+  const legacyIso = cleanIsoOrNull(cursor);
+  if (legacyIso) return { createdAt: legacyIso, id: null };
+  if (cursor.includes('|')) {
+    const [createdAtValue, id] = cursor.split('|');
+    const createdAt = cleanIsoOrNull(createdAtValue);
+    if (createdAt && id) return { createdAt, id };
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    const createdAt = cleanIsoOrNull(parsed?.created_at || parsed?.createdAt);
+    if (createdAt && typeof parsed?.id === 'string' && parsed.id) return { createdAt, id: parsed.id };
+  } catch {
+    // fall through to a typed API error below
+  }
+  fail(400, 'invalid_cursor', 'Invalid notification cursor');
+}
+
+function encodePostgrestValue(value) {
+  return String(value).replaceAll('\\', '\\\\').replaceAll(',', '\\,').replaceAll('(', '\\(').replaceAll(')', '\\)');
 }
 
 async function loadDiscoverPreview(supabase, deckId) {
@@ -81,8 +120,7 @@ async function loadDiscoverPreview(supabase, deckId) {
 }
 
 function normalizeStudySessionBody(user, body = {}) {
-  const deckId = cleanShortText(body.deckId, '', 200);
-  if (!deckId) fail(400, 'missing_deck_id', 'deckId is required');
+  const deckId = assertValidDeckId(body.deckId);
   const startedAt = cleanIsoOrNull(body.startedAt) || new Date().toISOString();
   const endedAt = cleanIsoOrNull(body.endedAt);
   const metadata = body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
@@ -192,6 +230,8 @@ function createSimplePdf(lines) {
 export function createApp(options = {}) {
   const production = options.production ?? process.env.NODE_ENV === 'production';
   const app = express();
+  const trustProxy = options.trustProxy ?? (process.env.VERCEL ? 1 : false);
+  app.set('trust proxy', trustProxy);
   const repository = options.repository || createRepository(options);
   const auth = options.auth || createAuth({ ...options, production });
   const parsePackage = options.parseApkg || parseApkg;
@@ -211,6 +251,7 @@ export function createApp(options = {}) {
     }
   });
   const corsOrigin = options.corsOrigin ?? process.env.CORS_ORIGIN ?? (production ? false : true);
+  const rateLimiters = createRateLimiters(options.rateLimits);
 
   app.disable('x-powered-by');
   app.use((_req, res, next) => {
@@ -230,6 +271,20 @@ export function createApp(options = {}) {
       res.set('Cache-Control', 'private, max-age=300');
     }
   }));
+  app.use('/api/decks/upload', rateLimiters.upload);
+  app.use('/api/decks/:deckId/sync/cards', rateLimiters.sync);
+  app.use('/api/decks/:deckId/analytics', rateLimiters.analytics);
+  app.use('/api/notifications', rateLimiters.read);
+  app.use('/api/decks', rateLimiters.read);
+
+  function validateDeckIdParam(req, _res, next) {
+    try {
+      req.params.deckId = deckIdFromRequest(req);
+      next();
+    } catch (error) {
+      next(error);
+    }
+  }
 
   app.get('/api/health', async (_req, res, next) => {
     try {
@@ -356,9 +411,10 @@ export function createApp(options = {}) {
     }
   });
 
-  app.get('/api/decks/:deckId', auth.requireUser, async (req, res, next) => {
+  app.get('/api/decks/:deckId', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
-      res.json(await repository.getDeckState(req.user, req.params.deckId));
+      const deckId = deckIdFromRequest(req);
+      res.json(await repository.getDeckState(req.user, deckId));
     } catch (error) {
       next(error);
     }
@@ -366,7 +422,8 @@ export function createApp(options = {}) {
 
   app.get('/api/state', auth.requireUser, async (req, res, next) => {
     try {
-      res.json(await repository.getDeckState(req.user, req.query.deckId));
+      const deckId = req.query.deckId ? assertValidDeckId(req.query.deckId) : undefined;
+      res.json(await repository.getDeckState(req.user, deckId));
     } catch (error) {
       next(error);
     }
@@ -376,11 +433,13 @@ export function createApp(options = {}) {
     try {
       if (production) fail(404, 'not_found', 'Demo session controls are not available in production');
       if (req.body.activeDeckId && repository.setActiveDeck) {
-        res.json(await repository.setActiveDeck(req.user, req.body.activeDeckId));
+        const activeDeckId = assertValidDeckId(req.body.activeDeckId);
+        res.json(await repository.setActiveDeck(req.user, activeDeckId));
         return;
       }
       if (req.body.role && repository.setDemoRole) {
-        res.json(await repository.setDemoRole(req.user, req.body.role));
+        const role = assertValidSessionRole(req.body.role);
+        res.json(await repository.setDemoRole(req.user, role));
         return;
       }
       res.json(await repository.getDeckState(req.user));
@@ -425,7 +484,8 @@ export function createApp(options = {}) {
 
   async function createSuggestion(req, res, next) {
     try {
-      const deckState = await repository.getDeckState(req.user, req.params.deckId || req.body.deckId);
+      const deckId = deckIdFromRequest(req);
+      const deckState = await repository.getDeckState(req.user, deckId);
       const deck = deckState.decks[0];
       const card = deck.cards.find((item) => item.id === req.body.cardId);
       if (!card) fail(404, 'card_not_found', 'Card not found');
@@ -441,8 +501,8 @@ export function createApp(options = {}) {
     }
   }
 
-  app.post('/api/decks/:deckId/suggestions', auth.requireUser, requireContributor(auth.supabase), createSuggestion);
-  app.post('/api/suggestions', auth.requireUser, requireContributor(auth.supabase), createSuggestion);
+  app.post('/api/decks/:deckId/suggestions', validateDeckIdParam, auth.requireUser, requireContributor(auth.supabase), createSuggestion);
+  app.post('/api/suggestions', validateDeckIdParam, auth.requireUser, requireContributor(auth.supabase), createSuggestion);
 
   app.post('/api/suggestions/:id/decision', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireReviewer(auth.supabase), async (req, res, next) => {
     try {
@@ -455,16 +515,42 @@ export function createApp(options = {}) {
     }
   });
 
-  // Bulk delete cards (owner only)
-  app.delete('/api/decks/:deckId/cards', auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+  app.post('/api/decks/:deckId/suggestions/bulk-decision', validateDeckIdParam, auth.requireUser, requireReviewer(auth.supabase), async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
+      if (!['accepted', 'rejected', 'revision'].includes(req.body.decision)) {
+        fail(400, 'invalid_decision', 'Decision must be accepted, rejected, or revision');
+      }
+      if (!Array.isArray(req.body.suggestionIds)) {
+        fail(400, 'missing_suggestion_ids', 'suggestionIds array is required');
+      }
+      if (req.body.suggestionIds.length > 100) fail(400, 'too_many_suggestion_ids', 'Bulk decisions support up to 100 suggestions');
+      const suggestionIds = req.body.suggestionIds.map((id) => {
+        if (typeof id !== 'string') fail(400, 'invalid_suggestion_id', 'Each suggestion ID must be a non-empty string up to 200 characters');
+        const trimmed = id.trim();
+        if (!trimmed || trimmed.length > 200) fail(400, 'invalid_suggestion_id', 'Each suggestion ID must be a non-empty string up to 200 characters');
+        return cleanShortText(trimmed, '', 200);
+      });
+      if (!suggestionIds.length) fail(400, 'missing_suggestion_ids', 'suggestionIds array is required');
+      if (new Set(suggestionIds).size !== suggestionIds.length) fail(400, 'duplicate_suggestion_ids', 'suggestionIds must be unique');
+      if (!repository.bulkDecideSuggestions) fail(501, 'bulk_decision_unavailable', 'Bulk suggestion decisions are unavailable');
+      res.json(await repository.bulkDecideSuggestions(req.user, deckId, suggestionIds, req.body.decision));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Bulk delete cards (owner only)
+  app.delete('/api/decks/:deckId/cards', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
       const ids = Array.isArray(req.body.cardIds) ? req.body.cardIds.slice(0, 500) : [];
       if (!ids.length) fail(400, 'missing_card_ids', 'cardIds array is required');
       if (repository.deleteCards) {
-        return res.json(await repository.deleteCards(req.user, req.params.deckId, ids));
+        return res.json(await repository.deleteCards(req.user, deckId, ids));
       }
       if (!auth.supabase) fail(501, 'delete_unavailable', 'Card deletion requires Supabase');
-      await auth.supabase.from('cards').delete().in('id', ids).eq('deck_id', req.params.deckId);
+      await auth.supabase.from('cards').delete().in('id', ids).eq('deck_id', deckId);
       res.json({ deleted: ids.length });
     } catch (err) { next(err); }
   });
@@ -473,68 +559,65 @@ export function createApp(options = {}) {
 
   app.get('/api/suggestions/:id/comments', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireContributor(auth.supabase), async (req, res, next) => {
     try {
-      if (!auth.supabase) return res.json({ comments: [] });
-      const { data, error } = await auth.supabase
-        .from('comments')
-        .select('id, author_id, author_name, body, parent_id, created_at, updated_at')
-        .eq('suggestion_id', req.params.id)
-        .order('created_at', { ascending: true });
-      if (error) fail(500, 'comments_error', error.message);
-      res.json({ comments: data });
+      if (!repository.listSuggestionComments) fail(501, 'comments_unavailable', 'Comments are unavailable');
+      const comments = await repository.listSuggestionComments(req.user, req.params.id);
+      res.json({ comments });
     } catch (err) { next(err); }
   });
 
   app.post('/api/suggestions/:id/comments', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireContributor(auth.supabase), async (req, res, next) => {
     try {
-      if (!auth.supabase) fail(501, 'comments_unavailable', 'Comments require Supabase');
+      if (!repository.createSuggestionComment) fail(501, 'comments_unavailable', 'Comments are unavailable');
       const body = typeof req.body.body === 'string' ? req.body.body.trim() : '';
       if (!body) fail(400, 'empty_comment', 'Comment body is required');
-      const deckId = req._resolvedDeckId;
-      const id = crypto.randomUUID();
-      const { data, error } = await auth.supabase.from('comments').insert({
-        id,
-        suggestion_id: req.params.id,
-        deck_id: deckId,
-        author_id: req.user.id,
-        author_name: req.user.name,
-        body,
-        parent_id: req.body.parentId || null,
-        created_at: new Date().toISOString()
-      }).select().single();
-      if (error) fail(500, 'comment_error', error.message);
+      const parentId = typeof req.body.parentId === 'string' && req.body.parentId.trim()
+        ? cleanShortText(req.body.parentId, '', 200)
+        : null;
+      const comment = await repository.createSuggestionComment(req.user, req.params.id, { body, parentId });
       // Create notification for suggestion author
-      const { data: sugg } = await auth.supabase.from('suggestions')
-        .select('author_id').eq('id', req.params.id).single();
-      if (sugg?.author_id && sugg.author_id !== req.user.id) {
-        await auth.supabase.from('notifications').insert({
-          id: crypto.randomUUID(),
-          user_id: sugg.author_id,
-          deck_id: deckId,
-          kind: 'comment',
-          body: `${req.user.name} commented on your suggestion`,
-          ref_id: req.params.id,
-          created_at: new Date().toISOString()
-        }).then(() => undefined).catch(() => undefined);
+      if (auth.supabase) {
+        const { data: sugg } = await auth.supabase.from('suggestions')
+          .select('author_id').eq('id', req.params.id).single();
+        if (sugg?.author_id && sugg.author_id !== req.user.id) {
+          await auth.supabase.from('notifications').insert({
+            id: crypto.randomUUID(),
+            user_id: sugg.author_id,
+            deck_id: comment.deckId,
+            kind: 'comment',
+            body: `${req.user.name} commented on your suggestion`,
+            ref_id: req.params.id,
+            created_at: new Date().toISOString()
+          }).then(() => undefined).catch(() => undefined);
+        }
+        const mentions = parseMentions(body);
+        if (mentions.length) {
+          Promise.all(mentions.map(async (name) => {
+            const { data: profile } = await auth.supabase.from('profiles')
+              .select('id').ilike('name', name).single();
+            if (profile?.id && profile.id !== req.user.id) {
+              await auth.supabase.from('notifications').insert({
+                id: crypto.randomUUID(),
+                user_id: profile.id,
+                deck_id: comment.deckId,
+                kind: 'mention',
+                body: `${req.user.name} mentioned you in a comment`,
+                ref_id: comment.id,
+                created_at: new Date().toISOString()
+              });
+            }
+          })).then(() => undefined).catch(() => undefined);
+        }
       }
-      const mentions = parseMentions(body);
-      if (mentions.length) {
-        Promise.all(mentions.map(async (name) => {
-          const { data: profile } = await auth.supabase.from('profiles')
-            .select('id').ilike('name', name).single();
-          if (profile?.id && profile.id !== req.user.id) {
-            await auth.supabase.from('notifications').insert({
-              id: crypto.randomUUID(),
-              user_id: profile.id,
-          deck_id: deckId,
-              kind: 'mention',
-              body: `${req.user.name} mentioned you in a comment`,
-              ref_id: id,
-              created_at: new Date().toISOString()
-            });
-          }
-        })).then(() => undefined).catch(() => undefined);
-      }
-      res.status(201).json(data);
+      res.status(201).json(comment);
+    } catch (err) { next(err); }
+  });
+
+  app.patch('/api/suggestions/:id/comments/:commentId/resolved', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireReviewer(auth.supabase), async (req, res, next) => {
+    try {
+      if (!repository.setSuggestionCommentResolved) fail(501, 'comments_unavailable', 'Comments are unavailable');
+      const resolved = typeof req.body.resolved === 'boolean' ? req.body.resolved : undefined;
+      const comment = await repository.setSuggestionCommentResolved(req.user, req.params.id, req.params.commentId, resolved);
+      res.json(comment);
     } catch (err) { next(err); }
   });
 
@@ -580,14 +663,36 @@ export function createApp(options = {}) {
 
   app.get('/api/notifications', auth.requireUser, async (req, res, next) => {
     try {
-      if (!auth.supabase) return res.json({ notifications: [], unread: 0 });
-      const { data } = await auth.supabase.from('notifications')
+      if (!auth.supabase) return res.json({ notifications: [], unread: 0, nextCursor: null });
+      const parsedLimit = Number(req.query.limit);
+      const limit = Number.isFinite(parsedLimit)
+        ? Math.min(Math.max(Math.trunc(parsedLimit), 1), 100)
+        : 50;
+      const cursor = parseNotificationCursor(req.query.cursor);
+      let query = auth.supabase.from('notifications')
         .select('id, deck_id, kind, body, ref_id, read, created_at')
         .eq('user_id', req.user.id)
         .order('created_at', { ascending: false })
-        .limit(50);
-      const unread = (data || []).filter((n) => !n.read).length;
-      res.json({ notifications: data || [], unread });
+        .order('id', { ascending: false });
+      if (cursor?.id) {
+        const createdAt = encodePostgrestValue(cursor.createdAt);
+        const id = encodePostgrestValue(cursor.id);
+        query = query.or(`created_at.lt.${createdAt},and(created_at.eq.${createdAt},id.lt.${id})`);
+      } else if (cursor) {
+        query = query.lt('created_at', cursor.createdAt);
+      }
+      const unreadQuery = auth.supabase.from('notifications')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', req.user.id)
+        .eq('read', false);
+      const [{ data, error: pageError }, { count, error: unreadError }] = await Promise.all([query.limit(limit + 1), unreadQuery]);
+      if (pageError) fail(500, 'notifications_error', pageError.message || 'Unable to load notifications');
+      if (unreadError) fail(500, 'notifications_error', unreadError.message || 'Unable to load notifications');
+      const rows = data || [];
+      const page = rows.slice(0, limit);
+      const unread = count ?? rows.filter((n) => !n.read).length;
+      const nextCursor = rows.length > limit ? encodeNotificationCursor(page[page.length - 1]) : null;
+      res.json({ notifications: page.map(notificationRowToApi), unread, nextCursor });
     } catch (err) { next(err); }
   });
 
@@ -604,7 +709,7 @@ export function createApp(options = {}) {
 
   async function createExport(req, res, next) {
     try {
-      const deckId = req.params.deckId || req.body.deckId;
+      const deckId = deckIdFromRequest(req);
       const deck = await repository.getExportDeck(req.user, deckId);
       const base = `${deck.name.replace(/[^a-z0-9_-]+/gi, '-')}-${Date.now()}`;
       const jsonPath = path.join(paths().exportsDir, `${base}.json`);
@@ -638,8 +743,13 @@ export function createApp(options = {}) {
     }
   }
 
-  app.post('/api/decks/:deckId/export', auth.requireUser, createExport);
+  app.post('/api/decks/:deckId/export', validateDeckIdParam, auth.requireUser, createExport);
   app.post('/api/decks/export', auth.requireUser, createExport);
+  const rejectMalformedDeckExport = (_req, _res, next) => {
+    next(new AppError(400, 'invalid_deck_id', 'Deck ID must contain only letters, numbers, underscores, or dashes'));
+  };
+  app.post('/api/state/export', auth.requireUser, rejectMalformedDeckExport);
+  app.post('/state/export', auth.requireUser, rejectMalformedDeckExport);
 
   function escapeCsv(value) {
     const str = String(value ?? '');
@@ -649,9 +759,10 @@ export function createApp(options = {}) {
     return str;
   }
 
-  app.get('/api/decks/:deckId/export/csv', auth.requireUser, async (req, res, next) => {
+  app.get('/api/decks/:deckId/export/csv', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
-      const deckState = await repository.getDeckState(req.user, req.params.deckId);
+      const deckId = deckIdFromRequest(req);
+      const deckState = await repository.getDeckState(req.user, deckId);
       const deck = deckState.decks[0];
       if (!deck) fail(404, 'deck_not_found', 'Deck not found');
 
@@ -682,11 +793,12 @@ export function createApp(options = {}) {
     } catch (err) { next(err); }
   });
 
-  app.get('/api/decks/:deckId/export/activity', auth.requireUser, async (req, res, next) => {
+  app.get('/api/decks/:deckId/export/activity', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
-      const deckState = await repository.getDeckState(req.user, req.params.deckId);
+      const deckId = deckIdFromRequest(req);
+      const deckState = await repository.getDeckState(req.user, deckId);
       const activities = repository.listActivity
-        ? await repository.listActivity(req.user, req.params.deckId, normalizeActivityFilters(req.query))
+        ? await repository.listActivity(req.user, deckId, normalizeActivityFilters(req.query))
         : (deckState.activity || []);
 
       const header = ['ID', 'Kind', 'Text', 'Timestamp'].map(escapeCsv).join(',');
@@ -704,20 +816,50 @@ export function createApp(options = {}) {
     } catch (err) { next(err); }
   });
 
-  app.get('/api/decks/:deckId/activity', auth.requireUser, async (req, res, next) => {
+  app.get('/api/decks/:deckId/media/:filename', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
+      const rawFilename = typeof req.params.filename === 'string' ? req.params.filename.trim() : '';
+      const filename = cleanShortText(rawFilename, '', 240);
+      if (!filename || rawFilename.length > 240 || filename.includes('/') || filename.includes('\\')) {
+        fail(400, 'invalid_media_filename', 'Media filename is required');
+      }
+      const deckState = await repository.getDeckState(req.user, deckId);
+      const deck = deckState.decks[0];
+      const asset = deck?.media?.[filename];
+      if (!asset?.dataBase64) fail(404, 'media_not_found', 'Media asset not found');
+      const mimeType = safeMediaMimeType(asset.mimeType);
+      const headers = {
+        'Content-Type': mimeType,
+        'Cache-Control': 'private, max-age=3600',
+        'X-Content-Type-Options': 'nosniff'
+      };
+      if (mimeType === 'application/octet-stream') {
+        headers['Content-Disposition'] = `attachment; filename="${filename.replace(/"/g, '')}"`;
+      }
+      res.set({
+        ...headers
+      });
+      res.send(Buffer.from(asset.dataBase64, 'base64'));
+    } catch (err) { next(err); }
+  });
+
+  app.get('/api/decks/:deckId/activity', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
       const filters = normalizeActivityFilters(req.query);
-      const deckState = await repository.getDeckState(req.user, req.params.deckId);
+      const deckState = await repository.getDeckState(req.user, deckId);
       const activities = repository.listActivity
-        ? await repository.listActivity(req.user, req.params.deckId, filters)
+        ? await repository.listActivity(req.user, deckId, filters)
         : (deckState.activity || []).slice(0, filters.limit);
       res.json({ activity: activities });
     } catch (err) { next(err); }
   });
 
-  app.get('/api/decks/:deckId/export/summary', auth.requireUser, async (req, res, next) => {
+  app.get('/api/decks/:deckId/export/summary', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
-      const deckState = await repository.getDeckState(req.user, req.params.deckId);
+      const deckId = deckIdFromRequest(req);
+      const deckState = await repository.getDeckState(req.user, deckId);
       const deck = deckState.decks[0];
       if (!deck) fail(404, 'deck_not_found', 'Deck not found');
       const format = String(req.query.format || 'pdf').toLowerCase();
@@ -792,33 +934,35 @@ export function createApp(options = {}) {
   });
 
   // Make a deck public/private/unlisted
-  app.patch('/api/decks/:deckId/visibility', auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+  app.patch('/api/decks/:deckId/visibility', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
       if (!auth.supabase) fail(501, 'visibility_unavailable', 'Requires Supabase');
       const allowed = ['public', 'private', 'unlisted'];
       if (!allowed.includes(req.body.visibility)) fail(400, 'invalid_visibility', `Must be one of: ${allowed.join(', ')}`);
       const { error } = await auth.supabase.from('decks')
         .update({ visibility: req.body.visibility })
-        .eq('id', req.params.deckId);
+        .eq('id', deckId);
       if (error) fail(500, 'visibility_error', error.message);
       res.json({ visibility: req.body.visibility });
     } catch (err) { next(err); }
   });
 
-  app.get('/api/decks/:deckId/share-links', auth.requireUser, async (req, res, next) => {
+  app.get('/api/decks/:deckId/share-links', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
       if (!repository.listShareLinks) fail(501, 'share_links_unavailable', 'Share links are not available for this repository');
-      res.json({ shareLinks: await repository.listShareLinks(req.user, req.params.deckId) });
+      res.json({ shareLinks: await repository.listShareLinks(req.user, deckId) });
     } catch (err) { next(err); }
   });
 
-  app.post('/api/decks/:deckId/share-links', auth.requireUser, async (req, res, next) => {
+  app.post('/api/decks/:deckId/share-links', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
       if (!repository.createShareLink) fail(501, 'share_links_unavailable', 'Share links are not available for this repository');
-      const passwordHash = req.body.passwordHash
-        ? cleanShortText(req.body.passwordHash, '', 256)
-        : (req.body.password ? hashSecret(req.body.password) : null);
-      const link = await repository.createShareLink(req.user, req.params.deckId, {
+      if (Object.hasOwn(req.body, 'passwordHash')) fail(400, 'password_hash_not_allowed', 'Send password, not passwordHash');
+      const passwordHash = req.body.password ? await hashSecret(req.body.password) : null;
+      const link = await repository.createShareLink(req.user, deckId, {
         token: crypto.randomBytes(18).toString('base64url'),
         label: cleanShortText(req.body.label, 'Share link'),
         passwordHash,
@@ -844,23 +988,21 @@ export function createApp(options = {}) {
   }
 
   // Create invite (editor+)
-  app.post('/api/decks/:deckId/invites', auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
+  app.post('/api/decks/:deckId/invites', validateDeckIdParam, auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
     try {
-      const email = cleanShortText(req.body.email || '', '', 254).toLowerCase();
-      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        fail(400, 'invalid_email', 'A valid email address is required');
-      }
+      const deckId = deckIdFromRequest(req);
+      const email = assertValidEmail(req.body.email);
       const allowedRoles = ['viewer', 'contributor', 'reviewer', 'editor'];
       const role = allowedRoles.includes(req.body.role) ? req.body.role : 'contributor';
       if (repository.createInvite) {
-        const invite = await repository.createInvite(req.user, req.params.deckId, { email, role });
+        const invite = await repository.createInvite(req.user, deckId, { email, role });
         return res.status(201).json({ invite });
       }
       if (!auth.supabase) fail(501, 'invites_unavailable', 'Invites require Supabase');
       const token = crypto.randomBytes(20).toString('base64url');
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
       const { data, error } = await auth.supabase.from('deck_invites').insert({
-        id: randomUUID(), deck_id: req.params.deckId, invited_by: req.user.id,
+        id: randomUUID(), deck_id: deckId, invited_by: req.user.id,
         email, role, token, status: 'pending', expires_at: expiresAt, created_at: new Date().toISOString()
       }).select().single();
       if (error) fail(500, 'invite_error', error.message);
@@ -869,14 +1011,15 @@ export function createApp(options = {}) {
   });
 
   // List invites for a deck (editor+)
-  app.get('/api/decks/:deckId/invites', auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
+  app.get('/api/decks/:deckId/invites', validateDeckIdParam, auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
       if (repository.listInvites) {
-        return res.json({ invites: await repository.listInvites(req.user, req.params.deckId) });
+        return res.json({ invites: await repository.listInvites(req.user, deckId) });
       }
       if (!auth.supabase) return res.json({ invites: [] });
       const { data, error } = await auth.supabase.from('deck_invites')
-        .select('*').eq('deck_id', req.params.deckId)
+        .select('*').eq('deck_id', deckId)
         .order('created_at', { ascending: false });
       if (error) fail(500, 'invites_error', error.message);
       res.json({ invites: (data || []).map(toInviteResponse) });
@@ -884,15 +1027,16 @@ export function createApp(options = {}) {
   });
 
   // Revoke invite (owner only)
-  app.delete('/api/decks/:deckId/invites/:inviteId', auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+  app.delete('/api/decks/:deckId/invites/:inviteId', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
       if (repository.revokeInvite) {
-        await repository.revokeInvite(req.user, req.params.deckId, req.params.inviteId);
+        await repository.revokeInvite(req.user, deckId, req.params.inviteId);
         return res.status(204).end();
       }
       if (!auth.supabase) fail(501, 'invites_unavailable', 'Invites require Supabase');
       const { error } = await auth.supabase.from('deck_invites')
-        .delete().eq('id', req.params.inviteId).eq('deck_id', req.params.deckId);
+        .delete().eq('id', req.params.inviteId).eq('deck_id', deckId);
       if (error) fail(500, 'revoke_error', error.message);
       res.status(204).end();
     } catch (err) { next(err); }
@@ -957,16 +1101,17 @@ export function createApp(options = {}) {
   });
 
   // Fork a public deck into the requester's workspace
-  app.post('/api/decks/:deckId/fork', auth.requireUser, async (req, res, next) => {
+  app.post('/api/decks/:deckId/fork', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
+      const sourceDeckId = deckIdFromRequest(req);
       if (!auth.supabase) fail(501, 'fork_unavailable', 'Requires Supabase');
       // Load source deck (must be public or member)
       const { data: source, error: srcErr } = await auth.supabase
-        .from('decks').select('*').eq('id', req.params.deckId).single();
+        .from('decks').select('*').eq('id', sourceDeckId).single();
       if (srcErr || !source) fail(404, 'deck_not_found', 'Deck not found');
       if (source.visibility !== 'public') {
         const { data: m } = await auth.supabase.from('deck_members')
-          .select('role').eq('deck_id', req.params.deckId).eq('user_id', req.user.id).single();
+          .select('role').eq('deck_id', sourceDeckId).eq('user_id', req.user.id).single();
         if (!m) fail(403, 'forbidden', 'Cannot fork a private deck you are not a member of');
       }
       // Ensure profile exists
@@ -990,12 +1135,12 @@ export function createApp(options = {}) {
         models: source.models,
         source: source.source,
         visibility: 'private',
-        fork_of: req.params.deckId
+        fork_of: sourceDeckId
       });
 
       // Copy cards
       const { data: cards } = await auth.supabase.from('cards')
-        .select('*').eq('deck_id', req.params.deckId);
+        .select('*').eq('deck_id', sourceDeckId);
       if (cards?.length) {
         const forkedCards = cards.map((c) => ({
           ...c,
@@ -1015,33 +1160,35 @@ export function createApp(options = {}) {
       // Increment source download count
       await auth.supabase.from('decks')
         .update({ download_count: (source.download_count || 0) + 1 })
-        .eq('id', req.params.deckId);
+        .eq('id', sourceDeckId);
 
       res.status(201).json({ deckId: forkId, name: `${source.name} (fork)` });
     } catch (err) { next(err); }
   });
 
   // Star / unstar a deck
-  app.post('/api/decks/:deckId/star', auth.requireUser, async (req, res, next) => {
+  app.post('/api/decks/:deckId/star', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
       if (!auth.supabase) fail(501, 'stars_unavailable', 'Requires Supabase');
       await auth.supabase.from('deck_stars').upsert(
-        { deck_id: req.params.deckId, user_id: req.user.id, created_at: new Date().toISOString() },
+        { deck_id: deckId, user_id: req.user.id, created_at: new Date().toISOString() },
         { onConflict: 'deck_id,user_id', ignoreDuplicates: true }
       );
       const { count } = await auth.supabase.from('deck_stars')
-        .select('*', { count: 'exact', head: true }).eq('deck_id', req.params.deckId);
+        .select('*', { count: 'exact', head: true }).eq('deck_id', deckId);
       res.json({ starred: true, count: count ?? 0 });
     } catch (err) { next(err); }
   });
 
-  app.delete('/api/decks/:deckId/star', auth.requireUser, async (req, res, next) => {
+  app.delete('/api/decks/:deckId/star', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
       if (!auth.supabase) return res.status(204).end();
       await auth.supabase.from('deck_stars')
-        .delete().eq('deck_id', req.params.deckId).eq('user_id', req.user.id);
+        .delete().eq('deck_id', deckId).eq('user_id', req.user.id);
       const { count } = await auth.supabase.from('deck_stars')
-        .select('*', { count: 'exact', head: true }).eq('deck_id', req.params.deckId);
+        .select('*', { count: 'exact', head: true }).eq('deck_id', deckId);
       res.json({ starred: false, count: count ?? 0 });
     } catch (err) { next(err); }
   });
@@ -1066,9 +1213,9 @@ export function createApp(options = {}) {
   const analyticsCache = new Map();
   const ANALYTICS_CACHE_TTL_MS = 60_000;
 
-  app.get('/api/decks/:deckId/analytics', auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
+  app.get('/api/decks/:deckId/analytics', validateDeckIdParam, auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
     try {
-      const cacheKey = req.params.deckId;
+      const cacheKey = deckIdFromRequest(req);
 
       if (repository.getAnalytics) {
         const cached = analyticsCache.get(cacheKey);
@@ -1275,7 +1422,10 @@ export function createApp(options = {}) {
       if (!auth.supabase) { res.json({ ok: true }); return; }
       const updates = Array.isArray(req.body.updates) ? req.body.updates : [];
       if (!updates.length) { res.json({ ok: true, synced: 0 }); return; }
-      const valid = updates.filter(u => u.deckId && u.cardId).slice(0, 200);
+      const valid = updates
+        .filter(u => u.deckId && u.cardId)
+        .slice(0, 200)
+        .map((u) => ({ ...u, deckId: assertValidDeckId(u.deckId) }));
       let synced = 0;
       for (const u of valid) {
         const id = crypto.randomUUID();
@@ -1308,27 +1458,29 @@ export function createApp(options = {}) {
   app.get('/api/study/sessions', auth.requireUser, async (req, res, next) => {
     try {
       if (!repository.listStudySessions) fail(501, 'study_sessions_unavailable', 'Study sessions are not available for this repository');
-      const deckId = typeof req.query.deckId === 'string' && req.query.deckId.trim() ? req.query.deckId.trim() : null;
+      const deckId = typeof req.query.deckId === 'string' && req.query.deckId.trim() ? assertValidDeckId(req.query.deckId) : null;
       const sessions = await repository.listStudySessions(req.user, deckId, { limit: req.query.limit });
       res.json({ sessions });
     } catch (err) { next(err); }
   });
 
-  app.get('/api/study/sessions/:deckId', auth.requireUser, async (req, res, next) => {
+  app.get('/api/study/sessions/:deckId', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
       if (!repository.listStudySessions) fail(501, 'study_sessions_unavailable', 'Study sessions are not available for this repository');
-      const sessions = await repository.listStudySessions(req.user, req.params.deckId, { limit: req.query.limit });
+      const deckId = deckIdFromRequest(req);
+      const sessions = await repository.listStudySessions(req.user, deckId, { limit: req.query.limit });
       res.json({ sessions });
     } catch (err) { next(err); }
   });
 
-  app.get('/api/study/progress/:deckId', auth.requireUser, async (req, res, next) => {
+  app.get('/api/study/progress/:deckId', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
       if (!auth.supabase) { res.json({ progress: [] }); return; }
       const { data, error } = await auth.supabase.from('study_progress')
         .select('*')
         .eq('user_id', req.user.id)
-        .eq('deck_id', req.params.deckId);
+        .eq('deck_id', deckId);
       if (error) fail(500, 'progress_error', error.message);
       res.json({ progress: (data || []).map(p => ({
         cardId: p.card_id,
@@ -1342,17 +1494,19 @@ export function createApp(options = {}) {
     } catch (err) { next(err); }
   });
 
-  app.post('/api/decks/:deckId/sync/conflicts', auth.requireUser, async (req, res, next) => {
+  app.post('/api/decks/:deckId/sync/conflicts', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
       const conflicts = Array.isArray(req.body.conflicts) ? req.body.conflicts : [];
-      res.json(await repository.recordSyncConflicts(req.user, req.params.deckId, conflicts));
+      res.json(await repository.recordSyncConflicts(req.user, deckId, conflicts));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/api/decks/:deckId/sync/cards', auth.requireUser, async (req, res, next) => {
+  app.post('/api/decks/:deckId/sync/cards', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
+      const deckId = deckIdFromRequest(req);
       let syncInput;
       try {
         syncInput = normalizeAddonSyncInput(req.body);
@@ -1360,7 +1514,7 @@ export function createApp(options = {}) {
         fail(400, 'invalid_sync_payload', error.message);
       }
       if (!repository.syncCardsFromAddon) fail(501, 'sync_unavailable', 'Card sync is not available for this repository');
-      res.json(await repository.syncCardsFromAddon(req.user, req.params.deckId, syncInput));
+      res.json(await repository.syncCardsFromAddon(req.user, deckId, syncInput));
     } catch (error) {
       next(error);
     }
@@ -1388,7 +1542,8 @@ export function createApp(options = {}) {
     try {
       if (production) fail(410, 'local_bridge_required', 'Hosted production uses the per-user local bridge for Anki pull.');
       const state = await loadState();
-      const deck = state.decks.find((item) => item.id === (req.body.deckId || state.activeDeckId));
+      const requestedDeckId = req.body.deckId ? assertValidDeckId(req.body.deckId) : state.activeDeckId;
+      const deck = state.decks.find((item) => item.id === requestedDeckId);
       if (!deck) fail(404, 'deck_not_found', 'Deck not found');
       const pulledCards = await pullDeck(deck.name, state.sync.ankiConnectUrl);
       const conflicts = [];
@@ -1416,7 +1571,8 @@ export function createApp(options = {}) {
     try {
       if (production) fail(410, 'local_bridge_required', 'Hosted production uses the per-user local bridge for Anki push.');
       const state = await loadState();
-      const deck = state.decks.find((item) => item.id === (req.body.deckId || state.activeDeckId));
+      const requestedDeckId = req.body.deckId ? assertValidDeckId(req.body.deckId) : state.activeDeckId;
+      const deck = state.decks.find((item) => item.id === requestedDeckId);
       if (!deck) fail(404, 'deck_not_found', 'Deck not found');
       if (state.sync.conflicts.length) fail(409, 'sync_conflicts', 'Resolve Anki pull conflicts before pushing');
       const result = await pushDeck(deck, state.sync.ankiConnectUrl);

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useId, useRef } from 'react';
 import type { DeckCard } from './types';
 
 interface Props {
@@ -26,18 +26,19 @@ function FormattingToolbar({ textareaId }: { textareaId: string }) {
   }
 
   return (
-    <div className="format-toolbar">
-      <button type="button" title="Bold" onClick={() => wrapSelection('**', '**')}><b>B</b></button>
-      <button type="button" title="Italic" onClick={() => wrapSelection('*', '*')}><i>I</i></button>
-      <button type="button" title="List" onClick={() => wrapSelection('- ', '')}>List</button>
-      <button type="button" title="Cloze" onClick={() => wrapSelection('{{c1::', '}}')}>{'{{}}'}</button>
-      <button type="button" title="Code" onClick={() => wrapSelection('`', '`')}>{'<>'}</button>
+    <div className="format-toolbar" role="toolbar" aria-label="Formatting tools">
+      <button type="button" aria-label="Bold selected text" aria-controls={textareaId} title="Bold" onClick={() => wrapSelection('**', '**')}><b aria-hidden="true">B</b></button>
+      <button type="button" aria-label="Italicize selected text" aria-controls={textareaId} title="Italic" onClick={() => wrapSelection('*', '*')}><i aria-hidden="true">I</i></button>
+      <button type="button" aria-label="Turn selected text into a list item" aria-controls={textareaId} title="List" onClick={() => wrapSelection('- ', '')}>List</button>
+      <button type="button" aria-label="Wrap selected text in Anki cloze markup" aria-controls={textareaId} title="Cloze" onClick={() => wrapSelection('{{c1::', '}}')}>{'{{}}'}</button>
+      <button type="button" aria-label="Wrap selected text as inline code" aria-controls={textareaId} title="Code" onClick={() => wrapSelection('`', '`')}>{'<>'}</button>
     </div>
   );
 }
 
 export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props) {
   const fieldNames = card.fieldOrder?.length ? card.fieldOrder : Object.keys(card.fields);
+  const editorId = useId();
   const [fields, setFields] = useState<Record<string, string>>(() => ({ ...card.fields }));
   const [tagsInput, setTagsInput] = useState(card.tags.join(', '));
   const [reason, setReason] = useState('');
@@ -85,32 +86,37 @@ export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props
       <div className="card-editor-header">
         <strong>Edit card</strong>
         <span className="card-editor-hint">Submits as a suggestion for owner review</span>
-        <button className="btn btn-ghost card-editor-close" onClick={onCancel} aria-label="Cancel edit">✕</button>
+        <button type="button" className="btn btn-ghost card-editor-close" onClick={onCancel} aria-label="Cancel edit">✕</button>
       </div>
 
       <div className="card-editor-fields">
-        {fieldNames.map((name, i) => (
-          <div className="card-editor-field" key={name}>
-            <label htmlFor={`card-edit-${name.toLowerCase()}`}>{name}</label>
-            {(name.toLowerCase() === 'front' || name.toLowerCase() === 'back') && (
-              <FormattingToolbar textareaId={`card-edit-${name.toLowerCase()}`} />
-            )}
-            <textarea
-              id={`card-edit-${name.toLowerCase()}`}
-              ref={i === 0 ? firstRef : undefined}
-              className="card-editor-textarea"
-              value={fields[name] ?? ''}
-              onChange={(e) => setField(name, e.target.value)}
-              rows={name.toLowerCase() === 'front' ? 3 : 5}
-              aria-label={name}
-            />
-          </div>
-        ))}
+        {fieldNames.map((name, i) => {
+          const fieldId = `${editorId}-field-${i}`;
+          const normalizedName = name.toLowerCase();
+
+          return (
+            <div className="card-editor-field" key={`${name}-${i}`}>
+              <label htmlFor={fieldId}>{name}</label>
+              {(normalizedName === 'front' || normalizedName === 'back') && (
+                <FormattingToolbar textareaId={fieldId} />
+              )}
+              <textarea
+                id={fieldId}
+                ref={i === 0 ? firstRef : undefined}
+                className="card-editor-textarea"
+                value={fields[name] ?? ''}
+                onChange={(e) => setField(name, e.target.value)}
+                rows={normalizedName === 'front' ? 3 : 5}
+                aria-label={name}
+              />
+            </div>
+          );
+        })}
 
         <div className="card-editor-field">
-          <label htmlFor="editor-tags">Tags <small>(comma-separated)</small></label>
+          <label htmlFor={`${editorId}-tags`}>Tags <small>(comma-separated)</small></label>
           <input
-            id="editor-tags"
+            id={`${editorId}-tags`}
             className="card-editor-input"
             value={tagsInput}
             onChange={(e) => { setTagsInput(e.target.value); setError(''); }}
@@ -119,9 +125,9 @@ export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props
         </div>
 
         <div className="card-editor-field">
-          <label htmlFor="editor-reason">Reason for change <small>(required)</small></label>
+          <label htmlFor={`${editorId}-reason`}>Reason for change <small>(required)</small></label>
           <textarea
-            id="editor-reason"
+            id={`${editorId}-reason`}
             className="card-editor-textarea"
             value={reason}
             onChange={(e) => { setReason(e.target.value); setError(''); }}
@@ -137,8 +143,8 @@ export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props
         <span className="card-editor-chars">{charCount} chars</span>
         <span className="card-editor-shortcuts"><kbd>Ctrl+Enter</kbd> submit · <kbd>Esc</kbd> cancel</span>
         <div className="card-editor-actions">
-          <button className="btn btn-ghost" onClick={onCancel} disabled={busy}>Cancel</button>
-          <button className="btn btn-primary" onClick={handleSubmit} disabled={busy || !canSuggest}>
+          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button type="button" className="btn btn-primary" onClick={handleSubmit} disabled={busy || !canSuggest} aria-label={busy ? 'Submitting suggestion' : 'Submit suggestion'}>
             {busy ? 'Submitting…' : 'Submit suggestion'}
           </button>
         </div>

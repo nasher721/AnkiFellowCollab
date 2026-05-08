@@ -1,4 +1,4 @@
-import type { ApiError, AppState, DemoRole, StorageAsset, User, DeckMember, DeckSummary } from './types';
+import type { ApiError, AppState, DemoRole, StorageAsset, User, DeckMember, DeckSummary, StudySession } from './types';
 
 let authToken: string | null = null;
 
@@ -67,12 +67,16 @@ export interface MeResponse {
 
 export interface Comment {
   id: string;
+  suggestionId: string;
+  deckId: string;
   authorId: string;
   authorName: string;
   body: string;
   parentId: string | null;
   createdAt: string;
   updatedAt: string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
 }
 
 export interface Notification {
@@ -83,6 +87,12 @@ export interface Notification {
   refId: string | null;
   read: boolean;
   createdAt: string;
+}
+
+export interface NotificationPage {
+  notifications: Notification[];
+  unread: number;
+  nextCursor: string | null;
 }
 
 export interface PublicDeck {
@@ -138,6 +148,18 @@ export interface DeckAnalytics {
     weeklyTrend: { date: string; count: number }[];
     strugglingCards: { cardId: string; easeFactor: number; repetitions: number; lastRating?: number; nextDue: string; front?: string; back?: string }[];
   };
+}
+
+export interface CreateStudySessionPayload {
+  deckId: string;
+  startedAt: string;
+  endedAt: string;
+  durationSeconds: number;
+  cardsStudied: number;
+  cardsCorrect: number;
+  newCards: number;
+  reviewCards: number;
+  metadata: Record<string, unknown>;
 }
 
 export interface DeckInvite {
@@ -224,6 +246,11 @@ export const api = {
       jsonRequest<Comment>(`/api/suggestions/${suggestionId}/comments`, {
         method: 'POST',
         body: JSON.stringify({ body, parentId })
+      }),
+    setResolved: (suggestionId: string, commentId: string, resolved?: boolean) =>
+      jsonRequest<Comment>(`/api/suggestions/${suggestionId}/comments/${commentId}/resolved`, {
+        method: 'PATCH',
+        body: JSON.stringify(typeof resolved === 'boolean' ? { resolved } : {})
       })
   },
   reactions: {
@@ -239,7 +266,13 @@ export const api = {
       }).then((r) => { if (!r.ok && r.status !== 204) throw new Error('Remove reaction failed'); })
   },
   notifications: {
-    list: () => jsonRequest<{ notifications: Notification[]; unread: number }>('/api/notifications'),
+    list: (params: { limit?: number; cursor?: string | null } = {}) => {
+      const query = new URLSearchParams();
+      if (params.limit !== undefined) query.set('limit', String(params.limit));
+      if (params.cursor) query.set('cursor', params.cursor);
+      const suffix = query.toString() ? `?${query.toString()}` : '';
+      return jsonRequest<NotificationPage>(`/api/notifications${suffix}`);
+    },
     readAll: () =>
       fetch('/api/notifications/read-all', {
         method: 'POST',
@@ -283,6 +316,11 @@ export const api = {
     jsonRequest<AppState>(`/api/suggestions/${id}/decision`, {
       method: 'POST',
       body: JSON.stringify({ decision })
+    }),
+  bulkDecideSuggestions: (deckId: string, suggestionIds: string[], decision: 'accepted' | 'rejected' | 'revision') =>
+    jsonRequest<AppState>(`/api/decks/${deckId}/suggestions/bulk-decision`, {
+      method: 'POST',
+      body: JSON.stringify({ suggestionIds, decision })
     }),
   ankiStatus: () => jsonRequest('/api/anki/status'),
   ankiPull: (deckId: string) =>
@@ -388,6 +426,11 @@ export const api = {
     }),
   fetchStudyProgress: (deckId: string) =>
     jsonRequest<{ progress: Array<{ cardId: string; intervalDays: number; easeFactor: number; repetitions: number; nextDue: string; lastRating: number | null; updatedAt: string }> }>(`/api/study/progress/${deckId}`),
+  createStudySession: (payload: CreateStudySessionPayload) =>
+    jsonRequest<{ session: StudySession }>('/api/study/sessions', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
   invites: {
     list: (deckId: string) =>
       jsonRequest<{ invites: DeckInvite[] }>(`/api/decks/${deckId}/invites`),
