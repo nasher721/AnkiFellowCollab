@@ -82,6 +82,107 @@ test.describe('Review Queue', () => {
   });
 });
 
+test.describe('Conflict Resolution', () => {
+  test('replays saved conflict decisions when polling rehydrates pending conflicts', async ({ page }) => {
+    const detectedAt = '2026-05-08T12:00:00.000Z';
+    const syncConflict = {
+      id: 'conflict-replay-1',
+      deckId: 'deck-replay',
+      cardId: 'card-replay',
+      source: 'DeckBridge Sync',
+      detectedAt,
+      incomingFields: { Front: 'Incoming front', Back: 'Incoming answer' },
+      localFields: { Front: 'Local front', Back: 'Local answer' }
+    };
+    const stateWithConflict = {
+      user: { id: 'you', email: 'you@example.com', name: 'You' },
+      memberships: [{ deckId: 'deck-replay', userId: 'you', role: 'owner', createdAt: detectedAt }],
+      decks: [{
+        id: 'deck-replay',
+        name: 'Replay Deck',
+        description: 'Conflict replay deck',
+        owner: 'You',
+        importedAt: detectedAt,
+        lastSyncedAt: detectedAt,
+        cards: [{ id: 'card-replay', fields: { Front: 'Local front', Back: 'Local answer' }, tags: [], noteType: 'Basic', modifiedAt: detectedAt, modifiedBy: 'Anki', suspended: false }],
+        media: {},
+        source: { filename: 'anki', format: 'anki-addon', deckName: 'Replay Deck', deckPath: 'Replay Deck' }
+      }],
+      summaries: [{
+        id: 'deck-replay',
+        name: 'Replay Deck',
+        description: 'Conflict replay deck',
+        cardCount: 1,
+        noteCount: 1,
+        tagCount: 0,
+        noteTypes: ['Basic'],
+        pendingSuggestions: 0,
+        lastSyncedAt: detectedAt,
+        importedAt: detectedAt
+      }],
+      activeDeckId: 'deck-replay',
+      role: 'owner',
+      collaborators: [{ id: 'you', name: 'You', email: 'you@example.com', role: 'owner', accepted: 0 }],
+      suggestions: [],
+      activity: [],
+      sync: {
+        ankiConnectUrl: null,
+        connected: false,
+        lastCheckedAt: detectedAt,
+        lastPullAt: null,
+        lastPushAt: detectedAt,
+        lastAddonSync: {
+          syncedAt: detectedAt,
+          source: 'DeckBridge Sync',
+          client: { name: 'DeckBridge Sync', version: '0.1.0', fingerprint: 'test-host' },
+          stats: { total: 1, created: 0, updated: 0, skipped: 0, conflicts: 1, dryRun: false }
+        },
+        conflicts: [syncConflict]
+      }
+    };
+    let stateRequests = 0;
+    await page.route('**/api/state', async (route) => {
+      stateRequests += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(stateWithConflict)
+      });
+    });
+    await page.route('**/api/addon/version', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          name: 'DeckBridge Sync',
+          version: '0.1.0',
+          minVersion: '23.10.0',
+          package: 'deckbridge_sync',
+          downloadUrl: '/api/addon/download'
+        })
+      });
+    });
+    await page.route('**/api/addon/download', async (route) => {
+      if (route.request().method() === 'HEAD') {
+        await route.fulfill({ status: 200 });
+        return;
+      }
+      await route.fallback();
+    });
+
+    await page.goto('/');
+    await expect(page.getByText('Conflicts need review')).toBeVisible();
+    await page.getByRole('button', { name: 'Keep Local' }).click();
+    await expect(page.getByText('Conflicts need review')).toHaveCount(0);
+    await expect(page.getByText('No unresolved conflicts in this saved review.')).toBeVisible();
+
+    const requestsAfterDecision = stateRequests;
+    await expect.poll(() => stateRequests, { timeout: 20_000 }).toBeGreaterThan(requestsAfterDecision);
+    await expect(page.getByText('Conflicts need review')).toHaveCount(0);
+    await expect(page.getByText('No unresolved conflicts in this saved review.')).toBeVisible();
+  });
+});
+
 test.describe('Tabs', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');

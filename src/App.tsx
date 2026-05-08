@@ -140,7 +140,7 @@ function deriveSyncHealth({
   sync: AppState['sync'];
 }): SyncHealth {
   const lastAddonSync = sync.lastAddonSync;
-  const conflictCount = sync.conflicts.length || lastAddonSync?.stats.conflicts || 0;
+  const conflictCount = sync.conflicts.length;
   const lastChecked = sync.lastCheckedAt || lastAddonSync?.syncedAt || null;
   const lastSynced = activeDeck?.lastSyncedAt || (!lastAddonSync?.stats.dryRun ? lastAddonSync?.syncedAt : null) || sync.lastPushAt || sync.lastPullAt || null;
   const deckLabel = activeDeck?.name || 'No DeckBridge deck';
