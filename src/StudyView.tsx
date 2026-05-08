@@ -193,6 +193,12 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
         const last = focusable[focusable.length - 1];
         const activeElement = document.activeElement;
 
+        if (activeElement === panel) {
+          e.preventDefault();
+          (e.shiftKey ? last : first).focus({ preventScroll: true });
+          return;
+        }
+
         if (!panel.contains(activeElement)) {
           e.preventDefault();
           first.focus({ preventScroll: true });

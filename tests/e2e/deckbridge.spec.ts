@@ -216,6 +216,12 @@ test.describe('Tabs', () => {
     const dialog = page.locator('.study-overlay');
     await expect(dialog).toBeVisible();
 
+    await page.keyboard.press('Shift+Tab');
+    await expect.poll(() => page.evaluate(() => {
+      const active = document.activeElement;
+      return active !== document.body && Boolean(active?.closest('.study-overlay'));
+    })).toBe(true);
+
     for (let i = 0; i < 8; i += 1) {
       await page.keyboard.press('Tab');
       await expect.poll(() => page.evaluate(() => {
