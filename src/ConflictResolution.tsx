@@ -165,7 +165,8 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
     if (view === 'all') return conflicts;
     return conflicts.filter((item) => !decisions[item.id]);
   }, [conflicts, decisions, view]);
-  const conflict = visibleConflicts[index];
+  const safeIndex = Math.min(index, Math.max(visibleConflicts.length - 1, 0));
+  const conflict = visibleConflicts[safeIndex];
   const decidedCount = conflicts.filter((item) => decisions[item.id]).length;
   const unresolvedCount = conflicts.length - decidedCount;
   const pendingCount = conflicts.filter((item) => pendingIds.has(item.id)).length;
@@ -178,6 +179,10 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
   }, [storageKey]);
 
   useEffect(() => {
+    replayedRef.current.forEach((conflictId) => {
+      if (!pendingIds.has(conflictId)) replayedRef.current.delete(conflictId);
+    });
+
     conflicts.forEach((item) => {
       const decision = decisions[item.id];
       if (!decision || !pendingIds.has(item.id) || replayedRef.current.has(item.id)) return;
@@ -192,6 +197,7 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
   }, [visibleConflicts.length]);
 
   const recordDecision = (selectedConflict: Conflict, resolution: Resolution) => {
+    const isPending = pendingIds.has(selectedConflict.id);
     const nextDecisions = {
       ...decisions,
       [selectedConflict.id]: {
@@ -207,9 +213,11 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
 
     setDecisions(nextDecisions);
     writeStoredDecisions(storageKey, nextDecisions);
-    replayedRef.current.add(selectedConflict.id);
-    onResolve(selectedConflict.id, resolution);
-    if (view === 'all' && index < visibleConflicts.length - 1) setIndex((i) => i + 1);
+    if (isPending) {
+      replayedRef.current.add(selectedConflict.id);
+      onResolve(selectedConflict.id, resolution);
+    }
+    if (view === 'all' && safeIndex < visibleConflicts.length - 1) setIndex((i) => i + 1);
   };
 
   const resetProgress = () => {
@@ -217,6 +225,7 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
     setDecisions({});
     setIndex(0);
     setView('unresolved');
+    if (pendingCount === 0) onClearReview?.();
   };
 
   if (!conflict) {
@@ -259,7 +268,7 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
       <div className="conflict-header">
         <div>
           <strong>Sync Conflict — {conflict.source}</strong>
-          <span className="conflict-progress">Conflict {index + 1} of {visibleConflicts.length}</span>
+          <span className="conflict-progress">Conflict {safeIndex + 1} of {visibleConflicts.length}</span>
           {currentDecision ? (
             <span className="conflict-decision">Decided: {currentDecision.resolution}</span>
           ) : null}
@@ -310,10 +319,10 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
       </div>
 
       <div className="conflict-actions">
-        <button className="button secondary" disabled={index === 0} onClick={() => setIndex((i) => Math.max(i - 1, 0))}>
+        <button className="button secondary" disabled={safeIndex === 0} onClick={() => setIndex((i) => Math.max(i - 1, 0))}>
           Previous
         </button>
-        <button className="button secondary" disabled={index >= visibleConflicts.length - 1} onClick={() => setIndex((i) => Math.min(i + 1, visibleConflicts.length - 1))}>
+        <button className="button secondary" disabled={safeIndex >= visibleConflicts.length - 1} onClick={() => setIndex((i) => Math.min(i + 1, visibleConflicts.length - 1))}>
           Next
         </button>
         <button

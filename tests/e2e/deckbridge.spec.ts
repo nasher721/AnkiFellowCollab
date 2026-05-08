@@ -43,7 +43,7 @@ test.describe('Review Queue', () => {
   });
 
   test('shows pending suggestions', async ({ page }) => {
-    await expect(page.getByText('1 pending suggestions')).toBeVisible();
+    await expect(page.getByText('1 pending')).toBeVisible();
     await expect(page.getByRole('button', { name: /Maya Patel.*pending/ })).toBeVisible();
   });
 
@@ -67,7 +67,7 @@ test.describe('Review Queue', () => {
   });
 
   test('owner can reject suggestion', async ({ page }) => {
-    await page.getByRole('button', { name: 'Collaborator' }).click();
+    await page.getByRole('button', { name: 'Contributor' }).click();
     await page.getByRole('button', { name: /Suggest edit/ }).click();
     await expect(page.getByText(/Suggestion added/)).toBeVisible();
     await page.getByRole('button', { name: 'Owner' }).click();
@@ -76,7 +76,7 @@ test.describe('Review Queue', () => {
   });
 
   test('collaborator can suggest edit', async ({ page }) => {
-    await page.getByRole('button', { name: 'Collaborator' }).click();
+    await page.getByRole('button', { name: 'Contributor' }).click();
     await page.getByRole('button', { name: /Suggest edit/ }).click();
     await expect(page.getByText(/Suggestion added/)).toBeVisible();
   });
