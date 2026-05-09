@@ -532,6 +532,8 @@ export function createLocalRepository() {
         card.templateFront = patch.templateFront;
         card.templateBack = patch.templateBack;
         card.modelCss = patch.modelCss;
+        delete card.renderedFront;
+        delete card.renderedBack;
         card.modifiedAt = now;
         card.modifiedBy = user.name;
       }

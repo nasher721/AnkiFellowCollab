@@ -124,6 +124,8 @@ function toCard(row) {
     templateFront: row.template_front || undefined,
     templateBack: row.template_back || undefined,
     modelCss: row.model_css || undefined,
+    renderedFront: row.rendered_front || undefined,
+    renderedBack: row.rendered_back || undefined,
     clozeOrd: row.cloze_ord ?? undefined
   };
 }
@@ -315,6 +317,8 @@ function cardRowForUpsert(deckId, card) {
     template_front: card.templateFront,
     template_back: card.templateBack,
     model_css: card.modelCss,
+    rendered_front: card.renderedFront,
+    rendered_back: card.renderedBack,
     cloze_ord: card.clozeOrd
   };
 }
@@ -543,6 +547,8 @@ export function createSupabaseRepository(options = {}) {
             template_front: card.templateFront,
             template_back: card.templateBack,
             model_css: card.modelCss,
+            rendered_front: card.renderedFront,
+            rendered_back: card.renderedBack,
             cloze_ord: card.clozeOrd
           })));
           if (cardError) throw cardError;
@@ -833,6 +839,8 @@ export function createSupabaseRepository(options = {}) {
         template_front: patch.templateFront,
         template_back: patch.templateBack,
         model_css: patch.modelCss,
+        rendered_front: null,
+        rendered_back: null,
         modified_at: now,
         modified_by: user.name
       }).eq('deck_id', deckId).eq('model_name', modelName);

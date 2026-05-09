@@ -18,12 +18,14 @@ export function mediaUrl(deckId: string, filename: string) {
 }
 
 export function renderMediaHtml(deckId: string, html: string) {
-  const withAudio = String(html || '').replace(/\[sound:([^\]]+)\]/gi, (_match, rawRef) => {
-    const filename = localFilename(rawRef);
-    if (!filename) return '';
-    const src = mediaUrl(deckId, filename);
-    return `<audio controls preload="none" src="${src}"></audio>`;
-  });
+  const withAudio = String(html || '')
+    .replace(/\[sound:([^\]]+)\]/gi, (_match, rawRef) => {
+      const filename = localFilename(rawRef);
+      if (!filename) return '';
+      const src = mediaUrl(deckId, filename);
+      return `<audio controls preload="none" src="${src}"></audio>`;
+    })
+    .replace(/\[anki:play:[^\]]+\]/gi, '<span class="anki-tts-control" role="button" aria-label="Anki text to speech"></span>');
 
   if (typeof window === 'undefined' || typeof window.DOMParser === 'undefined') return withAudio;
 

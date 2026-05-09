@@ -140,6 +140,8 @@ export function normalizeParsedDeck(parsed, sourceName = 'Imported Deck') {
       ...(card.templateFront != null ? { templateFront: String(card.templateFront) } : {}),
       ...(card.templateBack != null ? { templateBack: String(card.templateBack) } : {}),
       ...(card.modelCss != null ? { modelCss: String(card.modelCss) } : {}),
+      ...(card.renderedFront != null ? { renderedFront: String(card.renderedFront) } : {}),
+      ...(card.renderedBack != null ? { renderedBack: String(card.renderedBack) } : {}),
       ...(Number.isFinite(Number(card.clozeOrd)) ? { clozeOrd: Number(card.clozeOrd) } : {}),
     };
   });
@@ -343,6 +345,8 @@ function normalizeAddonCard(card, index) {
     ...(card.templateFront != null ? { templateFront: cleanText(card.templateFront, '', 120000) } : {}),
     ...(card.templateBack != null ? { templateBack: cleanText(card.templateBack, '', 120000) } : {}),
     ...(card.modelCss != null ? { modelCss: cleanText(card.modelCss, '', 120000) } : {}),
+    ...(card.renderedFront != null ? { renderedFront: cleanText(card.renderedFront, '', 240000) } : {}),
+    ...(card.renderedBack != null ? { renderedBack: cleanText(card.renderedBack, '', 240000) } : {}),
     ...(clozeOrd !== undefined ? { clozeOrd } : {})
   };
 }
@@ -532,8 +536,9 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
       continue;
     }
 
-    const changed = !sameJson(existing.fields, incoming.fields)
-      || !sameJson(existing.tags, incoming.tags)
+    const contentChanged = !sameJson(existing.fields, incoming.fields)
+      || !sameJson(existing.tags, incoming.tags);
+    const changed = contentChanged
       || existing.due !== incoming.due
       || existing.state !== incoming.state
       || existing.suspended !== incoming.suspended
@@ -541,6 +546,8 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
       || (Object.hasOwn(incoming, 'templateFront') && existing.templateFront !== incoming.templateFront)
       || (Object.hasOwn(incoming, 'templateBack') && existing.templateBack !== incoming.templateBack)
       || (Object.hasOwn(incoming, 'modelCss') && existing.modelCss !== incoming.modelCss)
+      || (Object.hasOwn(incoming, 'renderedFront') && existing.renderedFront !== incoming.renderedFront)
+      || (Object.hasOwn(incoming, 'renderedBack') && existing.renderedBack !== incoming.renderedBack)
       || (Object.hasOwn(incoming, 'clozeOrd') && existing.clozeOrd !== incoming.clozeOrd);
     if (!changed) {
       result.stats.skipped += 1;
@@ -548,7 +555,7 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
       continue;
     }
 
-    if (syncInput.conflictPolicy === 'detect') {
+    if (syncInput.conflictPolicy === 'detect' && contentChanged) {
       const incomingMediaRefs = Array.isArray(incoming.mediaRefs) ? incoming.mediaRefs : [];
       result.conflicts.push({
         id: `conflict-${randomUUID()}`,
@@ -584,6 +591,8 @@ export function mergeAddonCards(deck, syncInput, actorName = 'DeckBridge Anki ad
       templateFront: Object.hasOwn(incoming, 'templateFront') ? incoming.templateFront : existing.templateFront,
       templateBack: Object.hasOwn(incoming, 'templateBack') ? incoming.templateBack : existing.templateBack,
       modelCss: Object.hasOwn(incoming, 'modelCss') ? incoming.modelCss : existing.modelCss,
+      renderedFront: Object.hasOwn(incoming, 'renderedFront') ? incoming.renderedFront : existing.renderedFront,
+      renderedBack: Object.hasOwn(incoming, 'renderedBack') ? incoming.renderedBack : existing.renderedBack,
       clozeOrd: Object.hasOwn(incoming, 'clozeOrd') ? incoming.clozeOrd : existing.clozeOrd
     }, actorName, syncedAt);
     result.updatedCards.push(updated);
@@ -846,7 +855,9 @@ export function deckToCreateDeckJson(deck) {
       note_id: card.ankiNoteId,
       media_refs: card.mediaRefs || [],
       source_deck_name: card.sourceDeckName || deck.source?.deckName || deck.name,
-      source_deck_path: card.sourceDeckPath || deck.source?.deckPath || deck.name
+      source_deck_path: card.sourceDeckPath || deck.source?.deckPath || deck.name,
+      rendered_front: card.renderedFront,
+      rendered_back: card.renderedBack
     }))
   };
 }

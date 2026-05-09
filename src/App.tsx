@@ -709,7 +709,9 @@ function ModelTemplateEditor({ deck, busy, onSave }: {
     ...previewCard,
     templateFront,
     templateBack,
-    modelCss
+    modelCss,
+    renderedFront: undefined,
+    renderedBack: undefined
   };
   const frontHtml = renderCardHtml(draftCard, deck.id, 'front', undefined, draftCard.clozeOrd);
 

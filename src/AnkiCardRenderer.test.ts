@@ -85,6 +85,31 @@ describe('renderCardHtml', () => {
     expect(back).toBe('<div class="type-answer type-answer-back">Arteriovenous malformation</div>');
   });
 
+  it('does not duplicate visible text for Anki TTS template directives', () => {
+    const deckCard = card({
+      templateFront: '{{edit:Front}}{{tts en_US voices=Apple_Samantha speed=1.15:Front}}'
+    });
+
+    expect(renderCardHtml(deckCard, 'deck-a', 'front')).toBe('What is <b>AVM</b>?');
+  });
+
+  it('prefers Anki-rendered side HTML when it is available', () => {
+    const deckCard = card({
+      renderedFront: '<section id="front-section">{{Front}}</section>[anki:play:q:0]',
+      renderedBack: '<section id="back"><b>Rendered answer</b></section>[anki:play:a:0]',
+      templateFront: 'Template {{Front}}',
+      templateBack: 'Template {{Back}}'
+    });
+
+    const front = renderCardHtml(deckCard, 'deck-a', 'front');
+    const back = renderCardHtml(deckCard, 'deck-a', 'back');
+
+    expect(front).toContain('<section id="front-section">{{Front}}</section>');
+    expect(front).toContain('class="anki-tts-control"');
+    expect(back).toContain('<section id="back"><b>Rendered answer</b></section>');
+    expect(back).not.toContain('Template');
+  });
+
   it('renders special Anki fields from DeckBridge card metadata', () => {
     const deckCard = card({
       templateFront: '{{Tags}}|{{Type}}|{{Deck}}|{{Subdeck}}|{{Card}}'

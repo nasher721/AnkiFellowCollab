@@ -231,6 +231,8 @@ export interface DeckCard {
   templateFront?: string;
   templateBack?: string;
   modelCss?: string;
+  renderedFront?: string;
+  renderedBack?: string;
   clozeOrd?: number;
 }
 

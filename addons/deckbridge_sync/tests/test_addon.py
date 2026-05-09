@@ -281,6 +281,12 @@ class FakeCard:
     def flush(self):
         self.flushed = True
 
+    def question(self):
+        return '<section id="front-section"><b>Front</b></section>'
+
+    def answer(self):
+        return '<section id="back">Back</section>'
+
 
 class FakeNote:
     id = 101
@@ -319,6 +325,8 @@ class TestSchedulingSync(unittest.TestCase):
         self.assertEqual(card['templateFront'], '{{Front}}')
         self.assertEqual(card['templateBack'], '{{FrontSide}}<hr>{{Back}}')
         self.assertEqual(card['modelCss'], '.card { color: red; }')
+        self.assertEqual(card['renderedFront'], '<section id="front-section"><b>Front</b></section>')
+        self.assertEqual(card['renderedBack'], '<section id="back">Back</section>')
         self.assertEqual(card['clozeOrd'], 0)
 
     def test_note_to_cards_emits_one_card_per_anki_card_with_matching_template_ord(self):

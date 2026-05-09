@@ -99,6 +99,21 @@ test('mergeAddonCards detects conflicts in detect mode', () => {
   assert.equal(result.conflicts[0].cardId, 'c1');
 });
 
+test('mergeAddonCards refreshes Anki rendering metadata in detect mode without content conflicts', () => {
+  const deck = { cards: [{ id: 'c1', ankiNoteId: 1, fields: { Front: 'Same' }, tags: [], type: 'Basic', modelName: 'Basic', fieldOrder: ['Front'], due: null, state: 'New', suspended: false, mediaRefs: [], modifiedAt: new Date().toISOString(), modifiedBy: 'test' }], lastSyncedAt: null };
+  const result = mergeAddonCards(deck, {
+    cards: [{ id: 'c1', ankiNoteId: 1, fields: { Front: 'Same' }, tags: [], type: 'Basic', modelName: 'Basic', fieldOrder: ['Front'], ankiNoteId: 1, due: null, state: 'New', suspended: false, mediaRefs: [], modifiedAt: new Date().toISOString(), modifiedBy: 'test', sourceDeckName: null, sourceDeckPath: null, templateFront: '<section>{{Front}}</section>', templateBack: '<section>{{Back}}</section>', modelCss: '.card { color: white; }', renderedFront: '<section>Same</section>' }],
+    dryRun: false,
+    allowCreate: true,
+    conflictPolicy: 'detect',
+    source: 'test'
+  });
+  assert.equal(result.stats.conflicts, 0);
+  assert.equal(result.stats.updated, 1);
+  assert.equal(deck.cards[0].modelCss, '.card { color: white; }');
+  assert.equal(deck.cards[0].renderedFront, '<section>Same</section>');
+});
+
 test('mergeAddonCards overwrites in overwrite-platform mode', () => {
   const deck = { cards: [{ id: 'c1', ankiNoteId: 1, fields: { Front: 'Old' }, tags: [], type: 'Basic', modelName: 'Basic', fieldOrder: ['Front'], due: null, state: 'New', suspended: false, mediaRefs: [], modifiedAt: new Date().toISOString(), modifiedBy: 'test' }], lastSyncedAt: null };
   const result = mergeAddonCards(deck, {

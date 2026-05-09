@@ -872,6 +872,18 @@ def _card_state(card: Any, fallback: Dict[str, Any]) -> Dict[str, Any]:
     return {"due": due, "state": state, "suspended": queue < 0}
 
 
+def _rendered_card_html(card: Optional[Any], side: str) -> str:
+    if card is None:
+        return ""
+    renderer = getattr(card, "question", None) if side == "front" else getattr(card, "answer", None)
+    if not callable(renderer):
+        return ""
+    try:
+        return str(renderer() or "")
+    except Exception:
+        return ""
+
+
 def _note_to_card(note: Any, card: Optional[Any], ord_value: int, fallback_state: Dict[str, Any]) -> Dict[str, Any]:
     model = note.note_type()
     templates = model.get("tmpls") or []
@@ -898,6 +910,8 @@ def _note_to_card(note: Any, card: Optional[Any], ord_value: int, fallback_state
         "templateFront": str(template.get("qfmt") or ""),
         "templateBack": str(template.get("afmt") or ""),
         "modelCss": str(model.get("css") or ""),
+        "renderedFront": _rendered_card_html(card, "front"),
+        "renderedBack": _rendered_card_html(card, "back"),
         "clozeOrd": ord_value,
     }
 

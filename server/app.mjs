@@ -2797,19 +2797,50 @@ export function createApp(options = {}) {
       const pulledCards = await pullDeck(deck.name, state.sync.ankiConnectUrl);
       const conflicts = [];
       for (const pulled of pulledCards) {
-        const local = deck.cards.find((card) => card.ankiNoteId && card.ankiNoteId === pulled.ankiNoteId);
+        const pulledOrd = Number.isFinite(Number(pulled.clozeOrd)) ? Number(pulled.clozeOrd) : 0;
+        const local = deck.cards.find((card) => {
+          if (!card.ankiNoteId || card.ankiNoteId !== pulled.ankiNoteId) return false;
+          const localOrd = Number.isFinite(Number(card.clozeOrd)) ? Number(card.clozeOrd) : 0;
+          return localOrd === pulledOrd || card.id === `anki-${pulled.ankiNoteId}`;
+        });
         if (!local) {
           deck.cards.push(pulled);
-        } else if (JSON.stringify(local.fields) !== JSON.stringify(pulled.fields)) {
+          continue;
+        }
+
+        for (const key of ['templateFront', 'templateBack', 'modelCss', 'renderedFront', 'renderedBack', 'clozeOrd', 'fieldOrder', 'sourceDeckName', 'sourceDeckPath']) {
+          if (Object.hasOwn(pulled, key)) local[key] = pulled[key];
+        }
+        local.modelName = pulled.modelName || local.modelName;
+        local.type = pulled.type || local.type;
+        local.due = pulled.due;
+        local.state = pulled.state;
+        local.suspended = pulled.suspended;
+        if (JSON.stringify(local.fields) !== JSON.stringify(pulled.fields)) {
           conflicts.push({
             cardId: local.id,
             source: 'Anki',
             incomingFields: pulled.fields,
             localFields: local.fields
           });
+        } else {
+          local.modifiedAt = pulled.modifiedAt;
+          local.modifiedBy = pulled.modifiedBy;
         }
       }
-      await repository.recordSyncConflicts(req.user, deck.id, conflicts);
+      state.sync.conflicts = conflicts.map((conflict) => ({
+        id: `conflict-${randomUUID()}`,
+        deckId: deck.id,
+        ...conflict,
+        detectedAt: nowIso()
+      }));
+      state.activity.unshift({
+        id: `act-${randomUUID()}`,
+        kind: 'sync',
+        text: `${req.user.name} pulled ${pulledCards.length} Anki card(s)`,
+        at: nowIso()
+      });
+      await saveState(state);
       res.json(await repository.getDeckState(req.user, deck.id));
     } catch (error) {
       next(error);

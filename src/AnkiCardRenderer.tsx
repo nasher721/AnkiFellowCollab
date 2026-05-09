@@ -120,6 +120,8 @@ function applyFieldReference(ref: string, context: TemplateContext): string {
       value = renderTypeAnswer(value, context);
     } else if (filter === 'cloze') {
       value = renderClozeField(value, context.activeClozeNum, context.side);
+    } else if (filter.startsWith('tts ')) {
+      value = '';
     }
   }
 
@@ -195,6 +197,11 @@ export function renderCardHtml(
   frontHtml?: string,
   clozeOrd?: number,
 ): string {
+  const renderedHtml = side === 'front' ? card.renderedFront : card.renderedBack;
+  if (renderedHtml?.trim()) {
+    return renderMediaHtml(deckId, renderedHtml);
+  }
+
   const effectiveClozeOrd = clozeOrd ?? card.clozeOrd;
   const context: TemplateContext = {
     card,
@@ -224,6 +231,8 @@ export function buildAnkiCardDocument(bodyHtml: string, modelCss?: string): stri
 html,body{margin:0;padding:16px;box-sizing:border-box;background:#fff;}
 img,video{max-width:100%;height:auto;}
 audio{display:block;margin:8px auto;}
+.anki-tts-control{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;margin:8px 0;border-radius:999px;background:#fff;border:1px solid rgba(0,0,0,.16);box-shadow:0 1px 2px rgba(0,0,0,.18);}
+.anki-tts-control::before{content:"";display:block;width:0;height:0;margin-left:3px;border-top:8px solid transparent;border-bottom:8px solid transparent;border-left:13px solid #5b6470;}
 .cloze{font-weight:bold;color:#00a;}
 ${ANKI_BASE_CSS}
 ${effectiveModelCss !== ANKI_BASE_CSS ? effectiveModelCss : ''}
