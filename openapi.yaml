@@ -1,0 +1,3533 @@
+openapi: "3.1.0"
+
+info:
+  title: DeckBridge API
+  version: "1.0.0"
+  description: |
+    DeckBridge is an Anki deck collaboration workspace. This API powers the web app,
+    the Anki add-on sync, and third-party integrations.
+
+    ## API Design Principles
+    - Resource-oriented REST over `/api/v1/`
+    - Consistent camelCase property naming
+    - RFC 7807 Problem Details for errors (`application/problem+json`)
+    - Cursor-based pagination for all collection endpoints
+    - Bearer token authentication (JWT or API tokens)
+
+    ## Authentication
+    Two modes depending on environment:
+
+    | Mode | Mechanism | Headers |
+    |------|-----------|---------|
+    | Development | Dev identity headers | `x-deckbridge-user-id`, `x-deckbridge-user-email`, `x-deckbridge-user-name` |
+    | Production | Bearer token | `Authorization: Bearer <token>` (JWT or `db_`-prefixed API token) |
+
+    ## Rate Limiting
+    | Limiter | Window | Default Limit | Applied To |
+    |---------|--------|---------------|------------|
+    | Upload | 60s | 5 | Deck/media upload endpoints |
+    | Sync | 60s | 30 | Card sync endpoints |
+    | Analytics | 60s | 60 | Analytics endpoints |
+    | Read | 60s | 200 | List/read endpoints |
+
+    ## Versioning Strategy
+    Current version: `v1`. Breaking changes will increment the version.
+    Deprecated endpoints return `Sunset` header and remain available for one minor cycle.
+  contact:
+    name: DeckBridge Team
+  license:
+    name: MIT
+
+servers:
+  - url: /
+    description: Relative server URL (proxy-aware)
+
+paths:
+  # ─── Health & Status ───────────────────────────────────────────
+  /api/health:
+    get:
+      summary: Server health check
+      operationId: getHealth
+      tags: [System]
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, repository, dataDir]
+                properties:
+                  ok: { type: boolean, example: true }
+                  repository: { type: string, example: "SupabaseDeckBridgeRepository" }
+                  dataDir: { type: string, example: ".deckbridge" }
+
+  /api/ai/status:
+    get:
+      summary: AI gateway capabilities
+      operationId: getAiCapabilities
+      tags: [System]
+      responses:
+        "200":
+          description: AI gateway status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiCapabilityStatus"
+
+  # ─── Add-on Distribution ──────────────────────────────────────
+  /api/addon/version:
+    get:
+      summary: Anki add-on version info
+      operationId: getAddonVersion
+      tags: [Addon]
+      responses:
+        "200":
+          description: Add-on version manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddonVersion"
+
+  /api/addon/download:
+    get:
+      summary: Download the Anki add-on package
+      operationId: downloadAddon
+      tags: [Addon]
+      responses:
+        "200":
+          description: Binary .ankiaddon file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ─── Me / Profile ─────────────────────────────────────────────
+  /api/me:
+    get:
+      summary: Current user profile and memberships
+      operationId: getMe
+      tags: [User]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      responses:
+        "200":
+          description: User profile, memberships, and accessible decks
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/profiles/{userId}:
+    get:
+      summary: Public user profile
+      operationId: getProfile
+      tags: [User]
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Public profile and public decks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [profile, decks]
+                properties:
+                  profile:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      name: { type: string }
+                  decks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        description: { type: string }
+                        importedAt: { type: string, format: date-time }
+                        downloadCount: { type: integer }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ─── API Tokens ───────────────────────────────────────────────
+  /api/tokens:
+    get:
+      summary: List API tokens
+      operationId: listTokens
+      tags: [User]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      responses:
+        "200":
+          description: Token list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ApiToken"
+    post:
+      summary: Create API token
+      operationId: createToken
+      tags: [User]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                  default: "Anki Add-on"
+                  maxLength: 200
+      responses:
+        "201":
+          description: Token created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedToken"
+
+  /api/tokens/{tokenId}:
+    delete:
+      summary: Revoke an API token
+      operationId: revokeToken
+      tags: [User]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: tokenId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Token revoked
+
+  # ─── Anki Login ──────────────────────────────────────────────
+  /api/anki/login:
+    post:
+      summary: Authenticate via email/password (Supabase only)
+      operationId: ankiLogin
+      tags: [User]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  token: { $ref: "#/components/schemas/CreatedToken" }
+                  decks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DeckSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+
+  # ─── Decks ──────────────────────────────────────────────────
+  /api/decks:
+    get:
+      summary: List decks the user can access
+      operationId: listDecks
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      responses:
+        "200":
+          description: List of deck summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  decks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DeckSummary"
+
+  /api/decks/upload:
+    post:
+      summary: Upload an .apkg file to create a deck
+      operationId: uploadDeck
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [deck]
+              properties:
+                deck:
+                  type: string
+                  format: binary
+                  description: The .apkg file to upload
+      responses:
+        "201":
+          description: Deck created with full state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/decks/sync/from-anki:
+    post:
+      summary: Create a deck from add-on sync payload (first-time sync)
+      operationId: createDeckFromAnki
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                deckName: { type: string }
+                cards:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/AddonCard"
+                media: { type: object }
+                returnState: { type: boolean, default: true }
+      responses:
+        "201":
+          description: Deck created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deck:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      name: { type: string }
+                      cardCount: { type: integer }
+                  result:
+                    $ref: "#/components/schemas/AddonSyncResult"
+                  state:
+                    $ref: "#/components/schemas/AppState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/decks/subscriptions:
+    get:
+      summary: AnkiHub-compatible subscriptions list
+      operationId: listSubscriptions
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      deprecated: true
+      responses:
+        "200":
+          description: Subscriptions in AnkiHub-compatible format
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subscriptions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        deck:
+                          $ref: "#/components/schemas/CompatDeck"
+                        lastSyncedAt: { type: string, format: date-time, nullable: true }
+                        subscribedAt: { type: string, format: date-time, nullable: true }
+                        role: { type: string }
+                        pendingSuggestions: { type: integer }
+                  api:
+                    type: object
+                    properties:
+                      namespace: { type: string }
+                      compatibility: { type: string }
+                      confirmedFeatures:
+                        type: array
+                        items: { type: string }
+
+  /api/decks/{deckId}:
+    get:
+      summary: Get full deck state
+      operationId: getDeck
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Complete deck state with cards, suggestions, sync info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppState"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/decks/{deckId}/updates:
+    get:
+      summary: Delta updates since a timestamp (AnkiHub-compatible)
+      operationId: getDeckUpdates
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: since
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+          description: ISO 8601 timestamp. Only return changes after this time.
+      responses:
+        "200":
+          description: Delta updates since timestamp
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deck: { $ref: "#/components/schemas/CompatDeck" }
+                  since: { type: string, format: date-time }
+                  lastUpdated: { type: string, format: date-time, nullable: true }
+                  notes:
+                    type: array
+                    items: { $ref: "#/components/schemas/CompatNote" }
+                  suggestions:
+                    type: array
+                    items: { $ref: "#/components/schemas/CompatSuggestion" }
+                  counts:
+                    type: object
+                    properties:
+                      notes: { type: integer }
+                      suggestions: { type: integer }
+
+  /api/decks/{deckId}/cards:
+    delete:
+      summary: Bulk delete cards (owner only)
+      operationId: deleteCards
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cardIds]
+              properties:
+                cardIds:
+                  type: array
+                  maxItems: 500
+                  items: { type: string }
+      responses:
+        "200":
+          description: Number of deleted cards
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: integer }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/decks/{deckId}/visibility:
+    patch:
+      summary: Set deck visibility (Supabase only, owner only)
+      operationId: setDeckVisibility
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [visibility]
+              properties:
+                visibility:
+                  type: string
+                  enum: [public, private, unlisted]
+      responses:
+        "200":
+          description: Visibility updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  visibility: { type: string }
+
+  /api/decks/{deckId}/models/{modelName}/template:
+    patch:
+      summary: Update card templates for a model (owner only)
+      operationId: updateModelTemplate
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: modelName
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                templateFront: { type: string, default: "{{Front}}" }
+                templateBack: { type: string, default: "{{FrontSide}}<hr id=answer>{{Back}}" }
+                modelCss: { type: string }
+      responses:
+        "200":
+          description: Template updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppState"
+
+  /api/decks/{deckId}/fork:
+    post:
+      summary: Fork a public deck (Supabase only)
+      operationId: forkDeck
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "201":
+          description: Fork created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deckId: { type: string }
+                  name: { type: string }
+
+  /api/decks/{deckId}/star:
+    post:
+      summary: Star a deck
+      operationId: starDeck
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Starred
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StarResult"
+    delete:
+      summary: Unstar a deck
+      operationId: unstarDeck
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Unstarred
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StarResult"
+
+  # ─── Suggestion Management ──────────────────────────────────
+  /api/decks/{deckId}/suggestions:
+    get:
+      summary: List suggestions for a deck
+      operationId: listSuggestions
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, accepted, rejected, revision]
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Opaque pagination cursor
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 100 }
+      responses:
+        "200":
+          description: Paginated suggestions list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [suggestions, pagination]
+                properties:
+                  suggestions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CompatSuggestion"
+                  pagination:
+                    $ref: "#/components/schemas/CursorPage"
+    post:
+      summary: Create a suggestion (contributor+)
+      operationId: createSuggestion
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cardId, reason]
+              properties:
+                cardId: { type: string }
+                reason:
+                  type: string
+                  maxLength: 600
+                  default: "Suggested from web app review."
+                proposedFields:
+                  type: object
+                  additionalProperties: { type: string }
+                  description: Field name → new value map
+                proposedTags:
+                  type: array
+                  maxItems: 100
+                  items: { type: string }
+                diff:
+                  type: object
+                  deprecated: true
+                  description: AnkiHub-compatible diff format
+      responses:
+        "201":
+          description: Suggestion created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/decks/{deckId}/suggestions/bulk-decision:
+    post:
+      summary: Bulk accept/reject/revision (reviewer+)
+      operationId: bulkDecideSuggestions
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [suggestionIds, decision]
+              properties:
+                suggestionIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items: { type: string }
+                decision:
+                  type: string
+                  enum: [accepted, rejected, revision]
+      responses:
+        "200":
+          description: Bulk decision applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/decks/{deckId}/suggestions/import:
+    post:
+      summary: Import suggestions from CSV/TSV (contributor+)
+      operationId: importSuggestions
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  maxLength: 2000000
+                  description: CSV or TSV content with Card ID column
+                filename:
+                  type: string
+                  default: "cards.csv"
+                  description: Used to detect delimiter (.tsv → tab)
+      responses:
+        "201":
+          description: Import results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imported: { type: integer }
+                  skipped:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        cardId: { type: string }
+                        reason: { type: string }
+                  truncated: { type: boolean }
+                  state: { $ref: "#/components/schemas/AppState" }
+
+  /api/suggestions:
+    get:
+      summary: List suggestions across decks (AnkiHub-compatible)
+      operationId: listSuggestionsCrossDecks
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      deprecated: true
+      parameters:
+        - name: deckId
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, accepted, rejected, revision]
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 100 }
+      responses:
+        "200":
+          description: Paginated suggestions across decks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [suggestions, pagination]
+                properties:
+                  suggestions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CompatSuggestion"
+                  pagination:
+                    $ref: "#/components/schemas/CursorPage"
+
+  /api/suggestions/{id}:
+    patch:
+      summary: Update suggestion status (reviewer+)
+      operationId: updateSuggestion
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [approved, accepted, rejected, needs_revision, revision]
+                decision:
+                  type: string
+                  deprecated: true
+      responses:
+        "200":
+          description: Suggestion updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  suggestion: { $ref: "#/components/schemas/CompatSuggestion" }
+                  state: { $ref: "#/components/schemas/AppState" }
+
+  /api/suggestions/{id}/decision:
+    post:
+      summary: Accept/reject/revision decision (reviewer+)
+      operationId: decideSuggestion
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [accepted, rejected, revision]
+      responses:
+        "200":
+          description: Decision applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ─── Comments ───────────────────────────────────────────────
+  /api/suggestions/{suggestionId}/comments:
+    get:
+      summary: List comments on a suggestion
+      operationId: listComments
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: suggestionId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Comment list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  comments:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Comment"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+    post:
+      summary: Create a comment (contributor+)
+      operationId: createComment
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: suggestionId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body:
+                  type: string
+                  minLength: 1
+                parentId:
+                  type: string
+                  description: ID of parent comment (for threaded replies)
+      responses:
+        "201":
+          description: Comment created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Comment"
+
+  /api/suggestions/{suggestionId}/comments/{commentId}/resolved:
+    patch:
+      summary: Toggle comment resolved status (reviewer+)
+      operationId: setCommentResolved
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: suggestionId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: commentId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resolved: { type: boolean }
+      responses:
+        "200":
+          description: Resolved status toggled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Comment"
+
+  # ─── Reactions (Supabase only) ──────────────────────────────
+  /api/suggestions/{suggestionId}/reactions:
+    post:
+      summary: Add a reaction to a suggestion
+      operationId: addReaction
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: suggestionId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [emoji]
+              properties:
+                emoji:
+                  type: string
+                  enum: ["👍", "❓", "✅"]
+      responses:
+        "200":
+          description: Reaction counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reactions:
+                    type: object
+                    additionalProperties: { type: integer }
+                    example: { "👍": 3, "❓": 1, "✅": 0 }
+
+  /api/suggestions/{suggestionId}/reactions/{emoji}:
+    delete:
+      summary: Remove a reaction
+      operationId: removeReaction
+      tags: [Suggestions]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: suggestionId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: emoji
+          in: path
+          required: true
+          schema: { type: string }
+            # Must be URL-encoded: thumbsup, question, check
+      responses:
+        "204":
+          description: Reaction removed
+
+  # ─── Notifications (Supabase only) ─────────────────────────
+  /api/notifications:
+    get:
+      summary: List notifications (paginated)
+      operationId: listNotifications
+      tags: [Notifications]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Opaque pagination cursor
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 100 }
+      responses:
+        "200":
+          description: Paginated notifications
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [notifications, unread, nextCursor]
+                properties:
+                  notifications:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Notification"
+                  unread:
+                    type: integer
+                  nextCursor:
+                    type: string
+                    nullable: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/notifications/read-all:
+    post:
+      summary: Mark all notifications as read
+      operationId: readAllNotifications
+      tags: [Notifications]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      responses:
+        "204":
+          description: All notifications marked read
+
+  # ─── Share Links ─────────────────────────────────────────────
+  /api/decks/{deckId}/share-links:
+    get:
+      summary: List share links
+      operationId: listShareLinks
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Share link list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  shareLinks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ShareLink"
+    post:
+      summary: Create a share link
+      operationId: createShareLink
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string, default: "Share link" }
+                password: { type: string, description: "Plaintext password (hashed server-side)" }
+                expiresAt: { type: string, format: date-time, nullable: true }
+      responses:
+        "201":
+          description: Share link created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  shareLink:
+                    $ref: "#/components/schemas/ShareLink"
+
+  # ─── Invites ──────────────────────────────────────────────
+  /api/decks/{deckId}/invites:
+    get:
+      summary: List invites (editor+)
+      operationId: listInvites
+      tags: [Invites]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Invite list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invites:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DeckInvite"
+    post:
+      summary: Create an invite (editor+)
+      operationId: createInvite
+      tags: [Invites]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role:
+                  type: string
+                  enum: [viewer, contributor, reviewer, editor]
+      responses:
+        "201":
+          description: Invite created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invite:
+                    $ref: "#/components/schemas/DeckInvite"
+
+  /api/decks/{deckId}/invites/{inviteId}:
+    delete:
+      summary: Revoke an invite (owner only)
+      operationId: revokeInvite
+      tags: [Invites]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: inviteId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Invite revoked
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+
+  /api/invites/{token}:
+    get:
+      summary: Preview invite metadata (public)
+      operationId: previewInvite
+      tags: [Invites]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Invite preview
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invite:
+                    type: object
+                    properties:
+                      deckId: { type: string }
+                      deckName: { type: string, nullable: true }
+                      role: { type: string }
+                      email: { type: string }
+                      status: { type: string }
+                      expiresAt: { type: string, format: date-time, nullable: true }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/invites/{token}/accept:
+    post:
+      summary: Accept an invite
+      operationId: acceptInvite
+      tags: [Invites]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Invite accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deckId: { type: string }
+                  role: { type: string }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          $ref: "#/components/responses/Gone"
+
+  # ─── Export ───────────────────────────────────────────────
+  /api/decks/{deckId}/export:
+    post:
+      summary: Export deck as .apkg
+      operationId: exportDeck
+      tags: [Export]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Export metadata with download URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  download:
+                    $ref: "#/components/schemas/StorageAsset"
+                  state:
+                    $ref: "#/components/schemas/AppState"
+
+  /api/decks/export:
+    post:
+      summary: Export all (returns binary .apkg)
+      operationId: exportAllDecks
+      tags: [Export]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      responses:
+        "200":
+          description: Binary .apkg file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+  /api/decks/{deckId}/export/csv:
+    get:
+      summary: Export cards as CSV
+      operationId: exportDeckCsv
+      tags: [Export]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: CSV file
+          content:
+            text/csv:
+              schema:
+                type: string
+                description: Comma-separated values with Card ID, Note Type, State, Tags, and field columns
+
+  /api/decks/{deckId}/export/activity:
+    get:
+      summary: Export activity log as CSV
+      operationId: exportActivityCsv
+      tags: [Export]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: CSV file with ID, Kind, Text, Timestamp columns
+          content:
+            text/csv:
+              schema:
+                type: string
+
+  /api/decks/{deckId}/export/summary:
+    get:
+      summary: Export deck summary (PDF or HTML)
+      operationId: exportDeckSummary
+      tags: [Export]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [pdf, html]
+            default: pdf
+      responses:
+        "200":
+          description: Summary document
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            text/html:
+              schema:
+                type: string
+
+  # ─── Sync (Anki Add-on) ──────────────────────────────────
+  /api/decks/{deckId}/sync/cards:
+    post:
+      summary: Push card snapshots from the Anki add-on
+      operationId: syncCards
+      tags: [Sync]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cards]
+              properties:
+                cards:
+                  type: array
+                  maxItems: 50000
+                  items:
+                    $ref: "#/components/schemas/AddonCard"
+                media: { type: object }
+                dryRun: { type: boolean, default: false }
+                allowCreate: { type: boolean, default: true }
+                conflictPolicy:
+                  type: string
+                  enum: [detect, overwrite-platform]
+                  default: detect
+                returnState: { type: boolean, default: true }
+                source: { type: string, default: "DeckBridge Anki add-on" }
+                client:
+                  type: object
+                  properties:
+                    name: { type: string }
+                    version: { type: string }
+                    fingerprint: { type: string }
+                batch:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    index: { type: integer, minimum: 0 }
+                    total: { type: integer, minimum: 1, maximum: 1000 }
+                    totalCards: { type: integer }
+      responses:
+        "200":
+          description: Sync result with stats and conflicts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: "#/components/schemas/AddonSyncResult"
+                  state:
+                    $ref: "#/components/schemas/AppState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /api/decks/{deckId}/sync/conflicts:
+    post:
+      summary: Record sync conflicts detected by the add-on
+      operationId: recordSyncConflicts
+      tags: [Sync]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [conflicts]
+              properties:
+                conflicts:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      cardId: { type: string }
+                      source: { type: string }
+                      detectedAt: { type: string, format: date-time }
+                      incomingFields:
+                        type: object
+                        additionalProperties: { type: string }
+                      localFields:
+                        type: object
+                        additionalProperties: { type: string }
+      responses:
+        "200":
+          description: Conflicts recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppState"
+
+  /api/decks/{deckId}/sync/scheduling:
+    get:
+      summary: Fetch scheduling data for the Anki add-on (Supabase only)
+      operationId: getSyncScheduling
+      tags: [Sync]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Scheduling updates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        cardId: { type: string }
+                        ankiNoteId: { type: integer, nullable: true }
+                        intervalDays: { type: number }
+                        easeFactor: { type: number }
+                        repetitions: { type: integer }
+                        nextDue: { type: string, format: date-time }
+                        lastRating: { type: integer, nullable: true }
+                        updatedAt: { type: string, format: date-time }
+
+  # ─── Study ──────────────────────────────────────────────
+  /api/study/progress:
+    post:
+      summary: Sync SM-2 study progress (batch)
+      operationId: syncStudyProgress
+      tags: [Study]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [updates]
+              properties:
+                updates:
+                  type: array
+                  maxItems: 200
+                  items:
+                    type: object
+                    required: [deckId, cardId]
+                    properties:
+                      deckId: { type: string }
+                      cardId: { type: string }
+                      intervalDays: { type: number, default: 1 }
+                      easeFactor: { type: number, default: 2.5 }
+                      repetitions: { type: integer, default: 0 }
+                      nextDue: { type: string, format: date-time }
+                      lastRating: { type: integer, nullable: true }
+      responses:
+        "200":
+          description: Sync result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  synced: { type: integer }
+
+  /api/study/progress/{deckId}:
+    get:
+      summary: Fetch study progress for a deck
+      operationId: getStudyProgress
+      tags: [Study]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Study progress entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  progress:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        cardId: { type: string }
+                        intervalDays: { type: number }
+                        easeFactor: { type: number }
+                        repetitions: { type: integer }
+                        nextDue: { type: string, format: date-time }
+                        lastRating: { type: integer, nullable: true }
+                        updatedAt: { type: string, format: date-time }
+
+  /api/study/sessions:
+    get:
+      summary: List study sessions
+      operationId: listStudySessions
+      tags: [Study]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Study session list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/StudySession"
+    post:
+      summary: Create a study session
+      operationId: createStudySession
+      tags: [Study]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStudySessionPayload"
+      responses:
+        "201":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session:
+                    $ref: "#/components/schemas/StudySession"
+
+  /api/study/sessions/{deckId}:
+    get:
+      summary: List study sessions for a specific deck
+      operationId: listDeckStudySessions
+      tags: [Study]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Study session list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/StudySession"
+
+  # ─── Discovery & Templates ──────────────────────────────
+  /api/discover:
+    get:
+      summary: Public deck discovery gallery (Supabase only)
+      operationId: discoverDecks
+      tags: [Discover]
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+          description: Search query
+        - name: category
+          in: query
+          schema: { type: string }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [stars, newest]
+            default: stars
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+      responses:
+        "200":
+          description: Discoverable public decks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  decks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PublicDeck"
+
+  /api/templates:
+    get:
+      summary: List card templates
+      operationId: listTemplates
+      tags: [Templates]
+      parameters:
+        - name: category
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Template list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templates:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Template"
+
+  /api/templates/{templateId}/use:
+    post:
+      summary: Create a deck from a template
+      operationId: useTemplate
+      tags: [Templates]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: templateId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, description: "Optional custom deck name" }
+      responses:
+        "201":
+          description: Deck created from template
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deckId: { type: string }
+                  name: { type: string }
+
+  # ─── Activity ────────────────────────────────────────────
+  /api/decks/{deckId}/activity:
+    get:
+      summary: List activity feed for a deck
+      operationId: listActivity
+      tags: [Activity]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: kind
+          in: query
+          schema: { type: string }
+          description: "Comma-separated activity kinds to filter"
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Activity entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [activity, pagination]
+                properties:
+                  activity:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Activity"
+                  pagination:
+                    $ref: "#/components/schemas/CursorPage"
+
+  # ─── Analytics ──────────────────────────────────────────
+  /api/decks/{deckId}/analytics:
+    get:
+      summary: Deck analytics (editor+)
+      operationId: getAnalytics
+      tags: [Analytics]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Analytics data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  analytics:
+                    $ref: "#/components/schemas/DeckAnalytics"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ─── Media ──────────────────────────────────────────────
+  /api/decks/{deckId}/media/{filename}:
+    get:
+      summary: Serve a media asset
+      operationId: getMedia
+      tags: [Media]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: filename
+          in: path
+          required: true
+          schema: { type: string }
+          description: Media filename (safe path check applied)
+      responses:
+        "200":
+          description: Media binary stream
+          content:
+            image/png: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/gif: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+            audio/mpeg: { schema: { type: string, format: binary } }
+            audio/wav: { schema: { type: string, format: binary } }
+            audio/ogg: { schema: { type: string, format: binary } }
+            video/mp4: { schema: { type: string, format: binary } }
+        "302":
+          description: Redirect to signed URL (Supabase)
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/decks/{deckId}/media/uploads:
+    post:
+      summary: Create signed upload URLs for large media files (Supabase only)
+      operationId: createMediaUploads
+      tags: [Media]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [files]
+              properties:
+                files:
+                  type: array
+                  maxItems: 300
+                  items:
+                    type: object
+                    required: [filename, sha256, sizeBytes]
+                    properties:
+                      filename:
+                        type: string
+                        maxLength: 240
+                      sha256:
+                        type: string
+                        pattern: "^[a-f0-9]{64}$"
+                      sizeBytes:
+                        type: integer
+                        maximum: 104857600
+                      mimeType:
+                        type: string
+                        default: "application/octet-stream"
+      responses:
+        "201":
+          description: Upload URLs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploads:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        filename: { type: string }
+                        url: { type: string, format: uri }
+                        expiresAt: { type: string, format: date-time }
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ─── AI Features ───────────────────────────────────────────
+  /api/decks/{deckId}/ai/settings:
+    get:
+      summary: Get AI settings for a deck
+      operationId: getAiSettings
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: AI settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings:
+                    $ref: "#/components/schemas/DeckAiSettings"
+    patch:
+      summary: Update AI settings (owner only)
+      operationId: updateAiSettings
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reviewBriefs: { type: boolean }
+                embeddings: { type: boolean }
+                conflictSummaries: { type: boolean }
+                diagnostics: { type: boolean }
+                qualityPulse: { type: boolean }
+      responses:
+        "200":
+          description: Settings updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings:
+                    $ref: "#/components/schemas/DeckAiSettings"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/decks/{deckId}/ai/artifacts:
+    get:
+      summary: List AI artifacts
+      operationId: listAiArtifacts
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, dismissed, accepted, rejected, stale]
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [review-brief, duplicate-link, conflict-summary, quality-issue, diagnostic, hint, digest]
+        - name: subjectType
+          in: query
+          schema:
+            type: string
+            enum: [suggestion, card, conflict, setup-error, study-hint, digest]
+        - name: subjectId
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Artifact list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifacts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AiArtifact"
+    post:
+      summary: Create an AI artifact (owner only)
+      operationId: createAiArtifact
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAiArtifactPayload"
+      responses:
+        "201":
+          description: Artifact created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifact:
+                    $ref: "#/components/schemas/AiArtifact"
+
+  /api/decks/{deckId}/ai/artifacts/{artifactId}:
+    patch:
+      summary: Update AI artifact (owner only)
+      operationId: updateAiArtifact
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: artifactId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [active, dismissed, accepted, rejected, stale]
+                payload: { type: object }
+      responses:
+        "200":
+          description: Artifact updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifact:
+                    $ref: "#/components/schemas/AiArtifact"
+
+  /api/decks/{deckId}/ai/artifacts/{artifactId}/dismiss:
+    post:
+      summary: Dismiss an AI artifact (owner only)
+      operationId: dismissAiArtifact
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: artifactId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Artifact dismissed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifact:
+                    $ref: "#/components/schemas/AiArtifact"
+
+  /api/decks/{deckId}/ai/artifacts/stale:
+    post:
+      summary: Mark active AI artifacts as stale (owner only)
+      operationId: markAiArtifactsStale
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string }
+                kind: { type: string }
+                subjectType: { type: string }
+                subjectId: { type: string }
+      responses:
+        "200":
+          description: Artifacts marked stale
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stale: { type: integer }
+
+  /api/decks/{deckId}/ai/pulse:
+    get:
+      summary: AI quality pulse summary (owner only)
+      operationId: getAiPulse
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Quality pulse
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiQualityPulse"
+
+  /api/decks/{deckId}/ai/suggestions/{suggestionId}/brief:
+    post:
+      summary: Generate AI suggestion review brief (owner only)
+      operationId: generateSuggestionBrief
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: suggestionId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "201":
+          description: Review brief generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiSuggestionBriefResult"
+
+  /api/decks/{deckId}/ai/conflicts/{conflictId}/summary:
+    post:
+      summary: Generate AI conflict summary (owner only)
+      operationId: generateConflictSummary
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: conflictId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "201":
+          description: Conflict summary generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiArtifactGenerationResult"
+
+  /api/decks/{deckId}/ai/diagnostics/setup-error:
+    post:
+      summary: Generate AI setup diagnostic (owner only)
+      operationId: generateSetupDiagnostic
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [error]
+              properties:
+                error:
+                  $ref: "#/components/schemas/StructuredSetupError"
+      responses:
+        "201":
+          description: Diagnostic generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiArtifactGenerationResult"
+
+  /api/decks/{deckId}/ai/cards/{cardId}/embed:
+    post:
+      summary: Embed a single card and find duplicates (owner only)
+      operationId: embedCard
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: cardId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                minScore: { type: number, default: 0.78, maximum: 1, minimum: 0 }
+                limit: { type: integer, default: 10, maximum: 100, minimum: 1 }
+      responses:
+        "201":
+          description: Card embedded and links found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiCardEmbeddingResult"
+        "200":
+          description: Embedding disabled or unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiCardEmbeddingResult"
+
+  /api/decks/{deckId}/ai/cards/embed:
+    post:
+      summary: Batch embed cards (owner only)
+      operationId: embedCardsBatch
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cardIds:
+                  type: array
+                  items: { type: string }
+                  description: "Empty array = all cards"
+                limit:
+                  type: integer
+                  default: 25
+                  maximum: 100
+                minScore:
+                  type: number
+                  default: 0.78
+      responses:
+        "200":
+          description: Batch embed results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [indexed, disabled, unavailable]
+                  indexed: { type: integer }
+                  results:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: "#/components/schemas/AiCardEmbeddingResult"
+                        - type: object
+                          properties:
+                            cardId: { type: string }
+
+  /api/decks/{deckId}/ai/cards/{cardId}/related:
+    get:
+      summary: Get related/duplicate cards
+      operationId: getRelatedCards
+      tags: [AI]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: cardId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: minScore
+          in: query
+          schema: { type: number, default: 0.78 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 10, maximum: 100 }
+        - name: relationship
+          in: query
+          schema:
+            type: string
+            enum: [duplicate, near-duplicate, related]
+      responses:
+        "200":
+          description: Related card links
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiRelatedCardsResult"
+
+  # ─── State & Session (Legacy/Demo) ──────────────────────
+  /api/state:
+    get:
+      summary: Full app state (legacy)
+      operationId: getState
+      tags: [Legacy]
+      deprecated: true
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Full application state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppState"
+
+  /api/session:
+    patch:
+      summary: Set active deck or demo role (dev only, legacy)
+      operationId: patchSession
+      tags: [Legacy]
+      deprecated: true
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                activeDeckId: { type: string }
+                role:
+                  type: string
+                  enum: [owner, editor, reviewer, contributor, viewer]
+      responses:
+        "200":
+          description: Updated state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppState"
+
+  # ─── AnkiConnect (Local dev only) ──────────────────────
+  /api/anki/status:
+    get:
+      summary: Check AnkiConnect connection (local dev only)
+      operationId: ankiStatus
+      tags: [AnkiConnect]
+      deprecated: true
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      responses:
+        "200":
+          description: Anki connection status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connected: { type: boolean }
+                  version: { type: integer, nullable: true }
+                  error: { type: string, nullable: true }
+                  sync:
+                    type: object
+                    properties:
+                      ankiConnectUrl: { type: string }
+                      connected: { type: boolean }
+                      lastCheckedAt: { type: string, format: date-time, nullable: true }
+                      lastPullAt: { type: string, format: date-time, nullable: true }
+                      lastPushAt: { type: string, format: date-time, nullable: true }
+                      lastAddonSync:
+                        $ref: "#/components/schemas/AddonSyncResult"
+                      conflicts:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/SyncConflict"
+
+  /api/anki/pull:
+    post:
+      summary: Pull notes from Anki (local dev only)
+      operationId: ankiPull
+      tags: [AnkiConnect]
+      deprecated: true
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                deckId: { type: string }
+      responses:
+        "200":
+          description: Full deck state after pull
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppState"
+        "410":
+          $ref: "#/components/responses/Gone"
+
+  /api/anki/push:
+    post:
+      summary: Push card fields/tags to Anki (local dev only)
+      operationId: ankiPush
+      tags: [AnkiConnect]
+      deprecated: true
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                deckId: { type: string }
+      responses:
+        "200":
+          description: Push result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: object
+                    properties:
+                      updatedNotes: { type: integer }
+                  state:
+                    $ref: "#/components/schemas/AppState"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          $ref: "#/components/responses/Gone"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Supabase JWT or `db_`-prefixed API token.
+        In development, use DevAuth headers instead.
+    DevAuth:
+      type: apiKey
+      in: header
+      name: x-deckbridge-user-id
+      description: Development-only identity header (requires x-deckbridge-user-email and x-deckbridge-user-name too)
+
+  schemas:
+    # ─── Core Models ──────────────────────────────────────────
+    User:
+      type: object
+      required: [id, email, name]
+      properties:
+        id: { type: string, readOnly: true }
+        email: { type: string, format: email }
+        name: { type: string }
+
+    DeckMember:
+      type: object
+      required: [deckId, userId, role, createdAt]
+      properties:
+        deckId: { type: string }
+        userId: { type: string }
+        role: { $ref: "#/components/schemas/MembershipRole" }
+        createdAt: { type: string, format: date-time }
+
+    MembershipRole:
+      type: string
+      enum: [owner, editor, reviewer, contributor, viewer]
+
+    DeckCard:
+      type: object
+      required: [id, fields, tags, modifiedAt, modifiedBy]
+      properties:
+        id: { type: string }
+        ankiNoteId: { type: integer, nullable: true }
+        type: { type: string, default: "Basic" }
+        modelName: { type: string }
+        fieldOrder:
+          type: array
+          items: { type: string }
+        fields:
+          type: object
+          additionalProperties: { type: string }
+          description: Field name → field value map
+        tags:
+          type: array
+          items: { type: string }
+        due: { type: integer, nullable: true }
+        state: { type: string, default: "New" }
+        modifiedAt: { type: string, format: date-time }
+        modifiedBy: { type: string }
+        suspended: { type: boolean, default: false }
+        mediaRefs:
+          type: array
+          items: { type: string }
+        sourceDeckName: { type: string, nullable: true }
+        sourceDeckPath: { type: string, nullable: true }
+        templateFront: { type: string }
+        templateBack: { type: string }
+        modelCss: { type: string }
+        clozeOrd: { type: integer }
+
+    Deck:
+      type: object
+      required: [id, name, description, owner, importedAt, cards]
+      properties:
+        id: { type: string, readOnly: true }
+        name: { type: string }
+        description: { type: string }
+        owner: { type: string }
+        importedAt: { type: string, format: date-time }
+        lastSyncedAt: { type: string, format: date-time, nullable: true }
+        cards:
+          type: array
+          items: { $ref: "#/components/schemas/DeckCard" }
+        media:
+          type: object
+          description: Media assets keyed by filename
+        models:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              name: { type: string }
+              fields:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name: { type: string }
+                    ordinal: { type: integer }
+        aiSettings:
+          $ref: "#/components/schemas/DeckAiSettings"
+        source:
+          type: object
+          properties:
+            filename: { type: string }
+            format: { type: string }
+            deckName: { type: string }
+            deckPath: { type: string }
+
+    DeckSummary:
+      type: object
+      required: [id, name, cardCount, noteCount, tagCount, importedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        cardCount: { type: integer }
+        noteCount: { type: integer }
+        tagCount: { type: integer }
+        noteTypes:
+          type: array
+          items: { type: string }
+        pendingSuggestions: { type: integer }
+        lastSyncedAt: { type: string, format: date-time, nullable: true }
+        importedAt: { type: string, format: date-time }
+
+    CompatDeck:
+      type: object
+      description: AnkiHub-compatible deck representation
+      properties:
+        uuid: { type: string }
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        owner: { type: string }
+        card_count: { type: integer }
+        note_count: { type: integer }
+        tag_count: { type: integer }
+        note_types:
+          type: array
+          items: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        last_updated: { type: string, format: date-time, nullable: true }
+        is_public: { type: boolean }
+
+    CompatNote:
+      type: object
+      description: AnkiHub-compatible note representation
+      properties:
+        guid: { type: string }
+        anki_note_id: { type: integer, nullable: true }
+        note_type: { type: string }
+        fields:
+          type: object
+          additionalProperties: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        ankihub_id: { type: string }
+        content_hash: { type: string }
+        updated_at: { type: string, format: date-time, nullable: true }
+        state: { type: string }
+        suspended: { type: boolean }
+        media_refs:
+          type: array
+          items: { type: string }
+
+    CompatSuggestion:
+      type: object
+      description: AnkiHub-compatible suggestion representation
+      properties:
+        id: { type: string }
+        deck_uuid: { type: string }
+        card_guid: { type: string }
+        author: { type: string }
+        status: { type: string }
+        raw_status: { type: string }
+        created_at: { type: string, format: date-time }
+        reviewed_at: { type: string, format: date-time, nullable: true }
+        reviewed_by: { type: string, nullable: true }
+        diff:
+          type: object
+          properties:
+            reason: { type: string }
+            proposed_fields:
+              type: object
+              additionalProperties: { type: string }
+            proposed_tags:
+              type: array
+              items: { type: string }
+
+    Suggestion:
+      type: object
+      required: [id, deckId, cardId, authorId, authorName, status, reason, createdAt]
+      properties:
+        id: { type: string }
+        deckId: { type: string }
+        cardId: { type: string }
+        authorId: { type: string }
+        authorName: { type: string }
+        status:
+          type: string
+          enum: [pending, accepted, rejected, revision]
+        reason: { type: string }
+        createdAt: { type: string, format: date-time }
+        reviewedAt: { type: string, format: date-time, nullable: true }
+        reviewedBy: { type: string, nullable: true }
+        proposedFields:
+          type: object
+          additionalProperties: { type: string }
+        proposedTags:
+          type: array
+          items: { type: string }
+
+    MeResponse:
+      type: object
+      required: [user, memberships]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        memberships:
+          type: array
+          items: { $ref: "#/components/schemas/DeckMember" }
+        decks:
+          type: array
+          items: { $ref: "#/components/schemas/DeckSummary" }
+
+    AppState:
+      type: object
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        memberships:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeckMember"
+        decks:
+          type: array
+          items:
+            $ref: "#/components/schemas/Deck"
+        summaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeckSummary"
+        activeDeckId: { type: string, nullable: true }
+        role: { $ref: "#/components/schemas/MembershipRole" }
+        collaborators:
+          type: array
+          items:
+            $ref: "#/components/schemas/Collaborator"
+        suggestions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Suggestion"
+        activity:
+          type: array
+          items:
+            $ref: "#/components/schemas/Activity"
+        sync:
+          $ref: "#/components/schemas/SyncState"
+
+    Collaborator:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string }
+        role: { $ref: "#/components/schemas/MembershipRole" }
+        accepted: { type: integer }
+
+    Activity:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string }
+        text: { type: string }
+        at: { type: string, format: date-time }
+
+    SyncState:
+      type: object
+      properties:
+        ankiConnectUrl: { type: string }
+        connected: { type: boolean }
+        lastCheckedAt: { type: string, format: date-time, nullable: true }
+        lastPullAt: { type: string, format: date-time, nullable: true }
+        lastPushAt: { type: string, format: date-time, nullable: true }
+        lastAddonSync:
+          $ref: "#/components/schemas/AddonSyncResult"
+        lastError: { type: string, nullable: true }
+        conflicts:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncConflict"
+
+    SyncConflict:
+      type: object
+      properties:
+        id: { type: string }
+        deckId: { type: string }
+        cardId: { type: string }
+        source: { type: string }
+        detectedAt: { type: string, format: date-time }
+        incomingFields:
+          type: object
+          additionalProperties: { type: string }
+        localFields:
+          type: object
+          additionalProperties: { type: string }
+
+    # ─── Add-on / Sync ──────────────────────────────────────────
+    AddonCard:
+      type: object
+      required: [fields]
+      properties:
+        id: { type: string }
+        ankiNoteId: { type: integer, nullable: true }
+        type: { type: string }
+        noteType: { type: string }
+        modelName: { type: string }
+        fieldOrder:
+          type: array
+          items: { type: string }
+        fields:
+          type: object
+          additionalProperties: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        due: { type: integer, nullable: true }
+        state: { type: string }
+        modifiedAt: { type: string, format: date-time }
+        modifiedBy: { type: string }
+        suspended: { type: boolean }
+        mediaRefs:
+          type: array
+          items: { type: string }
+        sourceDeckName: { type: string, nullable: true }
+        sourceDeckPath: { type: string, nullable: true }
+        templateFront: { type: string }
+        templateBack: { type: string }
+        modelCss: { type: string }
+        clozeOrd: { type: integer }
+        compressedFields:
+          type: object
+          description: Zlib+base64 compressed field values
+
+    AddonSyncResult:
+      type: object
+      properties:
+        syncedAt: { type: string, format: date-time }
+        source: { type: string }
+        client:
+          type: object
+          nullable: true
+          properties:
+            name: { type: string }
+            version: { type: string }
+            fingerprint: { type: string }
+        stats:
+          type: object
+          properties:
+            total: { type: integer }
+            created: { type: integer }
+            updated: { type: integer }
+            skipped: { type: integer }
+            conflicts: { type: integer }
+            dryRun: { type: boolean }
+        batch:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string }
+            index: { type: integer }
+            total: { type: integer }
+            totalCards: { type: integer }
+            received: { type: integer }
+            complete: { type: boolean }
+
+    # ─── Comments ──────────────────────────────────────────
+    Comment:
+      type: object
+      properties:
+        id: { type: string }
+        suggestionId: { type: string }
+        deckId: { type: string }
+        authorId: { type: string }
+        authorName: { type: string }
+        body: { type: string }
+        parentId: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time, nullable: true }
+        resolvedAt: { type: string, format: date-time, nullable: true }
+        resolvedBy: { type: string, nullable: true }
+
+    # ─── Notifications ──────────────────────────────────────────
+    Notification:
+      type: object
+      properties:
+        id: { type: string }
+        deckId: { type: string, nullable: true }
+        kind: { type: string }
+        body: { type: string }
+        refId: { type: string, nullable: true }
+        read: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    # ─── API Tokens ──────────────────────────────────────────
+    ApiToken:
+      type: object
+      properties:
+        id: { type: string }
+        label: { type: string }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt: { type: string, format: date-time, nullable: true }
+
+    CreatedToken:
+      allOf:
+        - $ref: "#/components/schemas/ApiToken"
+        - type: object
+          required: [raw]
+          properties:
+            raw: { type: string, description: "Raw token value (only returned on creation)" }
+
+    # ─── Add-on ──────────────────────────────────────────
+    AddonVersion:
+      type: object
+      properties:
+        version: { type: string, example: "1.2.0" }
+        minVersion: { type: string, example: "0.1.0" }
+        package: { type: string }
+        name: { type: string }
+        downloadUrl: { type: string, example: "/api/addon/download" }
+
+    # ─── Storage ──────────────────────────────────────────
+    StorageAsset:
+      type: object
+      properties:
+        filename: { type: string }
+        url: { type: string, format: uri }
+        expiresAt: { type: string, format: date-time, nullable: true }
+
+    # ─── Share Links ──────────────────────────────────────────
+    ShareLink:
+      type: object
+      properties:
+        id: { type: string }
+        deckId: { type: string }
+        token: { type: string }
+        label: { type: string }
+        passwordProtected: { type: boolean }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        disabledAt: { type: string, format: date-time, nullable: true }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    # ─── Invites ──────────────────────────────────────────
+    DeckInvite:
+      type: object
+      properties:
+        id: { type: string }
+        deckId: { type: string }
+        email: { type: string, format: email }
+        role: { type: string }
+        status:
+          type: string
+          enum: [pending, accepted, declined, expired]
+        expiresAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        respondedAt: { type: string, format: date-time, nullable: true }
+
+    # ─── Discover / Public ──────────────────────────────────
+    PublicDeck:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        ownerName: { type: string }
+        importedAt: { type: string, format: date-time }
+        downloadCount: { type: integer }
+        starCount: { type: integer }
+        forkedFrom: { type: string, nullable: true }
+        cardCount: { type: integer }
+        noteTypes:
+          type: array
+          items: { type: string }
+        sampleCards:
+          type: array
+          items:
+            type: object
+            additionalProperties: { type: string }
+
+    # ─── Templates ──────────────────────────────────────────
+    Template:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        category: { type: string }
+        authorName: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        starCount: { type: integer }
+        isFeatured: { type: boolean }
+        fields:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              description: { type: string }
+        sampleCards:
+          type: array
+          items:
+            type: object
+            additionalProperties: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    # ─── Study ──────────────────────────────────────────
+    StudySession:
+      type: object
+      properties:
+        id: { type: string }
+        userId: { type: string }
+        deckId: { type: string }
+        startedAt: { type: string, format: date-time }
+        endedAt: { type: string, format: date-time, nullable: true }
+        durationSeconds: { type: integer }
+        cardsStudied: { type: integer }
+        cardsCorrect: { type: integer }
+        newCards: { type: integer }
+        reviewCards: { type: integer }
+        metadata: { type: object }
+        createdAt: { type: string, format: date-time }
+
+    CreateStudySessionPayload:
+      type: object
+      required: [deckId]
+      properties:
+        deckId: { type: string }
+        startedAt: { type: string, format: date-time }
+        endedAt: { type: string, format: date-time, nullable: true }
+        durationSeconds: { type: integer }
+        cardsStudied: { type: integer }
+        cardsCorrect: { type: integer }
+        newCards: { type: integer }
+        reviewCards: { type: integer }
+        metadata: { type: object }
+
+    # ─── Analytics ──────────────────────────────────────────
+    DeckAnalytics:
+      type: object
+      properties:
+        suggestions:
+          type: object
+          properties:
+            total: { type: integer }
+            accepted: { type: integer }
+            rejected: { type: integer }
+            pending: { type: integer }
+            acceptanceRate: { type: integer, maximum: 100 }
+        stars: { type: integer }
+        leaderboard:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              total: { type: integer }
+              accepted: { type: integer }
+        cards:
+          type: object
+          properties:
+            total: { type: integer }
+            byState:
+              type: object
+              additionalProperties: { type: integer }
+            byDifficulty:
+              type: object
+              properties:
+                dueNow: { type: integer }
+                soon: { type: integer }
+                later: { type: integer }
+                suspended: { type: integer }
+                unknown: { type: integer }
+        study:
+          type: object
+          properties:
+            sessions:
+              type: object
+              properties:
+                total: { type: integer }
+                durationSeconds: { type: integer }
+                cardsStudied: { type: integer }
+                cardsCorrect: { type: integer }
+                accuracyRate: { type: integer, maximum: 100 }
+            weeklyTrend:
+              type: array
+              items:
+                type: object
+                properties:
+                  date: { type: string }
+                  count: { type: integer }
+            strugglingCards:
+              type: array
+              items:
+                type: object
+                properties:
+                  cardId: { type: string }
+                  easeFactor: { type: number }
+                  repetitions: { type: integer }
+                  lastRating: { type: integer, nullable: true }
+                  nextDue: { type: string, format: date-time }
+                  front: { type: string }
+                  back: { type: string }
+
+    # ─── AI ──────────────────────────────────────────
+    AiCapabilityStatus:
+      type: object
+      properties:
+        state:
+          type: string
+          enum: [disabled, gateway-unreachable, auth-required, no-chat-model, no-embedding-model, ready]
+        chatModel: { type: string, nullable: true }
+        embeddingModel: { type: string, nullable: true }
+        checkedAt: { type: string, format: date-time, nullable: true }
+        message: { type: string }
+
+    DeckAiSettings:
+      type: object
+      properties:
+        reviewBriefs: { type: boolean }
+        embeddings: { type: boolean }
+        conflictSummaries: { type: boolean }
+        diagnostics: { type: boolean }
+        qualityPulse: { type: boolean }
+        updatedAt: { type: string, format: date-time, nullable: true }
+        updatedBy: { type: string, nullable: true }
+
+    AiArtifact:
+      type: object
+      properties:
+        id: { type: string }
+        deckId: { type: string }
+        subjectType:
+          type: string
+          enum: [suggestion, card, conflict, setup-error, study-hint, digest]
+        subjectId: { type: string }
+        kind:
+          type: string
+          enum: [review-brief, duplicate-link, conflict-summary, quality-issue, diagnostic, hint, digest]
+        severity:
+          type: string
+          enum: [info, low, medium, high]
+        status:
+          type: string
+          enum: [active, dismissed, accepted, rejected, stale]
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        model: { type: string }
+        promptVersion: { type: string }
+        inputHash: { type: string }
+        payload: { type: object }
+        createdAt: { type: string, format: date-time }
+        decidedAt: { type: string, format: date-time, nullable: true }
+        decidedBy: { type: string, nullable: true }
+
+    CreateAiArtifactPayload:
+      type: object
+      required: [subjectType, subjectId, kind, model, promptVersion, inputHash]
+      properties:
+        subjectType:
+          type: string
+          enum: [suggestion, card, conflict, setup-error, study-hint, digest]
+          description: Type of subject this artifact relates to
+        subjectId: { type: string, maxLength: 200, description: "ID of the subject entity" }
+        kind:
+          type: string
+          enum: [review-brief, duplicate-link, conflict-summary, quality-issue, diagnostic, hint, digest]
+          description: Kind of AI artifact
+        severity:
+          type: string
+          enum: [info, low, medium, high]
+          default: info
+        status:
+          type: string
+          enum: [active, dismissed, accepted, rejected, stale]
+          default: active
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0
+        model: { type: string, maxLength: 200 }
+        promptVersion: { type: string, maxLength: 120 }
+        inputHash: { type: string, maxLength: 128 }
+        payload: { type: object, default: {} }
+
+    AiQualityPulse:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        status:
+          type: string
+          enum: [disabled, healthy, attention]
+        generatedAt: { type: string, format: date-time }
+        totalActive: { type: integer }
+        summary:
+          type: object
+          properties:
+            bySeverity:
+              type: object
+              additionalProperties: { type: integer }
+            bySubjectType:
+              type: object
+              additionalProperties: { type: integer }
+            byStaleness:
+              type: object
+              additionalProperties: { type: integer }
+        groups:
+          type: object
+          properties:
+            severity:
+              type: array
+              items:
+                type: object
+                properties:
+                  key: { type: string }
+                  count: { type: integer }
+            subjectType:
+              type: array
+              items:
+                type: object
+                properties:
+                  key: { type: string }
+                  count: { type: integer }
+            staleness:
+              type: array
+              items:
+                type: object
+                properties:
+                  key: { type: string }
+                  count: { type: integer }
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AiQualityPulseItem"
+
+    AiQualityPulseItem:
+      type: object
+      properties:
+        artifactId: { type: string }
+        subjectType: { type: string }
+        subjectId: { type: string }
+        kind: { type: string }
+        severity: { type: string }
+        staleness:
+          type: string
+          enum: [fresh, aging, old, unknown]
+        action:
+          type: string
+          enum: [suggestion, conflict, setup, card, artifact]
+        label: { type: string }
+        detail: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    AiSuggestionBriefResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [created, disabled, unavailable, invalid]
+        code: { type: string }
+        message: { type: string }
+        artifact: { $ref: "#/components/schemas/AiArtifact", nullable: true }
+
+    AiArtifactGenerationResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [created, disabled, unavailable, invalid]
+        code: { type: string }
+        message: { type: string }
+        artifact: { $ref: "#/components/schemas/AiArtifact", nullable: true }
+
+    AiCardEmbeddingResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [indexed, disabled, unavailable, invalid]
+        code: { type: string }
+        message: { type: string }
+        embedding:
+          type: object
+          nullable: true
+          properties:
+            cardId: { type: string }
+            deckId: { type: string }
+            model: { type: string }
+            dimensions: { type: integer }
+            inputHash: { type: string }
+            embedding:
+              type: array
+              items: { type: number }
+              description: Vector embedding (omitted in list responses)
+            metadata: { type: object }
+            status:
+              type: string
+              enum: [active, stale]
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+        links:
+          type: array
+          items:
+            $ref: "#/components/schemas/AiDuplicateLink"
+
+    AiRelatedCardsResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, disabled]
+        code: { type: string }
+        message: { type: string }
+        links:
+          type: array
+          items:
+            $ref: "#/components/schemas/AiDuplicateLink"
+
+    AiDuplicateLink:
+      type: object
+      properties:
+        id: { type: string }
+        deckId: { type: string }
+        sourceCardId: { type: string }
+        targetCardId: { type: string }
+        artifactId: { type: string, nullable: true }
+        score: { type: number }
+        relationship:
+          type: string
+          enum: [duplicate, near-duplicate, related]
+        rationale: { type: string }
+        comparedFields:
+          type: array
+          items: { type: string }
+        status:
+          type: string
+          enum: [active, dismissed, stale]
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    StructuredSetupError:
+      type: object
+      required: [code, path, message]
+      properties:
+        code: { type: string, maxLength: 120 }
+        path: { type: string, maxLength: 240 }
+        message: { type: string, maxLength: 1000 }
+        status: { type: integer, nullable: true }
+        method: { type: string, maxLength: 20, nullable: true }
+        source: { type: string, maxLength: 120, default: "setup-wizard" }
+        details: { type: object, default: {} }
+
+    # ─── Star Result ──────────────────────────────────────────
+    StarResult:
+      type: object
+      properties:
+        starred: { type: boolean }
+        count: { type: integer }
+
+    # ─── Pagination ──────────────────────────────────────────
+    CursorPage:
+      type: object
+      required: [nextCursor, hasMore]
+      properties:
+        nextCursor: { type: string, nullable: true, description: "Opaque cursor for the next page. null = last page." }
+        hasMore: { type: boolean, description: "Whether more results exist" }
+
+    # ─── RFC 7807 Problem Details ────────────────────────────
+    Problem:
+      type: object
+      description: RFC 7807 Problem Details
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI identifying the error type
+          example: "https://api.deckbridge.app/errors/validation-error"
+        title:
+          type: string
+          description: Short human-readable error title
+          example: "Validation Error"
+        status:
+          type: integer
+          description: HTTP status code
+          example: 400
+        detail:
+          type: string
+          description: Human-readable error detail
+          example: "The 'cardId' field must reference an existing card."
+        instance:
+          type: string
+          format: uri
+          description: URI identifying the specific occurrence
+          example: "/api/decks/deck-abc123/suggestions"
+        errors:
+          type: array
+          description: Field-level validation errors
+          items:
+            type: object
+            properties:
+              field: { type: string, description: "The field name" }
+              message: { type: string, description: "Human-readable error for this field" }
+        code:
+          type: string
+          description: Machine-readable error code
+          example: "card_not_found"
+
+  responses:
+    BadRequest:
+      description: Invalid request parameters
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: "https://api.deckbridge.app/errors/validation-error"
+            title: "Validation Error"
+            status: 400
+            detail: "The 'cardId' field must reference an existing card."
+            instance: "/api/decks/deck-abc123/suggestions"
+            errors:
+              - field: "cardId"
+                message: "Card not found in deck"
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: "https://api.deckbridge.app/errors/unauthorized"
+            title: "Unauthorized"
+            status: 401
+            detail: "Missing or invalid Bearer token."
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: "https://api.deckbridge.app/errors/forbidden"
+            title: "Forbidden"
+            status: 403
+            detail: "You do not have the required role for this action."
+    NotFound:
+      description: Resource not found
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: "https://api.deckbridge.app/errors/not-found"
+            title: "Not Found"
+            status: 404
+            detail: "The requested deck was not found."
+    Conflict:
+      description: Resource conflict
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: "https://api.deckbridge.app/errors/conflict"
+            title: "Conflict"
+            status: 409
+            detail: "Invite has already been accepted."
+    Gone:
+      description: Resource no longer available
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: "https://api.deckbridge.app/errors/gone"
+            title: "Gone"
+            status: 410
+            detail: "This feature is only available in local development mode."
+    TooManyRequests:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            description: Seconds to wait before retrying
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: "https://api.deckbridge.app/errors/rate-limited"
+            title: "Rate Limit Exceeded"
+            status: 429
+            detail: "Too many requests. Please wait before retrying."
+    NotImplemented:
+      description: Feature not available for this repository mode
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: "https://api.deckbridge.app/errors/not-implemented"
+            title: "Not Implemented"
+            status: 501
+            detail: "This feature requires Supabase and is unavailable in local mode."
+
+  parameters:
+    deckId:
+      name: deckId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-zA-Z0-9_-]+$"
+      description: Deck identifier
+
+security:
+  - BearerAuth: []

@@ -26,13 +26,16 @@ function extractError(body: unknown, fallback: string) {
   const value = body as Partial<ApiError> & { error?: string | { message?: string }; legacyError?: string };
   if (typeof value?.error === 'string') return value.error;
   if (value?.error?.message) return value.error.message;
+  if (value?.detail) return value.detail;
   if (value?.legacyError) return value.legacyError;
   return fallback;
 }
 
 function extractErrorCode(body: unknown) {
   const value = body as Partial<ApiError> & { error?: string | { code?: string } };
-  return typeof value?.error === 'object' && typeof value.error.code === 'string' ? value.error.code : 'request_failed';
+  if (typeof value?.error === 'object' && typeof value.error.code === 'string') return value.error.code;
+  if (typeof value?.code === 'string') return value.code;
+  return 'request_failed';
 }
 
 async function jsonRequest<T>(url: string, options: RequestInit = {}): Promise<T> {

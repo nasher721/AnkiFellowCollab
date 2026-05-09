@@ -47,6 +47,18 @@ function legacyErrorMessage(body) {
   return body.error?.message || body.error || 'Unexpected server error';
 }
 
+function paginateArray(items, limit) {
+  const page = items.slice(0, limit);
+  const hasMore = items.length > limit;
+  const nextCursor = hasMore && page.length > 0 ? Buffer.from(JSON.stringify({ id: page[page.length - 1].id || page[page.length - 1].createdAt, at: page[page.length - 1].createdAt || page[page.length - 1].at })).toString('base64url') : null;
+  return { data: page, pagination: { nextCursor, hasMore } };
+}
+
+function parsePaginationParams(query, defaultLimit = 50, maxLimit = 200) {
+  const limit = Math.min(Math.max(toBoundedInt(query.limit, defaultLimit, maxLimit), 1), maxLimit);
+  return { limit, cursor: query.cursor || null };
+}
+
 function toBoundedInt(value, fallback = 0, max = 100000) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
@@ -735,6 +747,16 @@ export function createApp(options = {}) {
     }
   });
 
+  app.get('/api/openapi.yaml', (req, res) => {
+    const yamlPath = path.resolve(__dirname, '..', 'openapi.yaml');
+    const { existsSync } = require('node:fs');
+    if (!existsSync(yamlPath)) {
+      res.status(404).json({ error: { code: 'not_found', message: 'OpenAPI spec not found' } });
+      return;
+    }
+    res.type('text/yaml').sendFile(yamlPath);
+  });
+
   app.get('/api/me', auth.requireUser, async (req, res, next) => {
     try {
       const me = await repository.getMe(req.user);
@@ -1360,6 +1382,7 @@ export function createApp(options = {}) {
           ? [assertValidDeckId(req.query.deckId || req.query.deck_uuid)]
           : (await repository.listDecks(req.user)).map((deck) => deck.id);
       const requestedStatus = normalizeCompatSuggestionStatusFilter(req.query.status);
+      const { limit } = parsePaginationParams(req.query, 50, 200);
       const suggestions = [];
       for (const deckId of deckIds) {
         const deckState = await repository.getDeckState(req.user, deckId);
@@ -1368,7 +1391,9 @@ export function createApp(options = {}) {
       const filtered = requestedStatus
         ? suggestions.filter((suggestion) => suggestion.status === requestedStatus)
         : suggestions;
-      res.json({ suggestions: filtered.map(toCompatSuggestion) });
+      const compat = filtered.map(toCompatSuggestion);
+      const { data, pagination } = paginateArray(compat, limit);
+      res.json({ suggestions: data, pagination });
     } catch (error) {
       next(error);
     }
@@ -1462,7 +1487,9 @@ export function createApp(options = {}) {
     try {
       if (!repository.listSuggestionComments) fail(501, 'comments_unavailable', 'Comments are unavailable');
       const comments = await repository.listSuggestionComments(req.user, req.params.id);
-      res.json({ comments });
+      const { limit } = parsePaginationParams(req.query, 50, 200);
+      const { data, pagination } = paginateArray(comments, limit);
+      res.json({ comments: data, pagination });
     } catch (err) { next(err); }
   });
 
@@ -1888,11 +1915,13 @@ export function createApp(options = {}) {
     try {
       const deckId = deckIdFromRequest(req);
       const filters = normalizeActivityFilters(req.query);
+      const { limit } = parsePaginationParams(req.query, 50, 200);
       const deckState = await repository.getDeckState(req.user, deckId);
       const activities = repository.listActivity
         ? await repository.listActivity(req.user, deckId, filters)
         : (deckState.activity || []).slice(0, filters.limit);
-      res.json({ activity: activities });
+      const { data, pagination } = paginateArray(activities, limit);
+      res.json({ activity: data, pagination });
     } catch (err) { next(err); }
   });
 
@@ -2499,8 +2528,10 @@ export function createApp(options = {}) {
     try {
       if (!repository.listStudySessions) fail(501, 'study_sessions_unavailable', 'Study sessions are not available for this repository');
       const deckId = typeof req.query.deckId === 'string' && req.query.deckId.trim() ? assertValidDeckId(req.query.deckId) : null;
-      const sessions = await repository.listStudySessions(req.user, deckId, { limit: req.query.limit });
-      res.json({ sessions });
+      const { limit } = parsePaginationParams(req.query, 50, 200);
+      const sessions = await repository.listStudySessions(req.user, deckId, { limit });
+      const { data, pagination } = paginateArray(sessions, limit);
+      res.json({ sessions: data, pagination });
     } catch (err) { next(err); }
   });
 
@@ -2508,8 +2539,10 @@ export function createApp(options = {}) {
     try {
       if (!repository.listStudySessions) fail(501, 'study_sessions_unavailable', 'Study sessions are not available for this repository');
       const deckId = deckIdFromRequest(req);
-      const sessions = await repository.listStudySessions(req.user, deckId, { limit: req.query.limit });
-      res.json({ sessions });
+      const { limit } = parsePaginationParams(req.query, 50, 200);
+      const sessions = await repository.listStudySessions(req.user, deckId, { limit });
+      const { data, pagination } = paginateArray(sessions, limit);
+      res.json({ sessions: data, pagination });
     } catch (err) { next(err); }
   });
 
@@ -2677,18 +2710,15 @@ export function createApp(options = {}) {
     });
   }
 
-  app.use((error, _req, res, _next) => {
-    const uploadClientErrors = new Set(['LIMIT_FILE_SIZE', 'LIMIT_FILE_COUNT']);
-    const normalized = uploadClientErrors.has(error.code)
-      ? new AppError(400, error.code.toLowerCase(), error.message)
-      : error;
-    const { status, body } = errorPayload(normalized, production);
-    if (status >= 500) console.error(error);
-    res.status(status).json({
-      ...body,
-      legacyError: legacyErrorMessage(body)
-    });
-  });
+   app.use((error, _req, res, _next) => {
+     const uploadClientErrors = new Set(['LIMIT_FILE_SIZE', 'LIMIT_FILE_COUNT']);
+     const normalized = uploadClientErrors.has(error.code)
+       ? new AppError(400, error.code.toLowerCase(), error.message)
+       : error;
+     const { status, body } = errorPayload(normalized, production);
+     if (status >= 500) console.error(error);
+     res.status(status).set('Content-Type', 'application/problem+json').json(body);
+   });
 
   return app;
 }

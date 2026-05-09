@@ -32,12 +32,17 @@ export interface StorageAsset {
 }
 
 export interface ApiError {
+  type?: string;
+  title?: string;
+  status?: number;
+  detail?: string;
+  code?: string;
+  message?: string;
   error: {
     code: string;
     message: string;
     details?: Record<string, unknown>;
   };
-  legacyError?: string;
 }
 
 export interface AiCapabilityStatus {
