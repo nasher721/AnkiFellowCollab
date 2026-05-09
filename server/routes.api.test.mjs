@@ -535,6 +535,626 @@ test('membership roles gate owner decisions and collaborator suggestions', async
     });
 });
 
+test('deck AI settings default off and only owners can update them', async () => {
+  const { app } = await createTestApp();
+
+  const state = await asUser(request(app).get('/api/decks/deck-demo-zanki'), 'you', 'You').expect(200);
+  assert.deepEqual(state.body.decks[0].aiSettings, {
+    reviewBriefs: false,
+    embeddings: false,
+    conflictSummaries: false,
+    diagnostics: false,
+    qualityPulse: false,
+    updatedAt: null,
+    updatedBy: null
+  });
+
+  const settings = await asUser(request(app).get('/api/decks/deck-demo-zanki/ai/settings'), 'maya', 'Maya Patel').expect(200);
+  assert.equal(settings.body.settings.reviewBriefs, false);
+  assert.equal(settings.body.settings.embeddings, false);
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ reviewBriefs: true }), 'maya', 'Maya Patel')
+    .expect(403)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'forbidden');
+    });
+
+  const updated = await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({
+      reviewBriefs: true,
+      embeddings: true,
+      conflictSummaries: false,
+      diagnostics: true,
+      qualityPulse: true
+    }), 'you', 'You').expect(200);
+
+  assert.equal(updated.body.settings.reviewBriefs, true);
+  assert.equal(updated.body.settings.embeddings, true);
+  assert.equal(updated.body.settings.conflictSummaries, false);
+  assert.equal(updated.body.settings.diagnostics, true);
+  assert.equal(updated.body.settings.qualityPulse, true);
+  assert.ok(updated.body.settings.updatedAt);
+  assert.equal(updated.body.settings.updatedBy, 'you');
+
+  const partial = await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ reviewBriefs: false }), 'you', 'You').expect(200);
+  assert.equal(partial.body.settings.reviewBriefs, false);
+  assert.equal(partial.body.settings.embeddings, true);
+  assert.equal(partial.body.settings.diagnostics, true);
+  assert.equal(partial.body.settings.qualityPulse, true);
+});
+
+test('AI artifact persistence supports list create update dismiss and stale transitions', async () => {
+  const { app } = await createTestApp();
+  const artifactPayload = {
+    subjectType: 'suggestion',
+    subjectId: 'sugg-anca',
+    kind: 'review-brief',
+    severity: 'medium',
+    status: 'active',
+    confidence: 0.82,
+    model: 'test-chat-model',
+    promptVersion: 'review-brief-v1',
+    inputHash: 'abc123',
+    payload: {
+      category: 'quality-risk',
+      impact: 'medium',
+      risk: 'low',
+      rationale: 'Test-only persisted artifact'
+    }
+  };
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/artifacts')
+    .send(artifactPayload), 'maya', 'Maya Patel')
+    .expect(403)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'forbidden');
+    });
+
+  const created = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/artifacts')
+    .send(artifactPayload), 'you', 'You').expect(201);
+
+  assert.match(created.body.artifact.id, /^ai-/);
+  assert.equal(created.body.artifact.deckId, 'deck-demo-zanki');
+  assert.equal(created.body.artifact.status, 'active');
+  assert.equal(created.body.artifact.payload.rationale, 'Test-only persisted artifact');
+
+  const listed = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/artifacts?status=active&kind=review-brief'), 'maya', 'Maya Patel').expect(200);
+  assert.equal(listed.body.artifacts.length, 1);
+  assert.equal(listed.body.artifacts[0].id, created.body.artifact.id);
+
+  const accepted = await asUser(request(app)
+    .patch(`/api/decks/deck-demo-zanki/ai/artifacts/${created.body.artifact.id}`)
+    .send({ status: 'accepted' }), 'you', 'You').expect(200);
+  assert.equal(accepted.body.artifact.status, 'accepted');
+  assert.ok(accepted.body.artifact.decidedAt);
+  assert.equal(accepted.body.artifact.decidedBy, 'you');
+
+  const second = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/artifacts')
+    .send({ ...artifactPayload, subjectId: 'sugg-second', inputHash: 'def456' }), 'you', 'You').expect(201);
+
+  const dismissed = await asUser(request(app)
+    .post(`/api/decks/deck-demo-zanki/ai/artifacts/${second.body.artifact.id}/dismiss`), 'you', 'You').expect(200);
+  assert.equal(dismissed.body.artifact.status, 'dismissed');
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/artifacts')
+    .send({ ...artifactPayload, subjectId: 'sugg-stale', inputHash: 'ghi789' }), 'you', 'You').expect(201);
+
+  const stale = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/artifacts/stale')
+    .send({ subjectType: 'suggestion', kind: 'review-brief' }), 'you', 'You').expect(200);
+  assert.equal(stale.body.stale, 1);
+
+  const active = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/artifacts?status=active'), 'you', 'You').expect(200);
+  assert.equal(active.body.artifacts.length, 0);
+});
+
+test('AI quality pulse groups active owner artifacts and excludes dismissed or stale items', async () => {
+  const { app } = await createTestApp();
+  const baseArtifact = {
+    subjectType: 'suggestion',
+    subjectId: 'sugg-anca',
+    kind: 'review-brief',
+    severity: 'medium',
+    status: 'active',
+    confidence: 0.82,
+    model: 'test-chat-model',
+    promptVersion: 'review-brief-v1',
+    inputHash: 'pulse-1',
+    payload: {
+      category: 'quality-risk',
+      rationale: 'Review the proposed ANCA wording before accepting.'
+    }
+  };
+
+  const disabled = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/pulse'), 'you', 'You').expect(200);
+  assert.equal(disabled.body.enabled, false);
+  assert.equal(disabled.body.status, 'disabled');
+  assert.equal(disabled.body.totalActive, 0);
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ qualityPulse: true }), 'you', 'You').expect(200);
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/artifacts')
+    .send(baseArtifact), 'you', 'You').expect(201);
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/artifacts')
+    .send({
+      ...baseArtifact,
+      subjectType: 'conflict',
+      subjectId: 'conflict-ai-1',
+      kind: 'conflict-summary',
+      severity: 'high',
+      inputHash: 'pulse-2',
+      payload: { risk: 'high', summary: 'Incoming text conflicts with local edits.' }
+    }), 'you', 'You').expect(201);
+
+  const dismissed = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/artifacts')
+    .send({ ...baseArtifact, subjectId: 'sugg-dismissed', inputHash: 'pulse-dismissed' }), 'you', 'You').expect(201);
+  await asUser(request(app)
+    .post(`/api/decks/deck-demo-zanki/ai/artifacts/${dismissed.body.artifact.id}/dismiss`), 'you', 'You').expect(200);
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/artifacts')
+    .send({ ...baseArtifact, subjectId: 'sugg-stale', inputHash: 'pulse-stale' }), 'you', 'You').expect(201);
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/artifacts/stale')
+    .send({ subjectId: 'sugg-stale' }), 'you', 'You').expect(200);
+
+  const pulse = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/pulse'), 'you', 'You').expect(200);
+  assert.equal(pulse.body.enabled, true);
+  assert.equal(pulse.body.status, 'attention');
+  assert.equal(pulse.body.totalActive, 2);
+  assert.equal(pulse.body.summary.bySeverity.high, 1);
+  assert.equal(pulse.body.summary.bySeverity.medium, 1);
+  assert.equal(pulse.body.summary.bySubjectType.suggestion, 1);
+  assert.equal(pulse.body.summary.bySubjectType.conflict, 1);
+  assert.equal(pulse.body.summary.byStaleness.fresh, 2);
+  assert.deepEqual(pulse.body.groups.severity.map((item) => item.key), ['high', 'medium']);
+  assert.equal(pulse.body.items[0].action, 'conflict');
+  assert.ok(pulse.body.items.every((item) => !['sugg-dismissed', 'sugg-stale'].includes(item.subjectId)));
+});
+
+test('suggestion review brief generation is explicit, advisory, and persisted as an AI artifact', async () => {
+  const calls = [];
+  const { app } = await createTestApp({
+    aiGateway: {
+      async chatJson({ messages, validate }) {
+        calls.push(messages);
+        const value = {
+          category: 'factual-correction',
+          impact: 'medium',
+          risk: 'low',
+          recommendedAction: 'accept-with-care',
+          rationale: 'The proposed ANCA wording is more precise while preserving the tested fact.',
+          evidence: ['Existing card asks about microscopic polyangiitis.', 'Proposed answer expands MPO / myeloperoxidase.'],
+          confidence: 0.84
+        };
+        const validation = validate(value);
+        assert.equal(validation.ok, true);
+        return { value, model: 'test-chat-model', raw: {} };
+      }
+    }
+  });
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ reviewBriefs: true }), 'you', 'You').expect(200);
+
+  const response = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/suggestions/sugg-anca/brief'), 'you', 'You').expect(201);
+
+  assert.equal(response.body.status, 'created');
+  assert.equal(response.body.artifact.subjectType, 'suggestion');
+  assert.equal(response.body.artifact.subjectId, 'sugg-anca');
+  assert.equal(response.body.artifact.kind, 'review-brief');
+  assert.equal(response.body.artifact.status, 'active');
+  assert.equal(response.body.artifact.model, 'test-chat-model');
+  assert.equal(response.body.artifact.promptVersion, 'suggestion-review-brief-v1');
+  assert.match(response.body.artifact.inputHash, /^[a-f0-9]{64}$/);
+  assert.equal(response.body.artifact.payload.recommendedAction, 'accept-with-care');
+  assert.equal(response.body.artifact.payload.confidence, 0.84);
+  assert.equal(calls.length, 1);
+
+  const listed = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/artifacts?kind=review-brief&subjectType=suggestion&subjectId=sugg-anca'), 'you', 'You').expect(200);
+  assert.equal(listed.body.artifacts.length, 1);
+  assert.equal(listed.body.artifacts[0].id, response.body.artifact.id);
+
+  const useful = await asUser(request(app)
+    .patch(`/api/decks/deck-demo-zanki/ai/artifacts/${response.body.artifact.id}`)
+    .send({ status: 'accepted' }), 'you', 'You').expect(200);
+  assert.equal(useful.body.artifact.status, 'accepted');
+
+  const state = await asUser(request(app).get('/api/decks/deck-demo-zanki'), 'you', 'You').expect(200);
+  assert.equal(state.body.suggestions.find((item) => item.id === 'sugg-anca').status, 'pending');
+});
+
+test('suggestion review brief returns typed recoverable results when disabled or invalid', async () => {
+  let calls = 0;
+  const { app } = await createTestApp({
+    aiGateway: {
+      async chatJson() {
+        calls += 1;
+        const error = new Error('AI response failed validation');
+        error.code = 'ai_validation_failed';
+        throw error;
+      }
+    }
+  });
+
+  const disabled = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/suggestions/sugg-anca/brief'), 'you', 'You').expect(200);
+  assert.equal(disabled.body.status, 'disabled');
+  assert.equal(disabled.body.artifact, null);
+  assert.equal(calls, 0);
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ reviewBriefs: true }), 'you', 'You').expect(200);
+
+  const invalid = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/suggestions/sugg-anca/brief'), 'you', 'You').expect(200);
+  assert.equal(invalid.body.status, 'invalid');
+  assert.equal(invalid.body.code, 'ai_validation_failed');
+  assert.equal(invalid.body.artifact, null);
+  assert.equal(calls, 1);
+
+  const listed = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/artifacts?kind=review-brief&subjectType=suggestion&subjectId=sugg-anca'), 'you', 'You').expect(200);
+  assert.equal(listed.body.artifacts.length, 0);
+});
+
+test('conflict summary generation is grounded in sync conflict fields and remains advisory', async () => {
+  const calls = [];
+  const { app } = await createTestApp({
+    aiGateway: {
+      async chatJson({ messages, validate }) {
+        calls.push(messages);
+        const requestBody = JSON.parse(messages[1].content);
+        assert.equal(requestBody.input.conflict.id, 'conflict-ai-1');
+        assert.equal(requestBody.input.conflict.localFields.Back, 'Local answer');
+        assert.equal(requestBody.input.conflict.incomingFields.Back, 'Incoming answer');
+        const value = {
+          summary: 'The incoming Back field changes the answer wording.',
+          risk: 'medium',
+          recommendation: 'manual-review',
+          rationale: 'The recommendation is grounded in Back: local says Local answer while incoming says Incoming answer.',
+          evidence: ['Back differs between localFields and incomingFields.'],
+          confidence: 0.77
+        };
+        const validation = validate(value);
+        assert.equal(validation.ok, true);
+        return { value, model: 'test-chat-model', raw: {} };
+      }
+    }
+  });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/conflicts')
+    .send({
+      conflicts: [{
+        id: 'conflict-ai-1',
+        cardId: 'card-anca',
+        source: 'DeckBridge Sync test',
+        localFields: { Front: 'Question', Back: 'Local answer' },
+        incomingFields: { Front: 'Question', Back: 'Incoming answer' }
+      }]
+    }), 'you', 'You').expect(200);
+
+  const disabled = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/conflicts/conflict-ai-1/summary'), 'you', 'You').expect(200);
+  assert.equal(disabled.body.status, 'disabled');
+  assert.equal(disabled.body.artifact, null);
+  assert.equal(calls.length, 0);
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ conflictSummaries: true }), 'you', 'You').expect(200);
+
+  const response = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/conflicts/conflict-ai-1/summary'), 'you', 'You').expect(201);
+  assert.equal(response.body.status, 'created');
+  assert.equal(response.body.artifact.subjectType, 'conflict');
+  assert.equal(response.body.artifact.subjectId, 'conflict-ai-1');
+  assert.equal(response.body.artifact.kind, 'conflict-summary');
+  assert.equal(response.body.artifact.promptVersion, 'conflict-summary-v1');
+  assert.equal(response.body.artifact.payload.recommendation, 'manual-review');
+  assert.equal(response.body.artifact.payload.risk, 'medium');
+
+  const listed = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/artifacts?kind=conflict-summary&subjectType=conflict&subjectId=conflict-ai-1'), 'you', 'You').expect(200);
+  assert.equal(listed.body.artifacts.length, 1);
+
+  const state = await asUser(request(app).get('/api/decks/deck-demo-zanki'), 'you', 'You').expect(200);
+  assert.equal(state.body.sync.conflicts.length, 1);
+});
+
+test('setup diagnostics require structured errors and return typed recoverable results', async () => {
+  let calls = 0;
+  const { app } = await createTestApp({
+    aiGateway: {
+      async chatJson({ messages, validate }) {
+        calls += 1;
+        const requestBody = JSON.parse(messages[1].content);
+        assert.equal(requestBody.input.error.code, 'addon_not_built');
+        assert.equal(requestBody.input.error.path, '/api/addon/download');
+        assert.equal(requestBody.input.error.message, 'Add-on package missing');
+        const value = {
+          summary: 'The add-on package download returned a build-needed error.',
+          risk: 'low',
+          recommendedAction: 'Build the add-on package before retrying the download.',
+          rationale: 'This uses code addon_not_built on /api/addon/download with message Add-on package missing.',
+          recoverySteps: ['Run the package build, then retry /api/addon/download.'],
+          citedError: {
+            code: 'addon_not_built',
+            path: '/api/addon/download',
+            message: 'Add-on package missing'
+          },
+          confidence: 0.86
+        };
+        const validation = validate(value);
+        assert.equal(validation.ok, true);
+        return { value, model: 'test-chat-model', raw: {} };
+      }
+    }
+  });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/diagnostics/setup-error')
+    .send({ error: { code: 'addon_not_built', path: '/api/addon/download', message: 'Add-on package missing', status: 404 } }), 'you', 'You')
+    .expect(200)
+    .expect((res) => {
+      assert.equal(res.body.status, 'disabled');
+      assert.equal(res.body.artifact, null);
+    });
+  assert.equal(calls, 0);
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ diagnostics: true }), 'you', 'You').expect(200);
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/diagnostics/setup-error')
+    .send({ error: { code: 'missing_message', path: '/api/me' } }), 'you', 'You')
+    .expect(400)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'invalid_setup_error_payload');
+    });
+
+  const created = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/diagnostics/setup-error')
+    .send({ error: { code: 'addon_not_built', path: '/api/addon/download', message: 'Add-on package missing', status: 404 } }), 'you', 'You').expect(201);
+
+  assert.equal(created.body.status, 'created');
+  assert.equal(created.body.artifact.subjectType, 'setup-error');
+  assert.equal(created.body.artifact.kind, 'diagnostic');
+  assert.equal(created.body.artifact.promptVersion, 'setup-diagnostic-v1');
+  assert.equal(created.body.artifact.payload.citedError.code, 'addon_not_built');
+  assert.equal(created.body.artifact.payload.citedError.path, '/api/addon/download');
+
+  const listed = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/artifacts?kind=diagnostic&subjectType=setup-error'), 'you', 'You').expect(200);
+  assert.equal(listed.body.artifacts.length, 1);
+});
+
+test('setup diagnostics reject AI citedError mismatches without persisting artifacts', async () => {
+  const { app } = await createTestApp({
+    aiGateway: {
+      async chatJson({ validate }) {
+        const value = {
+          summary: 'The setup request failed.',
+          risk: 'low',
+          recommendedAction: 'Retry the submitted endpoint after checking the setup.',
+          rationale: 'This cites a different path than the submitted setup error.',
+          recoverySteps: ['Retry after reviewing the submitted error.'],
+          citedError: {
+            code: 'addon_not_built',
+            path: '/api/wrong-endpoint',
+            message: 'Add-on package missing'
+          },
+          confidence: 0.72
+        };
+        const validation = validate(value);
+        assert.equal(validation.ok, false);
+        assert.match(validation.message, /citedError\.path/);
+        const error = new Error(validation.message);
+        error.code = 'ai_validation_failed';
+        throw error;
+      }
+    }
+  });
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ diagnostics: true }), 'you', 'You').expect(200);
+
+  const response = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/diagnostics/setup-error')
+    .send({ error: { code: 'addon_not_built', path: '/api/addon/download', message: 'Add-on package missing', status: 404 } }), 'you', 'You').expect(200);
+  assert.equal(response.body.status, 'invalid');
+  assert.equal(response.body.code, 'ai_validation_failed');
+  assert.match(response.body.message, /citedError\.path/);
+  assert.equal(response.body.artifact, null);
+
+  const artifacts = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/artifacts?kind=diagnostic&subjectType=setup-error'), 'you', 'You').expect(200);
+  assert.equal(artifacts.body.artifacts.length, 0);
+});
+
+test('setup diagnostics report unavailable AI gateway errors without persisting artifacts', async () => {
+  const { app } = await createTestApp({
+    aiGateway: {
+      async chatJson() {
+        const error = new Error('9Router is unreachable.');
+        error.code = 'ai_provider_unavailable';
+        throw error;
+      }
+    }
+  });
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ diagnostics: true }), 'you', 'You').expect(200);
+
+  const response = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/diagnostics/setup-error')
+    .send({ error: { code: 'sync_failed', path: '/api/decks/deck-demo-zanki/sync/cards', message: 'Invalid sync payload' } }), 'you', 'You').expect(200);
+  assert.equal(response.body.status, 'unavailable');
+  assert.equal(response.body.code, 'ai_provider_unavailable');
+  assert.equal(response.body.message, '9Router is unreachable.');
+  assert.equal(response.body.artifact, null);
+
+  const artifacts = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/artifacts?kind=diagnostic&subjectType=setup-error'), 'you', 'You').expect(200);
+  assert.equal(artifacts.body.artifacts.length, 0);
+});
+
+test('conflict summaries and diagnostics return invalid results without persisting bad AI output', async () => {
+  const { app } = await createTestApp({
+    aiGateway: {
+      async chatJson() {
+        const error = new Error('AI response failed validation');
+        error.code = 'ai_validation_failed';
+        throw error;
+      }
+    }
+  });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/conflicts')
+    .send({
+      conflicts: [{
+        id: 'conflict-invalid-ai',
+        cardId: 'card-anca',
+        localFields: { Front: 'Local' },
+        incomingFields: { Front: 'Incoming' }
+      }]
+    }), 'you', 'You').expect(200);
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ conflictSummaries: true, diagnostics: true }), 'you', 'You').expect(200);
+
+  const conflict = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/conflicts/conflict-invalid-ai/summary'), 'you', 'You').expect(200);
+  assert.equal(conflict.body.status, 'invalid');
+  assert.equal(conflict.body.artifact, null);
+
+  const diagnostic = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/diagnostics/setup-error')
+    .send({ error: { code: 'sync_failed', path: '/api/decks/deck-demo-zanki/sync/cards', message: 'Invalid sync payload' } }), 'you', 'You').expect(200);
+  assert.equal(diagnostic.body.status, 'invalid');
+  assert.equal(diagnostic.body.artifact, null);
+
+  const artifacts = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/artifacts?status=active'), 'you', 'You').expect(200);
+  assert.equal(artifacts.body.artifacts.length, 0);
+});
+
+test('semantic duplicate indexing is explicit, stores links, and remains advisory', async () => {
+  let embedCalls = 0;
+  const { app } = await createTestApp({
+    aiGateway: {
+      async embed(input) {
+        embedCalls += 1;
+        const text = Array.isArray(input) ? input[0] : input;
+        const embedding = text.includes('H. pylori')
+          ? [0.96, 0.04, 0]
+          : text.includes('Vitamin B12')
+            ? [0, 1, 0]
+            : text.includes('ADH')
+              ? [0, 0.2, 0.8]
+              : [1, 0, 0];
+        return {
+          model: 'test-embedding-model',
+          dimensions: embedding.length,
+          embeddings: [embedding],
+          inputCount: 1
+        };
+      }
+    }
+  });
+
+  const disabled = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/cards/card-anca/embed'), 'you', 'You').expect(200);
+  assert.equal(disabled.body.status, 'disabled');
+  assert.equal(disabled.body.embedding, null);
+  assert.equal(embedCalls, 0);
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ embeddings: true }), 'you', 'You').expect(200);
+
+  const batch = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/cards/embed')
+    .send({ cardIds: ['card-anca', 'card-hpylori'], minScore: 0.7 }), 'you', 'You').expect(201);
+  assert.equal(batch.body.status, 'indexed');
+  assert.equal(batch.body.indexed, 2);
+  assert.equal(embedCalls, 2);
+
+  const related = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/cards/card-anca/related?minScore=0.7'), 'you', 'You').expect(200);
+  assert.equal(related.body.status, 'ready');
+  assert.equal(related.body.links.length, 1);
+  assert.equal(related.body.links[0].sourceCardId, 'card-hpylori');
+  assert.equal(related.body.links[0].targetCardId, 'card-anca');
+  assert.equal(related.body.links[0].relationship, 'duplicate');
+  assert.match(related.body.links[0].rationale, /card-hpylori|H\. pylori|card-anca/);
+  assert.deepEqual(related.body.links[0].comparedFields, ['Front', 'Back']);
+
+  const artifacts = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/artifacts?kind=duplicate-link&subjectType=card'), 'you', 'You').expect(200);
+  assert.equal(artifacts.body.artifacts.length, 1);
+  assert.equal(artifacts.body.artifacts[0].payload.targetCardId, 'card-anca');
+
+  const state = await asUser(request(app).get('/api/decks/deck-demo-zanki'), 'you', 'You').expect(200);
+  assert.equal(state.body.decks[0].cards.length, 4);
+  assert.ok(state.body.decks[0].cards.some((card) => card.id === 'card-hpylori'));
+});
+
+test('semantic duplicate query marks changed card embeddings stale', async () => {
+  const { app } = await createTestApp({
+    aiGateway: {
+      async embed(input) {
+        const text = Array.isArray(input) ? input[0] : input;
+        const embedding = text.includes('H. pylori') ? [0.95, 0.05] : [1, 0];
+        return { model: 'test-embedding-model', dimensions: 2, embeddings: [embedding], inputCount: 1 };
+      }
+    }
+  });
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ embeddings: true }), 'you', 'You').expect(200);
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/cards/embed')
+    .send({ cardIds: ['card-anca', 'card-hpylori'], minScore: 0.7 }), 'you', 'You').expect(201);
+
+  await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/decision')
+    .send({ decision: 'accepted' }), 'you', 'You').expect(200);
+
+  const related = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/ai/cards/card-anca/related?minScore=0.7'), 'you', 'You').expect(200);
+  assert.equal(related.body.links.length, 0);
+});
+
 test('suggestion comments can be listed and resolved in local repository mode', async () => {
   const { app } = await createTestApp();
 

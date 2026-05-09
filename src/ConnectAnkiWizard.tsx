@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
-import { api, type AddonDownloadAvailability, type AddonVersion, type CreatedToken, type MeResponse } from './api';
-import type { AppState, DeckSummary } from './types';
+import { ApiRequestError, api, type AddonDownloadAvailability, type AddonVersion, type CreatedToken, type MeResponse } from './api';
+import type { AiArtifact, AiSetupDiagnosticPayload, AppState, DeckSummary, StructuredSetupError } from './types';
 
 type Step = 'download' | 'token' | 'map' | 'prove' | 'manual';
 
@@ -65,6 +65,44 @@ function relativeProofTime(value?: string | null) {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+function structuredErrorFromCatch(err: unknown, fallbackPath: string, source: string): StructuredSetupError | null {
+  if (err instanceof ApiRequestError) {
+    return {
+      code: err.code,
+      path: err.path || fallbackPath,
+      message: err.message,
+      status: err.status,
+      source,
+      details: err.details
+    };
+  }
+  return null;
+}
+
+function structuredErrorFromDownload(availability: AddonDownloadAvailability | null): StructuredSetupError | null {
+  if (!availability || availability.available || !availability.code || !availability.message) return null;
+  return {
+    code: availability.code,
+    path: '/api/addon/download',
+    message: availability.message,
+    status: availability.status,
+    method: 'HEAD',
+    source: 'setup-wizard-download'
+  };
+}
+
+function isDiagnosticPayload(value: unknown): value is AiSetupDiagnosticPayload {
+  const payload = value as Partial<AiSetupDiagnosticPayload>;
+  return Boolean(
+    payload &&
+    typeof payload.summary === 'string' &&
+    typeof payload.recommendedAction === 'string' &&
+    typeof payload.rationale === 'string' &&
+    Array.isArray(payload.recoverySteps) &&
+    (payload.risk === 'low' || payload.risk === 'medium' || payload.risk === 'high')
+  );
+}
+
 export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshState, onClose }: Props) {
   const [step, setStep] = useState<Step>('download');
   const [addonVersion, setAddonVersion] = useState<AddonVersion | null>(null);
@@ -82,11 +120,17 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<MeResponse | null>(null);
   const [testError, setTestError] = useState('');
+  const [structuredSetupError, setStructuredSetupError] = useState<StructuredSetupError | null>(null);
+  const [diagnosticArtifact, setDiagnosticArtifact] = useState<AiArtifact | null>(null);
+  const [diagnosticLoading, setDiagnosticLoading] = useState(false);
+  const [diagnosticMessage, setDiagnosticMessage] = useState('');
   const [proofLoading, setProofLoading] = useState(false);
   const [proofError, setProofError] = useState('');
   const [proofState, setProofState] = useState(() => syncProofFromState(currentState, selectedDeckId));
   const [showManualToken, setShowManualToken] = useState(false);
   const localDeckNameForConfig = localDeckName.trim();
+  const activeSetupError = structuredSetupError || structuredErrorFromDownload(downloadAvailability);
+  const diagnosticPayload = isDiagnosticPayload(diagnosticArtifact?.payload) ? diagnosticArtifact.payload : null;
 
   const availableDecks = useMemo(() => {
     if (testResult && Array.isArray(testResult.decks)) return testResult.decks;
@@ -156,9 +200,13 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
       setCreatedToken(nextToken);
       const me = await api.meWithToken(nextToken.raw);
       setTestResult(me);
+      setStructuredSetupError(null);
+      setDiagnosticArtifact(null);
+      setDiagnosticMessage('');
       setStep('map');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to prepare the Anki connection');
+      setStructuredSetupError(structuredErrorFromCatch(err, '/api/tokens', 'setup-wizard-token'));
     } finally {
       setGenerating(false);
     }
@@ -193,9 +241,13 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
     try {
       const me = await api.meWithToken(createdToken.raw);
       setTestResult(me);
+      setStructuredSetupError(null);
+      setDiagnosticArtifact(null);
+      setDiagnosticMessage('');
     } catch (err) {
       setTestResult(null);
       setTestError(err instanceof Error ? err.message : 'Token test failed');
+      setStructuredSetupError(structuredErrorFromCatch(err, '/api/me', 'setup-wizard-token-test'));
     } finally {
       setTesting(false);
     }
@@ -207,12 +259,57 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
     try {
       const nextState = await onRefreshState();
       setProofState(syncProofFromState(nextState, selectedDeckId));
+      setStructuredSetupError(null);
+      setDiagnosticArtifact(null);
+      setDiagnosticMessage('');
     } catch (err) {
       setProofError(err instanceof Error ? err.message : 'Unable to refresh sync proof');
+      setStructuredSetupError(structuredErrorFromCatch(err, '/api/state', 'setup-wizard-sync-proof'));
     } finally {
       setProofLoading(false);
     }
   }, [onRefreshState, selectedDeckId]);
+
+  const generateDiagnostic = useCallback(async () => {
+    if (!selectedDeckId || !activeSetupError) return;
+    setDiagnosticLoading(true);
+    setDiagnosticMessage('');
+    try {
+      const result = await api.aiSetupDiagnostics.generate(selectedDeckId, activeSetupError);
+      setDiagnosticArtifact(result.artifact);
+      setDiagnosticMessage(result.status === 'created' ? '' : (result.message || 'AI setup diagnostic is unavailable.'));
+    } catch (err) {
+      setDiagnosticMessage(err instanceof Error ? err.message : 'AI setup diagnostic is unavailable.');
+    } finally {
+      setDiagnosticLoading(false);
+    }
+  }, [activeSetupError, selectedDeckId]);
+
+  const diagnosticPanel = activeSetupError ? (
+    <div className="wizard-test-card" aria-label="AI setup diagnostic">
+      <strong>AI setup diagnostic</strong>
+      <span aria-label={`AI diagnostic uses ${activeSetupError.code} at ${activeSetupError.path}: ${activeSetupError.message}`}>
+        Uses the structured error shown above for this setup step.
+      </span>
+      {diagnosticPayload ? (
+        <>
+          <span>{diagnosticPayload.summary}</span>
+          <span>Risk: {diagnosticPayload.risk} · {diagnosticPayload.recommendedAction}</span>
+          <span>{diagnosticPayload.rationale}</span>
+          {diagnosticPayload.recoverySteps.length ? (
+            <ul>
+              {diagnosticPayload.recoverySteps.slice(0, 4).map((stepText) => <li key={stepText}>{stepText}</li>)}
+            </ul>
+          ) : null}
+        </>
+      ) : (
+        <span>{diagnosticMessage || 'Generate recovery guidance from this structured error payload.'}</span>
+      )}
+      <button className="btn btn-secondary" onClick={generateDiagnostic} disabled={diagnosticLoading || !selectedDeckId}>
+        {diagnosticLoading ? 'Generating...' : diagnosticPayload ? 'Refresh diagnostic' : 'Generate diagnostic'}
+      </button>
+    </div>
+  ) : null;
 
   return (
     <div className="wizard-overlay" role="dialog" aria-modal="true" aria-label="Connect Anki Add-on">
@@ -265,6 +362,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
                   The direct download link remains available so you can retry after the package is built.
                 </p>
               ) : null}
+              {diagnosticPanel}
               <p className="wizard-hint">
                 After downloading, double-click the <code>.ankiaddon</code> file or open it via
                 Anki → Tools → Add-ons → Install from file.
@@ -286,6 +384,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
               </p>
               {error && <div className="wizard-error">{error}</div>}
               {testError ? <div className="wizard-error">{testError}</div> : null}
+              {diagnosticPanel}
               <div className="wizard-actions">
                 <button className="btn btn-primary" onClick={generateToken} disabled={generating}>
                   {generating ? 'Preparing connection...' : 'Create connection link'}
@@ -316,6 +415,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
                 these values.
               </p>
               {error && <div className="wizard-error">{error}</div>}
+              {diagnosticPanel}
               <div className="wizard-field-row">
                 <label>Platform URL</label>
                 <div className="wizard-copy-row">
@@ -461,6 +561,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
                     </div>
                   ) : null}
                   {testError ? <div className="wizard-error">{testError}</div> : null}
+                  {diagnosticPanel}
                 </div>
               ) : null}
               {createdToken ? (
@@ -529,6 +630,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
                 )}
               </div>
               {proofError ? <div className="wizard-error">{proofError}</div> : null}
+              {diagnosticPanel}
               <div className="wizard-actions">
                 <button className="btn btn-primary" onClick={checkSyncProof} disabled={proofLoading || !selectedDeckId}>
                   {proofLoading ? 'Checking...' : 'Check for sync result'}

@@ -1,7 +1,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Session } from '@supabase/supabase-js';
 import { api, setApiAuthToken, type AddonDownloadAvailability, type AddonVersion } from './api';
-import type { AddonSyncResult, AppState, Deck, DeckCard, Suggestion } from './types';
+import type { AddonSyncResult, AiArtifact, AiDuplicateLink, AiQualityPulse, AppState, Deck, DeckCard, Suggestion } from './types';
 import { useRealtime } from './useRealtime';
 import { ConnectAnkiWizard } from './ConnectAnkiWizard';
 import { CardEditor } from './CardEditor';
@@ -54,6 +54,8 @@ interface OwnerAttentionItem {
   tone: 'neutral' | 'info' | 'success' | 'warning' | 'danger';
   action: 'setup' | 'suggestions' | 'conflicts' | 'cards' | 'settings' | 'study';
   actionLabel: string;
+  artifactId?: string;
+  subjectId?: string;
 }
 
 const TOAST_ICONS: Record<Toast['type'], string> = {
@@ -279,6 +281,7 @@ function deriveOwnerAttentionItems({
   changedCards,
   deckVisibility,
   pendingSuggestions,
+  pulse,
   studyCards,
   syncHealth
 }: {
@@ -286,10 +289,12 @@ function deriveOwnerAttentionItems({
   changedCards: number;
   deckVisibility: string;
   pendingSuggestions: number;
+  pulse: AiQualityPulse | null;
   studyCards: number;
   syncHealth: SyncHealth;
 }): OwnerAttentionItem[] {
   const items: OwnerAttentionItem[] = [];
+  const pulseItems: OwnerAttentionItem[] = [];
   if (syncHealth.state !== 'sync-healthy' && syncHealth.state !== 'conflicts') {
     items.push({
       id: 'sync',
@@ -309,6 +314,27 @@ function deriveOwnerAttentionItems({
       action: 'suggestions',
       actionLabel: 'Review'
     });
+  }
+  if (pulse?.enabled && pulse.status === 'attention' && pulse.totalActive > 0) {
+    for (const pulseItem of pulse.items.slice(0, 2)) {
+      const action: OwnerAttentionItem['action'] = pulseItem.action === 'suggestion'
+        ? 'suggestions'
+        : pulseItem.action === 'conflict'
+          ? 'conflicts'
+          : pulseItem.action === 'setup'
+            ? 'setup'
+            : 'cards';
+      pulseItems.push({
+        id: `pulse-${pulseItem.artifactId}`,
+        label: pulseItem.label,
+        detail: `${pulseItem.severity} · ${pulseItem.staleness} · ${pulseItem.detail}`,
+        tone: pulseItem.severity === 'high' ? 'danger' : pulseItem.severity === 'medium' ? 'warning' : 'info',
+        action,
+        actionLabel: action === 'setup' ? 'Setup' : action === 'conflicts' ? 'Open' : action === 'cards' ? 'Find' : 'Review',
+        artifactId: pulseItem.artifactId,
+        subjectId: pulseItem.subjectId
+      });
+    }
   }
   if (syncHealth.state === 'conflicts') {
     items.push({
@@ -350,7 +376,7 @@ function deriveOwnerAttentionItems({
       actionLabel: 'Study'
     });
   }
-  return items.slice(0, 5);
+  return [...items, ...pulseItems].slice(0, 5);
 }
 
 function authMessage(message: string, mode: 'sign-in' | 'sign-up') {
@@ -420,11 +446,13 @@ function SyncHealthStrip({ health, onAction }: { health: SyncHealth; onAction: (
 
 function OwnerAttentionPanel({
   items,
+  onDismissArtifact,
   onAction,
   syncHealth
 }: {
   items: OwnerAttentionItem[];
-  onAction: (action: OwnerAttentionItem['action']) => void;
+  onDismissArtifact?: (artifactId: string) => void;
+  onAction: (item: OwnerAttentionItem) => void;
   syncHealth: SyncHealth;
 }) {
   return (
@@ -440,18 +468,36 @@ function OwnerAttentionPanel({
       {items.length ? (
         <div className="attention-list">
           {items.map((item) => (
-            <button
+            <div
               key={item.id}
-              className={`attention-item attention-item--${item.tone}`}
+              style={{ display: 'grid', gridTemplateColumns: item.artifactId ? '1fr 34px' : '1fr', gap: 6, alignItems: 'stretch' }}
+              role="group"
               aria-label={`Attention item: ${item.label}`}
-              onClick={() => onAction(item.action)}
             >
-              <span>
-                <strong>{item.label}</strong>
-                <small>{item.detail}</small>
-              </span>
-              <b>{item.actionLabel}</b>
-            </button>
+              <button
+                type="button"
+                className={`attention-item attention-item--${item.tone}`}
+                aria-label={`Open attention item: ${item.label}`}
+                onClick={() => onAction(item)}
+              >
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>{item.detail}</small>
+                </span>
+                <b>{item.actionLabel}</b>
+              </button>
+              {item.artifactId ? (
+                <button
+                  type="button"
+                  className="icon-button"
+                  title="Dismiss AI artifact"
+                  aria-label={`Dismiss AI artifact: ${item.label}`}
+                  onClick={() => onDismissArtifact?.(item.artifactId!)}
+                >
+                  <Icon name="x" />
+                </button>
+              ) : null}
+            </div>
           ))}
         </div>
       ) : (
@@ -581,6 +627,13 @@ export default function App() {
   const [reviewTab, setReviewTab] = useState<'changes' | 'discussion'>('changes');
   const [reviewStatusFilter, setReviewStatusFilter] = useState<'pending' | 'accepted' | 'rejected' | 'revision' | 'all'>('pending');
   const [reviewAuthorFilter, setReviewAuthorFilter] = useState('All');
+  const [suggestionBriefs, setSuggestionBriefs] = useState<Record<string, AiArtifact | null>>({});
+  const [qualityPulse, setQualityPulse] = useState<AiQualityPulse | null>(null);
+  const [qualityPulseBusy, setQualityPulseBusy] = useState(false);
+  const [briefBusy, setBriefBusy] = useState(false);
+  const [duplicateLinks, setDuplicateLinks] = useState<AiDuplicateLink[]>([]);
+  const [duplicateBusy, setDuplicateBusy] = useState(false);
+  const [embeddingBusy, setEmbeddingBusy] = useState(false);
   const [conflictReviewSnapshot, setConflictReviewSnapshot] = useState<Conflict[]>([]);
   const [topView, setTopView] = useState<'workspace' | 'discover' | 'templates'>('workspace');
   const [deckVisibility, setDeckVisibility] = useState<Record<string, string>>({});
@@ -734,6 +787,18 @@ export default function App() {
   }), [suggestions, reviewStatusFilter, reviewAuthorFilter]);
   const selectedSuggestion = queueSuggestions.find((item) => item.id === selectedSuggestionId) || queueSuggestions[0];
   const selectedCard = activeDeck?.cards.find((card) => card.id === (selectedSuggestion?.cardId || selectedCardId)) || activeDeck?.cards[0];
+  const selectedSuggestionBrief = selectedSuggestion ? suggestionBriefs[selectedSuggestion.id] : null;
+  const selectedDuplicateLinks = useMemo(() => duplicateLinks.filter((link) => (
+    selectedCard && (link.sourceCardId === selectedCard.id || link.targetCardId === selectedCard.id)
+  )), [duplicateLinks, selectedCard]);
+  const duplicateCountsByCard = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const link of duplicateLinks) {
+      counts.set(link.sourceCardId, (counts.get(link.sourceCardId) || 0) + 1);
+      counts.set(link.targetCardId, (counts.get(link.targetCardId) || 0) + 1);
+    }
+    return counts;
+  }, [duplicateLinks]);
   const allTags = useMemo(() => ['All', ...Array.from(new Set(activeDeck?.cards.flatMap((card) => card.tags) || [])).sort()], [activeDeck]);
   const cardStates = useMemo(() => ['All', ...Array.from(new Set(activeDeck?.cards.map((card) => card.state) || [])).sort()], [activeDeck]);
   const filteredCards = useMemo(() => {
@@ -829,9 +894,93 @@ export default function App() {
     changedCards,
     deckVisibility: activeDeckVisibility,
     pendingSuggestions: pendingSuggestions.length,
+    pulse: qualityPulse,
     studyCards: studyCards.length,
     syncHealth
-  }), [activeDeckVisibility, canReview, changedCards, pendingSuggestions.length, studyCards.length, syncHealth]);
+  }), [activeDeckVisibility, canReview, changedCards, pendingSuggestions.length, qualityPulse, studyCards.length, syncHealth]);
+
+  const refreshQualityPulse = useCallback(async () => {
+    if (!activeDeck?.id || !activeDeck.aiSettings?.qualityPulse) {
+      setQualityPulse(null);
+      return null;
+    }
+    setQualityPulseBusy(true);
+    try {
+      const pulse = await api.aiArtifacts.pulse(activeDeck.id);
+      setQualityPulse(pulse);
+      return pulse;
+    } catch (_error) {
+      setQualityPulse(null);
+      return null;
+    } finally {
+      setQualityPulseBusy(false);
+    }
+  }, [activeDeck?.id, activeDeck?.aiSettings?.qualityPulse]);
+
+  useEffect(() => {
+    let mounted = true;
+    if (!activeDeck?.id || !activeDeck.aiSettings?.qualityPulse) {
+      setQualityPulse(null);
+      return;
+    }
+    setQualityPulseBusy(true);
+    api.aiArtifacts.pulse(activeDeck.id)
+      .then((pulse) => {
+        if (mounted) setQualityPulse(pulse);
+      })
+      .catch(() => {
+        if (mounted) setQualityPulse(null);
+      })
+      .finally(() => {
+        if (mounted) setQualityPulseBusy(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [activeDeck?.id, activeDeck?.aiSettings?.qualityPulse]);
+
+  useEffect(() => {
+    if (!activeDeck?.id || !selectedSuggestion?.id || !activeDeck.aiSettings?.reviewBriefs) return;
+    let mounted = true;
+    api.aiArtifacts.list(activeDeck.id, {
+      kind: 'review-brief',
+      subjectType: 'suggestion',
+      subjectId: selectedSuggestion.id
+    }).then(({ artifacts }) => {
+      if (!mounted) return;
+      setSuggestionBriefs((prev) => ({
+        ...prev,
+        [selectedSuggestion.id]: artifacts.find((item) => item.status === 'active') || artifacts[0] || null
+      }));
+    }).catch(() => {
+      if (mounted) setSuggestionBriefs((prev) => ({ ...prev, [selectedSuggestion.id]: null }));
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [activeDeck?.id, activeDeck?.aiSettings?.reviewBriefs, selectedSuggestion?.id]);
+
+  useEffect(() => {
+    if (!activeDeck?.id || !selectedCard?.id || !activeDeck.aiSettings?.embeddings) {
+      setDuplicateLinks([]);
+      return;
+    }
+    let mounted = true;
+    setDuplicateBusy(true);
+    api.aiCardEmbeddings.related(activeDeck.id, selectedCard.id, { limit: 8, minScore: 0.78 })
+      .then((result) => {
+        if (mounted) setDuplicateLinks(result.links || []);
+      })
+      .catch(() => {
+        if (mounted) setDuplicateLinks([]);
+      })
+      .finally(() => {
+        if (mounted) setDuplicateBusy(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [activeDeck?.id, activeDeck?.aiSettings?.embeddings, selectedCard?.id]);
 
   async function refreshWith<T extends AppState | unknown>(task: Promise<T>, success: string, map?: (value: T) => AppState) {
     setBusy(true);
@@ -990,14 +1139,17 @@ export default function App() {
     setShowConnectWizard(true);
   }
 
-  function handleOwnerAttentionAction(action: OwnerAttentionItem['action']) {
+  function handleOwnerAttentionAction(item: OwnerAttentionItem) {
+    const action = item.action;
     if (action === 'setup') {
       setShowConnectWizard(true);
       return;
     }
     if (action === 'suggestions') {
-      setReviewStatusFilter('pending');
+      setReviewStatusFilter(item.subjectId ? 'all' : 'pending');
       setReviewAuthorFilter('All');
+      if (item.subjectId) setSelectedSuggestionId(item.subjectId);
+      setReviewTab('changes');
       return;
     }
     if (action === 'conflicts') {
@@ -1005,6 +1157,17 @@ export default function App() {
       return;
     }
     if (action === 'cards') {
+      if (item.subjectId) {
+        const targetIndex = activeDeck?.cards.findIndex((card) => card.id === item.subjectId) ?? -1;
+        const targetPage = targetIndex >= 0 ? Math.floor(targetIndex / pageSize) + 1 : 1;
+        setQueryInput('');
+        setTagFilter('All');
+        setCardStateFilter('All');
+        setPage(targetPage);
+        setSelectedSuggestionId(null);
+        setSelectedCardId(item.subjectId);
+        window.setTimeout(() => setPage(targetPage), 260);
+      }
       setActiveTab('cards');
       return;
     }
@@ -1037,6 +1200,90 @@ export default function App() {
   function decideSuggestion(decision: 'accepted' | 'rejected' | 'revision') {
     if (!selectedSuggestion) return;
     refreshWith(api.decideSuggestion(selectedSuggestion.id, decision), `Suggestion ${decision}`);
+  }
+
+  async function generateSuggestionBrief() {
+    if (!activeDeck || !selectedSuggestion) return;
+    setBriefBusy(true);
+    try {
+      const result = await api.aiSuggestionBriefs.generate(activeDeck.id, selectedSuggestion.id);
+      if (result.artifact) {
+        setSuggestionBriefs((prev) => ({ ...prev, [selectedSuggestion.id]: result.artifact }));
+        pushToast('AI review brief generated', 'success');
+      } else {
+        pushToast(result.message || 'AI review brief is unavailable', result.status === 'disabled' ? 'info' : 'error');
+      }
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'AI review brief failed', 'error');
+    } finally {
+      setBriefBusy(false);
+    }
+  }
+
+  async function updateSuggestionBriefStatus(artifactId: string, action: 'useful' | 'dismiss') {
+    if (!activeDeck || !selectedSuggestion) return;
+    setBriefBusy(true);
+    try {
+      const { artifact } = action === 'useful'
+        ? await api.aiSuggestionBriefs.markUseful(activeDeck.id, artifactId)
+        : await api.aiSuggestionBriefs.dismiss(activeDeck.id, artifactId);
+      setSuggestionBriefs((prev) => ({ ...prev, [selectedSuggestion.id]: artifact }));
+      pushToast(action === 'useful' ? 'Brief marked useful' : 'Brief dismissed', 'success');
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to update brief', 'error');
+    } finally {
+      setBriefBusy(false);
+    }
+  }
+
+  async function dismissOwnerArtifact(artifactId: string) {
+    if (!activeDeck) return;
+    try {
+      await api.aiArtifacts.dismiss(activeDeck.id, artifactId);
+      await refreshQualityPulse();
+      pushToast('Owner artifact dismissed', 'success');
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to dismiss artifact', 'error');
+    }
+  }
+
+  async function indexSelectedCardEmbedding() {
+    if (!activeDeck || !selectedCard) return;
+    setEmbeddingBusy(true);
+    try {
+      const result = await api.aiCardEmbeddings.embed(activeDeck.id, selectedCard.id, { limit: 8, minScore: 0.78 });
+      if (result.status === 'indexed') {
+        setDuplicateLinks(result.links || []);
+        pushToast(result.links.length ? `Found ${result.links.length} related card(s)` : 'Card indexed for duplicate search', 'success');
+      } else {
+        pushToast(result.message || 'AI duplicate indexing is unavailable', result.status === 'disabled' ? 'info' : 'error');
+      }
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to index card', 'error');
+    } finally {
+      setEmbeddingBusy(false);
+    }
+  }
+
+  async function indexVisibleCardEmbeddings() {
+    if (!activeDeck) return;
+    setEmbeddingBusy(true);
+    try {
+      const result = await api.aiCardEmbeddings.embedBatch(activeDeck.id, {
+        cardIds: filteredCards.slice(0, 25).map((card) => card.id),
+        limit: 25,
+        minScore: 0.78
+      });
+      pushToast(result.status === 'disabled' ? 'AI duplicate indexing is disabled' : `Indexed ${result.indexed || 0} card(s)`, result.status === 'disabled' ? 'info' : 'success');
+      if (selectedCard) {
+        const related = await api.aiCardEmbeddings.related(activeDeck.id, selectedCard.id, { limit: 8, minScore: 0.78 });
+        setDuplicateLinks(related.links || []);
+      }
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to index visible cards', 'error');
+    } finally {
+      setEmbeddingBusy(false);
+    }
   }
 
   function toggleSuggestionSelection(suggestionId: string) {
@@ -1488,6 +1735,11 @@ export default function App() {
                 >
                   <Icon name="filter" /> Clear filters
                 </button>
+                {canManageDeck && activeDeck.aiSettings?.embeddings ? (
+                  <button className="button secondary" onClick={indexVisibleCardEmbeddings} disabled={embeddingBusy || !filteredCards.length}>
+                    <Icon name="spark" /> Index visible
+                  </button>
+                ) : null}
               </div>
 
               {selectedCardIds.size > 0 && (
@@ -1614,7 +1866,10 @@ export default function App() {
                         tabIndex={-1}
                       />
                     </span>
-                    <span role="cell" className="card-front">{fieldValue(card, 'Front') || Object.values(card.fields)[0]}</span>
+                    <span role="cell" className="card-front">
+                      {fieldValue(card, 'Front') || Object.values(card.fields)[0]}
+                      {duplicateCountsByCard.get(card.id) ? <em title="AI duplicate or related-card candidate"> Related {duplicateCountsByCard.get(card.id)}</em> : null}
+                    </span>
                     <span role="cell">{card.type}</span>
                     <span role="cell" className="tag-list">{card.tags.slice(0, 2).map((tag) => <em key={tag}>{tag}</em>)}</span>
                     <span role="cell">{card.due ?? '-'}</span>
@@ -1655,6 +1910,7 @@ export default function App() {
           <aside className="review-panel">
             <OwnerAttentionPanel
               items={ownerAttentionItems}
+              onDismissArtifact={dismissOwnerArtifact}
               syncHealth={syncHealth}
               onAction={handleOwnerAttentionAction}
             />
@@ -1710,6 +1966,36 @@ export default function App() {
                   <b className="pending-status">{selectedSuggestion?.status || 'draft'}</b>
                 </div>
                 <p className="card-context">Card: {fieldValue(selectedCard, 'Front') || Object.values(selectedCard.fields)[0]}</p>
+                {activeDeck.aiSettings?.embeddings ? (
+                  <div className="ai-brief-card">
+                    <div className="ai-brief-header">
+                      <strong>Semantic duplicates</strong>
+                      {canManageDeck ? (
+                        <button className="button secondary" onClick={indexSelectedCardEmbedding} disabled={embeddingBusy}>
+                          <Icon name="spark" /> {embeddingBusy ? 'Indexing' : 'Index card'}
+                        </button>
+                      ) : null}
+                    </div>
+                    {duplicateBusy ? <small>Checking related cards...</small> : null}
+                    {selectedDuplicateLinks.length ? (
+                      <ul>
+                        {selectedDuplicateLinks.slice(0, 3).map((link) => {
+                          const comparedId = link.sourceCardId === selectedCard.id ? link.targetCardId : link.sourceCardId;
+                          const comparedCard = activeDeck.cards.find((card) => card.id === comparedId);
+                          return (
+                            <li key={link.id}>
+                              <strong>{link.relationship}</strong> {Math.round(link.score * 100)}%
+                              <br />
+                              <small>{selectedCard.id} vs {comparedId}: {comparedCard ? fieldValue(comparedCard, 'Front') || Object.values(comparedCard.fields)[0] : comparedId}</small>
+                              <br />
+                              <small>{link.rationale}</small>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : <small>No active duplicate links for this card.</small>}
+                  </div>
+                ) : null}
                 <div className="review-tabs">
                   <button className={reviewTab === 'changes' ? 'active' : ''} onClick={() => setReviewTab('changes')}>Changes</button>
                   <button className={reviewTab === 'discussion' ? 'active' : ''} onClick={() => setReviewTab('discussion')}>Discussion</button>
@@ -1756,9 +2042,17 @@ export default function App() {
                   selectedSuggestion ? (
                     <SuggestionDiscussion
                       suggestionId={selectedSuggestion.id}
+                      deckId={activeDeck.id}
                       currentUserId={state.user?.id || 'you'}
                       currentUserName={state.user?.name || 'You'}
                       commentsVersion={commentsVersion}
+                      brief={selectedSuggestionBrief}
+                      aiEnabled={activeDeck.aiSettings?.reviewBriefs === true}
+                      canManageAi={canManageDeck}
+                      briefBusy={briefBusy}
+                      onGenerateBrief={generateSuggestionBrief}
+                      onMarkBriefUseful={(artifactId) => updateSuggestionBriefStatus(artifactId, 'useful')}
+                      onDismissBrief={(artifactId) => updateSuggestionBriefStatus(artifactId, 'dismiss')}
                     />
                   ) : <EmptyState message="Select a suggestion to view its discussion." />
                 )}

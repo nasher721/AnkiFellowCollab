@@ -14,6 +14,48 @@ export function cleanText(value, fallback = '', maxLength = 4000) {
   return text.slice(0, maxLength);
 }
 
+export function canonicalCardText(card = {}, options = {}) {
+  const maxFieldChars = Math.max(200, Math.min(Number(options.maxFieldChars) || 3000, 20000));
+  const maxTotalChars = Math.max(maxFieldChars, Math.min(Number(options.maxTotalChars) || 12000, 60000));
+  const fields = card.fields && typeof card.fields === 'object' && !Array.isArray(card.fields) ? card.fields : {};
+  const orderedFieldNames = Array.isArray(card.fieldOrder)
+    ? card.fieldOrder.map(String).filter((field) => Object.hasOwn(fields, field))
+    : [];
+  const fieldNames = [...orderedFieldNames, ...Object.keys(fields).filter((field) => !orderedFieldNames.includes(field))];
+  const lines = [
+    `Card ID: ${cleanText(card.id, '', 200)}`,
+    `Note type: ${cleanText(card.modelName || card.type, 'Basic', 200)}`,
+    `State: ${cleanText(card.state, 'Unknown', 120)}`,
+    `Tags: ${(Array.isArray(card.tags) ? card.tags : []).map((tag) => cleanText(tag, '', 120)).filter(Boolean).join(', ') || 'None'}`
+  ];
+
+  for (const fieldName of fieldNames.slice(0, 80)) {
+    const name = cleanText(fieldName, '', 120);
+    if (!name) continue;
+    const value = normalizeCanonicalCardValue(fields[fieldName]);
+    const boundedValue = value.length > maxFieldChars
+      ? `${value.slice(0, maxFieldChars)}\n[Field truncated at ${maxFieldChars} characters for embedding input.]`
+      : value;
+    lines.push(`${name}:\n${boundedValue}`);
+  }
+
+  const fullText = lines.join('\n\n').replace(/\r\n?/g, '\n').trim();
+  if (fullText.length <= maxTotalChars) return fullText;
+  return `${fullText.slice(0, maxTotalChars)}\n\n[Card text truncated at ${maxTotalChars} characters for embedding input.]`;
+}
+
+export function canonicalCardInputHash(card = {}, options = {}) {
+  return createHash('sha256').update(canonicalCardText(card, options)).digest('hex');
+}
+
+function normalizeCanonicalCardValue(value) {
+  return String(value ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u0000/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
+}
+
 const MAX_ADDON_MEDIA_ASSETS = 300;
 const MAX_ADDON_MEDIA_BYTES = 5 * 1024 * 1024;
 const MAX_ADDON_STORAGE_MEDIA_BYTES = 100 * 1024 * 1024;

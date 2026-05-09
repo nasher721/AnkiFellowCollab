@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { api } from './api';
+import type { AiArtifact, AiConflictSummaryPayload } from './types';
 
 interface Conflict {
   id: string;
@@ -30,6 +32,7 @@ interface StoredDecision {
 }
 
 type StoredDecisions = Record<string, StoredDecision>;
+type SummaryState = Record<string, { artifact: AiArtifact | null; loading: boolean; message: string }>;
 
 const STORAGE_PREFIX = 'deckbridge-conflict-decisions';
 
@@ -78,6 +81,17 @@ function getStorageKey(conflicts: Conflict[]) {
 
 function isResolution(value: unknown): value is Resolution {
   return value === 'local' || value === 'incoming' || value === 'skip';
+}
+
+function isConflictSummaryPayload(value: unknown): value is AiConflictSummaryPayload {
+  const payload = value as Partial<AiConflictSummaryPayload>;
+  return Boolean(
+    payload &&
+    typeof payload.summary === 'string' &&
+    typeof payload.rationale === 'string' &&
+    (payload.risk === 'low' || payload.risk === 'medium' || payload.risk === 'high') &&
+    (payload.recommendation === 'keep-local' || payload.recommendation === 'use-incoming' || payload.recommendation === 'skip-for-now' || payload.recommendation === 'manual-review')
+  );
 }
 
 function readStoredDecisions(storageKey: string, conflicts: Conflict[]): StoredDecisions {
@@ -159,6 +173,7 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
   const pendingIds = useMemo(() => new Set(pendingConflictIds || conflicts.map((item) => item.id)), [conflicts, pendingConflictIds]);
   const [view, setView] = useState<'unresolved' | 'all'>('unresolved');
   const [decisions, setDecisions] = useState<StoredDecisions>(() => readStoredDecisions(storageKey, conflicts));
+  const [summaries, setSummaries] = useState<SummaryState>({});
   const [index, setIndex] = useState(0);
   const replayedRef = useRef<Set<string>>(new Set());
   const visibleConflicts = useMemo(() => {
@@ -177,6 +192,31 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
     setView('unresolved');
     replayedRef.current = new Set();
   }, [storageKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const deckIds = Array.from(new Set(conflicts.map((item) => item.deckId).filter(Boolean)));
+    if (!deckIds.length) {
+      setSummaries({});
+      return () => { cancelled = true; };
+    }
+    Promise.all(deckIds.map((deckId) => api.aiArtifacts.list(deckId, {
+      kind: 'conflict-summary',
+      subjectType: 'conflict',
+      status: 'active'
+    }).catch(() => ({ artifacts: [] }))))
+      .then((responses) => {
+        if (cancelled) return;
+        const next: SummaryState = {};
+        for (const response of responses) {
+          for (const artifact of response.artifacts) {
+            next[artifact.subjectId] = { artifact, loading: false, message: '' };
+          }
+        }
+        setSummaries(next);
+      });
+    return () => { cancelled = true; };
+  }, [storageKey, conflicts]);
 
   useEffect(() => {
     replayedRef.current.forEach((conflictId) => {
@@ -228,6 +268,37 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
     if (pendingCount === 0) onClearReview?.();
   };
 
+  const generateSummary = async (selectedConflict: Conflict) => {
+    setSummaries((current) => ({
+      ...current,
+      [selectedConflict.id]: {
+        artifact: current[selectedConflict.id]?.artifact || null,
+        loading: true,
+        message: ''
+      }
+    }));
+    try {
+      const result = await api.aiConflictSummaries.generate(selectedConflict.deckId, selectedConflict.id);
+      setSummaries((current) => ({
+        ...current,
+        [selectedConflict.id]: {
+          artifact: result.artifact,
+          loading: false,
+          message: result.status === 'created' ? '' : (result.message || 'AI conflict summary is unavailable.')
+        }
+      }));
+    } catch (err) {
+      setSummaries((current) => ({
+        ...current,
+        [selectedConflict.id]: {
+          artifact: current[selectedConflict.id]?.artifact || null,
+          loading: false,
+          message: err instanceof Error ? err.message : 'AI conflict summary is unavailable.'
+        }
+      }));
+    }
+  };
+
   if (!conflict) {
     return (
       <div className="conflict-panel">
@@ -262,6 +333,8 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
   const allKeys = Array.from(new Set([...Object.keys(conflict.localFields), ...Object.keys(conflict.incomingFields)]));
   const cardPreview = Object.values(conflict.localFields)[0] || conflict.cardId;
   const currentDecision = decisions[conflict.id];
+  const summaryState = summaries[conflict.id];
+  const summaryPayload = isConflictSummaryPayload(summaryState?.artifact?.payload) ? summaryState.artifact.payload : null;
 
   return (
     <div className="conflict-panel">
@@ -293,6 +366,30 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
         </div>
         <button className="button danger-outline" disabled={!decidedCount} onClick={resetProgress}>
           Reset Progress
+        </button>
+      </div>
+
+      <div className="wizard-test-card" aria-label="AI conflict summary">
+        <strong>AI conflict summary</strong>
+        {summaryPayload ? (
+          <>
+            <span>{summaryPayload.summary}</span>
+            <span>Risk: {summaryPayload.risk} · Recommendation: {summaryPayload.recommendation.replaceAll('-', ' ')}</span>
+            <span>{summaryPayload.rationale}</span>
+            {summaryPayload.evidence?.length ? (
+              <small>{summaryPayload.evidence.slice(0, 3).join(' · ')}</small>
+            ) : null}
+          </>
+        ) : (
+          <span>{summaryState?.message || 'Generate an advisory summary from the local and incoming fields.'}</span>
+        )}
+        <button
+          className="button secondary"
+          type="button"
+          disabled={summaryState?.loading}
+          onClick={() => generateSummary(conflict)}
+        >
+          {summaryState?.loading ? 'Generating...' : summaryPayload ? 'Refresh Summary' : 'Generate Summary'}
         </button>
       </div>
 

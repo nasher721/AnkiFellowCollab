@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import {
   applySuggestion,
+  canonicalCardInputHash,
+  canonicalCardText,
   createSeedState,
   deckToCreateDeckJson,
   mergeAddonCards,
@@ -84,6 +86,31 @@ test('normalizes suggestion input and rejects empty no-op suggestions', () => {
   assert.equal(normalized.proposedFields.Extra, '');
 
   assert.throws(() => normalizeSuggestionInput({ proposedFields: {}, proposedTags: card.tags }, card), /Suggestion must/);
+});
+
+test('canonical card text preserves ordered content while bounding embedding input', () => {
+  const card = {
+    id: 'card-canonical',
+    type: 'Basic',
+    modelName: 'Basic',
+    fieldOrder: ['Front', 'Back'],
+    fields: {
+      Back: 'Answer with\nline breaks',
+      Front: 'Question '.repeat(20),
+      Extra: 'E'.repeat(5000)
+    },
+    tags: ['TagA', 'TagB'],
+    state: 'Review'
+  };
+
+  const text = canonicalCardText(card, { maxFieldChars: 200, maxTotalChars: 20000 });
+  assert.match(text, /Card ID: card-canonical/);
+  assert.ok(text.indexOf('Front:') < text.indexOf('Back:'));
+  assert.match(text, /Question Question/);
+  assert.match(text, /Field truncated/);
+  assert.ok(text.length < 1000);
+  assert.match(canonicalCardInputHash(card), /^[a-f0-9]{64}$/);
+  assert.equal(canonicalCardInputHash(card), canonicalCardInputHash({ ...card }));
 });
 
 test('normalizes add-on sync media payloads and bounds asset count', () => {

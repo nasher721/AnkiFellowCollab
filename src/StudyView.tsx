@@ -133,6 +133,10 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
     () => currentCard ? renderCardHtml(currentCard, deckId, 'front', undefined, currentCard.clozeOrd) : '',
     [currentCard, deckId],
   );
+  const revealCard = useCallback(() => {
+    setFlipped(true);
+    panelRef.current?.focus({ preventScroll: true });
+  }, []);
 
   // Persist whenever progress changes
   useEffect(() => {
@@ -376,6 +380,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
               deckId={deckId}
               side="front"
               clozeOrd={currentCard.clozeOrd}
+              onDocumentClick={!flipped ? revealCard : undefined}
             />
             {!flipped && <span className="study-flip-hint">Click or press Space to reveal</span>}
           </div>

@@ -1,6 +1,22 @@
-import type { ApiError, AppState, DemoRole, StorageAsset, User, DeckMember, DeckSummary, StudySession } from './types';
+import type { AiArtifact, AiArtifactGenerationResult, AiCapabilityStatus, AiCardEmbeddingResult, AiQualityPulse, AiRelatedCardsResult, AiSuggestionBriefResult, ApiError, AppState, DeckAiSettings, DemoRole, StorageAsset, StructuredSetupError, User, DeckMember, DeckSummary, StudySession } from './types';
 
 let authToken: string | null = null;
+
+export class ApiRequestError extends Error {
+  code: string;
+  status: number;
+  path: string;
+  details?: Record<string, unknown>;
+
+  constructor(message: string, { code, status, path, details }: { code: string; status: number; path: string; details?: Record<string, unknown> }) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.code = code;
+    this.status = status;
+    this.path = path;
+    this.details = details;
+  }
+}
 
 export function setApiAuthToken(token: string | null) {
   authToken = token;
@@ -12,6 +28,11 @@ function extractError(body: unknown, fallback: string) {
   if (value?.error?.message) return value.error.message;
   if (value?.legacyError) return value.legacyError;
   return fallback;
+}
+
+function extractErrorCode(body: unknown) {
+  const value = body as Partial<ApiError> & { error?: string | { code?: string } };
+  return typeof value?.error === 'object' && typeof value.error.code === 'string' ? value.error.code : 'request_failed';
 }
 
 async function jsonRequest<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -27,7 +48,12 @@ async function jsonRequest<T>(url: string, options: RequestInit = {}): Promise<T
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(extractError(body, `Request failed with ${response.status}`));
+    throw new ApiRequestError(extractError(body, `Request failed with ${response.status}`), {
+      code: extractErrorCode(body),
+      status: response.status,
+      path: url,
+      details: typeof (body as ApiError)?.error === 'object' ? (body as ApiError).error.details : undefined
+    });
   }
   return response.json() as Promise<T>;
 }
@@ -198,6 +224,7 @@ export interface Template {
 
 export const api = {
   health: () => jsonRequest<{ ok: boolean; dataDir: string }>('/api/health'),
+  aiStatus: () => jsonRequest<AiCapabilityStatus>('/api/ai/status'),
   addonVersion: () => jsonRequest<AddonVersion>('/api/addon/version'),
   addonDownloadAvailability: async (downloadUrl = '/api/addon/download'): Promise<AddonDownloadAvailability> => {
     try {
@@ -286,6 +313,92 @@ export const api = {
     }),
   decks: () => jsonRequest<{ decks: DeckSummary[] }>('/api/decks'),
   deck: (deckId: string) => jsonRequest<AppState>(`/api/decks/${deckId}`),
+  deckAiSettings: {
+    get: (deckId: string) =>
+      jsonRequest<{ settings: DeckAiSettings }>(`/api/decks/${deckId}/ai/settings`),
+    update: (deckId: string, settings: Pick<DeckAiSettings, 'reviewBriefs' | 'embeddings' | 'conflictSummaries' | 'diagnostics' | 'qualityPulse'>) =>
+      jsonRequest<{ settings: DeckAiSettings }>(`/api/decks/${deckId}/ai/settings`, {
+        method: 'PATCH',
+        body: JSON.stringify(settings)
+      })
+  },
+  aiArtifacts: {
+    pulse: (deckId: string) =>
+      jsonRequest<AiQualityPulse>(`/api/decks/${deckId}/ai/pulse`),
+    list: (deckId: string, params: Partial<Pick<AiArtifact, 'status' | 'kind' | 'subjectType' | 'subjectId'>> = {}) => {
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) {
+        if (value) query.set(key, String(value));
+      }
+      const suffix = query.toString() ? `?${query.toString()}` : '';
+      return jsonRequest<{ artifacts: AiArtifact[] }>(`/api/decks/${deckId}/ai/artifacts${suffix}`);
+    },
+    create: (deckId: string, artifact: Omit<AiArtifact, 'id' | 'deckId' | 'createdAt' | 'decidedAt' | 'decidedBy'>) =>
+      jsonRequest<{ artifact: AiArtifact }>(`/api/decks/${deckId}/ai/artifacts`, {
+        method: 'POST',
+        body: JSON.stringify(artifact)
+      }),
+    update: (deckId: string, artifactId: string, patch: { status?: AiArtifact['status']; payload?: Record<string, unknown> }) =>
+      jsonRequest<{ artifact: AiArtifact }>(`/api/decks/${deckId}/ai/artifacts/${artifactId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch)
+      }),
+    dismiss: (deckId: string, artifactId: string) =>
+      jsonRequest<{ artifact: AiArtifact }>(`/api/decks/${deckId}/ai/artifacts/${artifactId}/dismiss`, { method: 'POST' }),
+    markStale: (deckId: string, filters: Partial<Pick<AiArtifact, 'kind' | 'subjectType' | 'subjectId'>> = {}) =>
+      jsonRequest<{ stale: number }>(`/api/decks/${deckId}/ai/artifacts/stale`, {
+        method: 'POST',
+        body: JSON.stringify(filters)
+      })
+  },
+  aiSuggestionBriefs: {
+    generate: (deckId: string, suggestionId: string) =>
+      jsonRequest<AiSuggestionBriefResult>(`/api/decks/${deckId}/ai/suggestions/${suggestionId}/brief`, {
+        method: 'POST'
+      }),
+    markUseful: (deckId: string, artifactId: string) =>
+      jsonRequest<{ artifact: AiArtifact }>(`/api/decks/${deckId}/ai/artifacts/${artifactId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'accepted' })
+      }),
+    dismiss: (deckId: string, artifactId: string) =>
+      jsonRequest<{ artifact: AiArtifact }>(`/api/decks/${deckId}/ai/artifacts/${artifactId}/dismiss`, {
+        method: 'POST'
+      })
+  },
+  aiConflictSummaries: {
+    generate: (deckId: string, conflictId: string) =>
+      jsonRequest<AiArtifactGenerationResult>(`/api/decks/${deckId}/ai/conflicts/${conflictId}/summary`, {
+        method: 'POST'
+      })
+  },
+  aiSetupDiagnostics: {
+    generate: (deckId: string, error: StructuredSetupError) =>
+      jsonRequest<AiArtifactGenerationResult>(`/api/decks/${deckId}/ai/diagnostics/setup-error`, {
+        method: 'POST',
+        body: JSON.stringify({ error })
+      })
+  },
+  aiCardEmbeddings: {
+    embed: (deckId: string, cardId: string, options: { minScore?: number; limit?: number } = {}) =>
+      jsonRequest<AiCardEmbeddingResult>(`/api/decks/${deckId}/ai/cards/${cardId}/embed`, {
+        method: 'POST',
+        body: JSON.stringify(options)
+      }),
+    embedBatch: (deckId: string, payload: { cardIds?: string[]; limit?: number; minScore?: number } = {}) =>
+      jsonRequest<{ status: 'indexed' | 'disabled' | 'unavailable'; indexed?: number; results: Array<AiCardEmbeddingResult & { cardId: string }> }>(`/api/decks/${deckId}/ai/cards/embed`, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }),
+    related: (deckId: string, cardId: string, params: { minScore?: number; limit?: number; relationship?: string } = {}) => {
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) {
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+      }
+      const suffix = query.toString() ? `?${query.toString()}` : '';
+      return jsonRequest<AiRelatedCardsResult>(`/api/decks/${deckId}/ai/cards/${cardId}/related${suffix}`);
+    }
+  },
   state: () => jsonRequest<AppState>('/api/state'),
   session: (payload: { role?: DemoRole; activeDeckId?: string }) =>
     jsonRequest<AppState>('/api/session', {

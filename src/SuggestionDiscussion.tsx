@@ -1,16 +1,37 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api, type Comment } from './api';
+import type { AiArtifact, AiSuggestionBriefPayload } from './types';
 
 interface Props {
   suggestionId: string;
+  deckId?: string;
   currentUserId: string;
   currentUserName: string;
   commentsVersion?: number;
+  brief?: AiArtifact | null;
+  aiEnabled?: boolean;
+  canManageAi?: boolean;
+  briefBusy?: boolean;
+  onGenerateBrief?: () => void;
+  onMarkBriefUseful?: (artifactId: string) => void;
+  onDismissBrief?: (artifactId: string) => void;
 }
 
 const EMOJIS = ['👍', '❓', '✅'] as const;
 
-export function SuggestionDiscussion({ suggestionId, currentUserId, currentUserName, commentsVersion = 0 }: Props) {
+export function SuggestionDiscussion({
+  suggestionId,
+  currentUserId,
+  currentUserName,
+  commentsVersion = 0,
+  brief,
+  aiEnabled = false,
+  canManageAi = false,
+  briefBusy = false,
+  onGenerateBrief,
+  onMarkBriefUseful,
+  onDismissBrief
+}: Props) {
   const [comments, setComments] = useState<Comment[]>([]);
   const [reactions, setReactions] = useState<Record<string, number>>({});
   const [myReactions, setMyReactions] = useState<Set<string>>(new Set());
@@ -104,6 +125,16 @@ export function SuggestionDiscussion({ suggestionId, currentUserId, currentUserN
 
   return (
     <div className="discussion">
+      <SuggestionBriefPanel
+        brief={brief}
+        aiEnabled={aiEnabled}
+        canManageAi={canManageAi}
+        busy={briefBusy}
+        onGenerate={onGenerateBrief}
+        onMarkUseful={onMarkBriefUseful}
+        onDismiss={onDismissBrief}
+      />
+
       <div className="discussion-reactions">
         {EMOJIS.map((emoji) => (
           <button
@@ -176,6 +207,87 @@ export function SuggestionDiscussion({ suggestionId, currentUserId, currentUserN
       </div>
     </div>
   );
+}
+
+function SuggestionBriefPanel({
+  brief,
+  aiEnabled,
+  canManageAi,
+  busy,
+  onGenerate,
+  onMarkUseful,
+  onDismiss
+}: {
+  brief?: AiArtifact | null;
+  aiEnabled: boolean;
+  canManageAi: boolean;
+  busy: boolean;
+  onGenerate?: () => void;
+  onMarkUseful?: (artifactId: string) => void;
+  onDismiss?: (artifactId: string) => void;
+}) {
+  const payload = brief ? suggestionBriefPayload(brief.payload) : null;
+  return (
+    <section className={`ai-brief-panel ${brief?.status || 'empty'}`} aria-label="AI suggestion review brief">
+      <div className="ai-brief-header">
+        <span>
+          <strong>AI review brief</strong>
+          <small>{brief ? `${brief.status} · ${Math.round((brief.confidence || payload?.confidence || 0) * 100)}% confidence` : aiEnabled ? 'Optional owner assist' : 'Disabled for this deck'}</small>
+        </span>
+        {canManageAi ? (
+          <button className="button secondary" onClick={onGenerate} disabled={busy || !onGenerate}>
+            {busy ? 'Generating…' : brief ? 'Regenerate' : 'Generate brief'}
+          </button>
+        ) : null}
+      </div>
+
+      {payload ? (
+        <>
+          <div className="ai-brief-metadata">
+            <span>Category <b>{label(payload.category)}</b></span>
+            <span>Risk <b>{payload.risk}</b></span>
+            <span>Impact <b>{payload.impact}</b></span>
+            <span>Action <b>{label(payload.recommendedAction)}</b></span>
+          </div>
+          <p>{payload.rationale}</p>
+          {payload.evidence.length ? (
+            <ul className="ai-brief-evidence">
+              {payload.evidence.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}
+            </ul>
+          ) : null}
+          <small className="ai-brief-trace">
+            {brief?.model} · {brief?.promptVersion} · {brief?.createdAt ? new Date(brief.createdAt).toLocaleString() : ''}
+          </small>
+          {canManageAi && brief && brief.status === 'active' ? (
+            <div className="ai-brief-actions">
+              <button className="button secondary" onClick={() => onDismiss?.(brief.id)} disabled={busy}>Dismiss</button>
+              <button className="button primary" onClick={() => onMarkUseful?.(brief.id)} disabled={busy}>Mark useful</button>
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <p>{aiEnabled ? 'Generate an advisory brief when you want AI help reviewing this suggestion.' : 'Enable review briefs in deck AI settings to use this advisory workflow.'}</p>
+      )}
+    </section>
+  );
+}
+
+function suggestionBriefPayload(payload: Record<string, unknown>): AiSuggestionBriefPayload | null {
+  const value = payload as Partial<AiSuggestionBriefPayload>;
+  if (!value || typeof value.rationale !== 'string') return null;
+  return {
+    category: value.category || 'other',
+    impact: value.impact || 'low',
+    risk: value.risk || 'low',
+    recommendedAction: value.recommendedAction || 'review',
+    rationale: value.rationale,
+    evidence: Array.isArray(value.evidence) ? value.evidence.filter((item): item is string => typeof item === 'string') : [],
+    confidence: typeof value.confidence === 'number' ? value.confidence : 0
+  };
+}
+
+function label(value: string) {
+  return value.replaceAll('-', ' ');
 }
 
 function renderWithMentions(text: string) {

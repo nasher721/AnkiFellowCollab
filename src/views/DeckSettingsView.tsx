@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, type DeckInvite, type ShareLink } from '../api';
-import type { Deck } from '../types';
+import type { Deck, DeckAiSettings } from '../types';
 
 export interface DeckSettingsViewProps {
   deck: Deck;
@@ -17,6 +17,23 @@ function shareLinkUrl(token: string) {
 }
 
 const SHARE_LINK_LOAD_TIMEOUT_MS = 8000;
+const DEFAULT_AI_SETTINGS: DeckAiSettings = {
+  reviewBriefs: false,
+  embeddings: false,
+  conflictSummaries: false,
+  diagnostics: false,
+  qualityPulse: false,
+  updatedAt: null,
+  updatedBy: null
+};
+
+const AI_SETTING_OPTIONS: Array<{ key: keyof Pick<DeckAiSettings, 'reviewBriefs' | 'embeddings' | 'conflictSummaries' | 'diagnostics' | 'qualityPulse'>; label: string; detail: string }> = [
+  { key: 'reviewBriefs', label: 'Review briefs', detail: 'Store advisory summaries for incoming suggestions.' },
+  { key: 'embeddings', label: 'Embeddings', detail: 'Allow server-side semantic fingerprints for duplicate detection.' },
+  { key: 'conflictSummaries', label: 'Conflict summaries', detail: 'Store advisory summaries for sync conflict review.' },
+  { key: 'diagnostics', label: 'Diagnostics', detail: 'Allow grounded setup and sync recovery guidance.' },
+  { key: 'qualityPulse', label: 'Quality pulse', detail: 'Allow owner attention items from active AI findings.' }
+];
 
 async function copyText(value: string) {
   await navigator.clipboard.writeText(value);
@@ -39,6 +56,10 @@ export function DeckSettingsView({
   const [inviteRole, setInviteRole] = useState<DeckInvite['role']>('contributor');
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteError, setInviteError] = useState('');
+  const [aiSettings, setAiSettings] = useState<DeckAiSettings>({ ...DEFAULT_AI_SETTINGS, ...deck.aiSettings });
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiSaving, setAiSaving] = useState(false);
+  const [aiError, setAiError] = useState('');
   const activeShareRequestRef = useRef(0);
   const primaryShareLink = shareLinks.find((link) => !link.disabledAt) || shareLinks[0] || null;
   const primaryShareUrl = primaryShareLink ? shareLinkUrl(primaryShareLink.token) : '';
@@ -90,6 +111,25 @@ export function DeckSettingsView({
     return () => { mounted = false; };
   }, [canReview, deck.id]);
 
+  useEffect(() => {
+    setAiSettings({ ...DEFAULT_AI_SETTINGS, ...deck.aiSettings });
+    setAiError('');
+    if (!canReview) return;
+    let mounted = true;
+    setAiLoading(true);
+    api.deckAiSettings.get(deck.id)
+      .then(({ settings }) => {
+        if (mounted) setAiSettings(settings);
+      })
+      .catch((err) => {
+        if (mounted) setAiError(err instanceof Error ? err.message : 'Unable to load AI settings');
+      })
+      .finally(() => {
+        if (mounted) setAiLoading(false);
+      });
+    return () => { mounted = false; };
+  }, [canReview, deck.id, deck.aiSettings]);
+
   async function sendInvite(e: FormEvent) {
     e.preventDefault();
     if (!inviteEmail.trim()) return;
@@ -112,6 +152,29 @@ export function DeckSettingsView({
       setInvites((prev) => prev.filter((inv) => inv.id !== inviteId));
     } catch (err) {
       setInviteError(err instanceof Error ? err.message : 'Unable to revoke invite');
+    }
+  }
+
+  async function updateAiSetting(key: keyof Pick<DeckAiSettings, 'reviewBriefs' | 'embeddings' | 'conflictSummaries' | 'diagnostics' | 'qualityPulse'>, enabled: boolean) {
+    if (!canReview) return;
+    const next = { ...aiSettings, [key]: enabled };
+    setAiSettings(next);
+    setAiSaving(true);
+    setAiError('');
+    try {
+      const { settings } = await api.deckAiSettings.update(deck.id, {
+        reviewBriefs: next.reviewBriefs,
+        embeddings: next.embeddings,
+        conflictSummaries: next.conflictSummaries,
+        diagnostics: next.diagnostics,
+        qualityPulse: next.qualityPulse
+      });
+      setAiSettings(settings);
+    } catch (err) {
+      setAiSettings(aiSettings);
+      setAiError(err instanceof Error ? err.message : 'Unable to update AI settings');
+    } finally {
+      setAiSaving(false);
     }
   }
 
@@ -193,6 +256,28 @@ export function DeckSettingsView({
           <textarea readOnly value={embedCode} aria-label="Deck embed code" rows={3} />
           <button className="button secondary" onClick={() => copy(embedCode, 'Embed code copied')}>Copy embed code</button>
           <small>Placeholder code for a future embeddable public preview route.</small>
+        </section>
+        <section>
+          <h3>AI owner assist</h3>
+          {AI_SETTING_OPTIONS.map((option) => (
+            <label className="toggle-row" key={option.key}>
+              <input
+                type="checkbox"
+                checked={Boolean(aiSettings[option.key])}
+                disabled={!canReview || aiLoading || aiSaving}
+                onChange={(event) => updateAiSetting(option.key, event.target.checked)}
+              />
+              <span>
+                <strong>{option.label}</strong>
+                <small>{option.detail}</small>
+              </span>
+            </label>
+          ))}
+          {aiLoading ? <p className="settings-note" role="status">Loading AI settings...</p> : null}
+          {aiSaving ? <p className="settings-note" role="status">Saving AI settings...</p> : null}
+          {aiError ? <p className="settings-note error">{aiError}</p> : null}
+          {!canReview ? <p className="settings-note">Owner access is required to change AI settings.</p> : null}
+          <small>AI features are off by default. Provider keys and generation stay on the server.</small>
         </section>
         {canReview && (
           <section>

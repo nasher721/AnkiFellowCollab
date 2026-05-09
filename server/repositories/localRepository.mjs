@@ -4,18 +4,117 @@ import { fail } from '../errors.mjs';
 import { loadState, saveState } from '../store.mjs';
 
 const roleRank = { viewer: 0, contributor: 1, reviewer: 2, editor: 3, owner: 4 };
+const DEFAULT_AI_SETTINGS = Object.freeze({
+  reviewBriefs: false,
+  embeddings: false,
+  conflictSummaries: false,
+  diagnostics: false,
+  qualityPulse: false
+});
+
+const AI_ARTIFACT_STATUSES = new Set(['active', 'dismissed', 'accepted', 'rejected', 'stale']);
+
+function normalizeAiSettings(settings = {}) {
+  return {
+    reviewBriefs: Boolean(settings.reviewBriefs),
+    embeddings: Boolean(settings.embeddings),
+    conflictSummaries: Boolean(settings.conflictSummaries),
+    diagnostics: Boolean(settings.diagnostics),
+    qualityPulse: Boolean(settings.qualityPulse),
+    updatedAt: settings.updatedAt || null,
+    updatedBy: settings.updatedBy || null
+  };
+}
+
+function toAiArtifact(artifact) {
+  return {
+    id: artifact.id,
+    deckId: artifact.deckId,
+    subjectType: artifact.subjectType,
+    subjectId: artifact.subjectId,
+    kind: artifact.kind,
+    severity: artifact.severity,
+    status: artifact.status,
+    confidence: artifact.confidence,
+    model: artifact.model,
+    promptVersion: artifact.promptVersion,
+    inputHash: artifact.inputHash,
+    payload: artifact.payload || {},
+    createdAt: artifact.createdAt,
+    decidedAt: artifact.decidedAt || null,
+    decidedBy: artifact.decidedBy || null
+  };
+}
+
+function toCardEmbedding(embedding) {
+  return {
+    cardId: embedding.cardId,
+    deckId: embedding.deckId,
+    model: embedding.model,
+    dimensions: embedding.dimensions,
+    inputHash: embedding.inputHash,
+    embedding: Array.isArray(embedding.embedding) ? embedding.embedding : [],
+    status: embedding.status || 'active',
+    metadata: embedding.metadata || {},
+    createdAt: embedding.createdAt,
+    updatedAt: embedding.updatedAt
+  };
+}
+
+function toAiDuplicateLink(link) {
+  return {
+    id: link.id,
+    deckId: link.deckId,
+    sourceCardId: link.sourceCardId,
+    targetCardId: link.targetCardId,
+    artifactId: link.artifactId || null,
+    score: link.score,
+    relationship: link.relationship,
+    rationale: link.rationale || '',
+    comparedFields: Array.isArray(link.comparedFields) ? link.comparedFields : [],
+    status: link.status || 'active',
+    createdAt: link.createdAt,
+    updatedAt: link.updatedAt
+  };
+}
 
 function ensureCollections(state) {
   state.studySessions ||= [];
   state.shareLinks ||= [];
   state.invites ||= [];
   state.comments ||= [];
+  state.aiArtifacts ||= [];
+  state.cardEmbeddings ||= [];
+  state.aiDuplicateLinks ||= [];
   state.sync ||= {};
   state.sync.lastAddonSync ??= null;
+  for (const deck of (state.decks || [])) {
+    deck.aiSettings = normalizeAiSettings(deck.aiSettings || DEFAULT_AI_SETTINGS);
+  }
   // Migrate legacy 'collaborator' role to 'contributor'
   for (const c of (state.collaborators || [])) {
     if (c.role === 'collaborator') c.role = 'contributor';
   }
+}
+
+function markEmbeddingsStaleInState(state, deckId, cardIds = []) {
+  const idSet = new Set((Array.isArray(cardIds) ? cardIds : [cardIds]).filter(Boolean).map(String));
+  const now = nowIso();
+  let stale = 0;
+  for (const embedding of state.cardEmbeddings || []) {
+    if (embedding.deckId !== deckId || embedding.status !== 'active') continue;
+    if (idSet.size && !idSet.has(embedding.cardId)) continue;
+    embedding.status = 'stale';
+    embedding.updatedAt = now;
+    stale += 1;
+  }
+  for (const link of state.aiDuplicateLinks || []) {
+    if (link.deckId !== deckId || link.status !== 'active') continue;
+    if (idSet.size && !idSet.has(link.sourceCardId) && !idSet.has(link.targetCardId)) continue;
+    link.status = 'stale';
+    link.updatedAt = now;
+  }
+  return stale;
 }
 
 function mergeConflicts(existing = [], incoming = []) {
@@ -75,6 +174,7 @@ function publicState(state, activeDeckId = state.activeDeckId) {
   return {
     ...state,
     activeDeckId: activeDeck?.id || null,
+    decks: state.decks.map((deck) => ({ ...deck, aiSettings: normalizeAiSettings(deck.aiSettings) })),
     summaries: state.decks.map((deck) => summarizeDeck(deck, state.suggestions))
   };
 }
@@ -159,7 +259,7 @@ export function createLocalRepository() {
       if (!owner) {
         state.collaborators.push({ id: user.id, name: user.name, email: user.email, role: 'owner', accepted: 0 });
       }
-      state.decks.unshift(deck);
+      state.decks.unshift({ ...deck, aiSettings: normalizeAiSettings() });
       state.activeDeckId = deck.id;
       const addonSyncResult = addonImportSyncResult(deck);
       if (addonSyncResult) {
@@ -175,6 +275,200 @@ export function createLocalRepository() {
       });
       await saveState(state);
       return this.getDeckState(user, deck.id);
+    },
+
+    async getDeckAiSettings(user, deckId) {
+      const state = await loadState();
+      ensureCollections(state);
+      const { deck } = getMembership(state, user.id, deckId);
+      return normalizeAiSettings(deck.aiSettings);
+    },
+
+    async updateDeckAiSettings(user, deckId, patch) {
+      const state = await loadState();
+      ensureCollections(state);
+      const { deck } = requireRole(state, user.id, deckId, 'owner');
+      deck.aiSettings = normalizeAiSettings({
+        ...deck.aiSettings,
+        ...Object.fromEntries(
+          Object.entries(patch).filter(([, value]) => typeof value === 'boolean')
+        ),
+        updatedAt: nowIso(),
+        updatedBy: user.id
+      });
+      await saveState(state);
+      return deck.aiSettings;
+    },
+
+    async listAiArtifacts(user, deckId, filters = {}) {
+      const state = await loadState();
+      ensureCollections(state);
+      getMembership(state, user.id, deckId);
+      return state.aiArtifacts
+        .filter((artifact) => artifact.deckId === deckId)
+        .filter((artifact) => !filters.status || artifact.status === filters.status)
+        .filter((artifact) => !filters.kind || artifact.kind === filters.kind)
+        .filter((artifact) => !filters.subjectType || artifact.subjectType === filters.subjectType)
+        .filter((artifact) => !filters.subjectId || artifact.subjectId === filters.subjectId)
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .map(toAiArtifact);
+    },
+
+    async createAiArtifact(user, deckId, artifact) {
+      const state = await loadState();
+      ensureCollections(state);
+      requireRole(state, user.id, deckId, 'owner');
+      const now = nowIso();
+      const saved = {
+        id: artifact.id || `ai-${randomUUID()}`,
+        deckId,
+        subjectType: artifact.subjectType,
+        subjectId: artifact.subjectId,
+        kind: artifact.kind,
+        severity: artifact.severity || 'info',
+        status: artifact.status || 'active',
+        confidence: artifact.confidence ?? 0,
+        model: artifact.model,
+        promptVersion: artifact.promptVersion,
+        inputHash: artifact.inputHash,
+        payload: artifact.payload || {},
+        createdAt: artifact.createdAt || now,
+        decidedAt: artifact.decidedAt || null,
+        decidedBy: artifact.decidedBy || null
+      };
+      state.aiArtifacts.unshift(saved);
+      await saveState(state);
+      return toAiArtifact(saved);
+    },
+
+    async updateAiArtifact(user, deckId, artifactId, patch) {
+      const state = await loadState();
+      ensureCollections(state);
+      requireRole(state, user.id, deckId, 'owner');
+      const artifact = state.aiArtifacts.find((item) => item.id === artifactId && item.deckId === deckId);
+      if (!artifact) fail(404, 'ai_artifact_not_found', 'AI artifact not found');
+      if (patch.status) {
+        if (!AI_ARTIFACT_STATUSES.has(patch.status)) fail(400, 'invalid_ai_artifact_status', 'Invalid AI artifact status');
+        artifact.status = patch.status;
+        artifact.decidedAt = nowIso();
+        artifact.decidedBy = user.id;
+      }
+      if (patch.payload && typeof patch.payload === 'object') artifact.payload = patch.payload;
+      await saveState(state);
+      return toAiArtifact(artifact);
+    },
+
+    async dismissAiArtifact(user, deckId, artifactId) {
+      return this.updateAiArtifact(user, deckId, artifactId, { status: 'dismissed' });
+    },
+
+    async markAiArtifactsStale(user, deckId, filters = {}) {
+      const state = await loadState();
+      ensureCollections(state);
+      requireRole(state, user.id, deckId, 'owner');
+      const decidedAt = nowIso();
+      let stale = 0;
+      for (const artifact of state.aiArtifacts) {
+        if (artifact.deckId !== deckId || artifact.status !== 'active') continue;
+        if (filters.subjectType && artifact.subjectType !== filters.subjectType) continue;
+        if (filters.subjectId && artifact.subjectId !== filters.subjectId) continue;
+        if (filters.kind && artifact.kind !== filters.kind) continue;
+        artifact.status = 'stale';
+        artifact.decidedAt = decidedAt;
+        artifact.decidedBy = user.id;
+        stale += 1;
+      }
+      await saveState(state);
+      return { stale };
+    },
+
+    async upsertCardEmbedding(user, deckId, embedding) {
+      const state = await loadState();
+      ensureCollections(state);
+      requireRole(state, user.id, deckId, 'owner');
+      const now = nowIso();
+      const existing = state.cardEmbeddings.find((item) => item.deckId === deckId && item.cardId === embedding.cardId);
+      const saved = {
+        cardId: embedding.cardId,
+        deckId,
+        model: embedding.model,
+        dimensions: embedding.dimensions,
+        inputHash: embedding.inputHash,
+        embedding: Array.isArray(embedding.embedding) ? embedding.embedding : [],
+        status: embedding.status || 'active',
+        metadata: embedding.metadata || {},
+        createdAt: existing?.createdAt || now,
+        updatedAt: now
+      };
+      if (existing) Object.assign(existing, saved);
+      else state.cardEmbeddings.unshift(saved);
+      await saveState(state);
+      return toCardEmbedding(saved);
+    },
+
+    async listCardEmbeddings(user, deckId, filters = {}) {
+      const state = await loadState();
+      ensureCollections(state);
+      getMembership(state, user.id, deckId);
+      return state.cardEmbeddings
+        .filter((embedding) => embedding.deckId === deckId)
+        .filter((embedding) => !filters.status || embedding.status === filters.status)
+        .filter((embedding) => !filters.cardId || embedding.cardId === filters.cardId)
+        .map(toCardEmbedding);
+    },
+
+    async markCardEmbeddingsStale(user, deckId, cardIds = []) {
+      const state = await loadState();
+      ensureCollections(state);
+      requireRole(state, user.id, deckId, 'owner');
+      const idSet = new Set((Array.isArray(cardIds) ? cardIds : [cardIds]).filter(Boolean).map(String));
+      const stale = markEmbeddingsStaleInState(state, deckId, [...idSet]);
+      await saveState(state);
+      return { stale };
+    },
+
+    async upsertAiDuplicateLink(user, deckId, link) {
+      const state = await loadState();
+      ensureCollections(state);
+      requireRole(state, user.id, deckId, 'owner');
+      const now = nowIso();
+      const existing = state.aiDuplicateLinks.find((item) => (
+        item.deckId === deckId
+        && item.sourceCardId === link.sourceCardId
+        && item.targetCardId === link.targetCardId
+      ));
+      const saved = {
+        id: existing?.id || link.id || `dup-${randomUUID()}`,
+        deckId,
+        sourceCardId: link.sourceCardId,
+        targetCardId: link.targetCardId,
+        artifactId: link.artifactId || existing?.artifactId || null,
+        score: link.score,
+        relationship: link.relationship,
+        rationale: link.rationale || '',
+        comparedFields: Array.isArray(link.comparedFields) ? link.comparedFields : [],
+        status: link.status || 'active',
+        createdAt: existing?.createdAt || now,
+        updatedAt: now
+      };
+      if (existing) Object.assign(existing, saved);
+      else state.aiDuplicateLinks.unshift(saved);
+      await saveState(state);
+      return toAiDuplicateLink(saved);
+    },
+
+    async listAiDuplicateLinks(user, deckId, filters = {}) {
+      const state = await loadState();
+      ensureCollections(state);
+      getMembership(state, user.id, deckId);
+      const limit = Math.min(Math.max(Number(filters.limit) || 25, 1), 100);
+      return state.aiDuplicateLinks
+        .filter((link) => link.deckId === deckId)
+        .filter((link) => !filters.status || link.status === filters.status)
+        .filter((link) => !filters.cardId || link.sourceCardId === filters.cardId || link.targetCardId === filters.cardId)
+        .sort((a, b) => Number(b.score) - Number(a.score))
+        .slice(0, limit)
+        .map(toAiDuplicateLink);
     },
 
     async createSuggestion(user, payload) {
@@ -220,6 +514,7 @@ export function createLocalRepository() {
         card.modifiedAt = now;
         card.modifiedBy = user.name;
       }
+      markEmbeddingsStaleInState(state, deckId, matched.map((card) => card.id));
       state.activity.unshift({
         id: `act-${randomUUID()}`,
         kind: 'template',
@@ -239,6 +534,7 @@ export function createLocalRepository() {
       const { deck } = requireRole(state, user.id, suggestion.deckId, 'reviewer');
       if (decision === 'accepted') {
         applySuggestion(deck, suggestion, user.name);
+        markEmbeddingsStaleInState(state, deck.id, [suggestion.cardId]);
         const collaborator = state.collaborators.find((item) => item.id === suggestion.authorId);
         if (collaborator) collaborator.accepted += 1;
       }
@@ -268,6 +564,7 @@ export function createLocalRepository() {
       for (const suggestion of selected) {
         if (decision === 'accepted') {
           applySuggestion(deck, suggestion, user.name);
+          markEmbeddingsStaleInState(state, deck.id, [suggestion.cardId]);
           const collaborator = state.collaborators.find((item) => item.id === suggestion.authorId);
           if (collaborator) collaborator.accepted += 1;
         }
@@ -413,6 +710,10 @@ export function createLocalRepository() {
         ? result.conflicts
         : mergeConflicts(state.sync.conflicts, result.conflicts);
       if (!syncInput.dryRun) {
+        markEmbeddingsStaleInState(state, deck.id, [
+          ...result.createdCards.map((card) => card.id),
+          ...result.updatedCards.map((card) => card.id)
+        ]);
         state.sync.lastPullAt = syncInput.conflictPolicy === 'overwrite-platform' ? result.syncedAt : state.sync.lastPullAt;
         state.sync.lastPushAt = result.syncedAt;
         if (isFinalBatchChunk) {

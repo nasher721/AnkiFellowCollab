@@ -17,6 +17,28 @@ export function roleMeetsMinimum(role, minimumRole = 'viewer') {
   return roleRank[role] >= roleRank[minimumRole];
 }
 
+const DEFAULT_AI_SETTINGS = Object.freeze({
+  reviewBriefs: false,
+  embeddings: false,
+  conflictSummaries: false,
+  diagnostics: false,
+  qualityPulse: false
+});
+
+const AI_ARTIFACT_STATUSES = new Set(['active', 'dismissed', 'accepted', 'rejected', 'stale']);
+
+function normalizeAiSettings(settings = {}) {
+  return {
+    reviewBriefs: Boolean(settings.reviewBriefs),
+    embeddings: Boolean(settings.embeddings),
+    conflictSummaries: Boolean(settings.conflictSummaries),
+    diagnostics: Boolean(settings.diagnostics),
+    qualityPulse: Boolean(settings.qualityPulse),
+    updatedAt: settings.updatedAt || null,
+    updatedBy: settings.updatedBy || null
+  };
+}
+
 function addonImportSyncResult(deck) {
   if (deck.source?.format !== 'anki-addon') return null;
   const syncedAt = deck.lastSyncedAt || deck.importedAt || nowIso();
@@ -57,7 +79,8 @@ function toDeck(row, cards = []) {
     cards,
     media: row.media || {},
     source: row.source || { filename: 'unknown.apkg', format: 'apkg' },
-    models: row.models || []
+    models: row.models || [],
+    aiSettings: normalizeAiSettings(row.ai_settings)
   };
 }
 
@@ -155,6 +178,58 @@ function toShareLink(row) {
     disabledAt: row.disabled_at,
     createdBy: row.created_by,
     createdAt: row.created_at
+  };
+}
+
+function toAiArtifact(row) {
+  return {
+    id: row.id,
+    deckId: row.deck_id,
+    subjectType: row.subject_type,
+    subjectId: row.subject_id,
+    kind: row.kind,
+    severity: row.severity,
+    status: row.status,
+    confidence: row.confidence,
+    model: row.model,
+    promptVersion: row.prompt_version,
+    inputHash: row.input_hash,
+    payload: row.payload || {},
+    createdAt: row.created_at,
+    decidedAt: row.decided_at || null,
+    decidedBy: row.decided_by || null
+  };
+}
+
+function toCardEmbedding(row) {
+  return {
+    cardId: row.card_id,
+    deckId: row.deck_id,
+    model: row.model,
+    dimensions: row.dimensions,
+    inputHash: row.input_hash,
+    embedding: Array.isArray(row.embedding) ? row.embedding : [],
+    status: row.status || 'active',
+    metadata: row.metadata || {},
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function toAiDuplicateLink(row) {
+  return {
+    id: row.id,
+    deckId: row.deck_id,
+    sourceCardId: row.source_card_id,
+    targetCardId: row.target_card_id,
+    artifactId: row.artifact_id || null,
+    score: row.score,
+    relationship: row.relationship,
+    rationale: row.rationale || '',
+    comparedFields: row.compared_fields || [],
+    status: row.status || 'active',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 
@@ -332,7 +407,8 @@ export function createSupabaseRepository(options = {}) {
         last_sync_result: addonImportSyncResult(deck),
         media: deck.media || {},
         source: deck.source || {},
-        models: deck.models || []
+        models: deck.models || [],
+        ai_settings: normalizeAiSettings()
       });
       if (deckError) throw deckError;
       const { error: memberError } = await supabase.from('deck_members').insert({
@@ -380,6 +456,235 @@ export function createSupabaseRepository(options = {}) {
         created_at: importedAt
       });
       return getDeckRows(user, deck.id);
+    },
+
+    async getDeckAiSettings(user, deckId) {
+      await assertMembership(user.id, deckId);
+      const { data, error } = await supabase.from('decks').select('ai_settings').eq('id', deckId).single();
+      if (error || !data) fail(404, 'deck_not_found', 'Deck not found');
+      return normalizeAiSettings(data.ai_settings);
+    },
+
+    async updateDeckAiSettings(user, deckId, patch) {
+      await assertMembership(user.id, deckId, 'owner');
+      const { data: existing, error: existingError } = await supabase.from('decks').select('ai_settings').eq('id', deckId).single();
+      if (existingError || !existing) fail(404, 'deck_not_found', 'Deck not found');
+      const settings = normalizeAiSettings({
+        ...normalizeAiSettings(existing.ai_settings),
+        ...Object.fromEntries(
+          Object.entries(patch).filter(([, value]) => typeof value === 'boolean')
+        ),
+        updatedAt: nowIso(),
+        updatedBy: user.id
+      });
+      const { data, error } = await supabase
+        .from('decks')
+        .update({ ai_settings: settings })
+        .eq('id', deckId)
+        .select('ai_settings')
+        .single();
+      if (error) throw error;
+      return normalizeAiSettings(data?.ai_settings || settings);
+    },
+
+    async listAiArtifacts(user, deckId, filters = {}) {
+      await assertMembership(user.id, deckId);
+      let query = supabase.from('ai_artifacts')
+        .select('*')
+        .eq('deck_id', deckId)
+        .order('created_at', { ascending: false });
+      if (filters.status) query = query.eq('status', filters.status);
+      if (filters.kind) query = query.eq('kind', filters.kind);
+      if (filters.subjectType) query = query.eq('subject_type', filters.subjectType);
+      if (filters.subjectId) query = query.eq('subject_id', filters.subjectId);
+      const { data, error } = await query;
+      if (error) throw error;
+      return (data || []).map(toAiArtifact);
+    },
+
+    async createAiArtifact(user, deckId, artifact) {
+      await assertMembership(user.id, deckId, 'owner');
+      const row = {
+        id: artifact.id || `ai-${randomUUID()}`,
+        deck_id: deckId,
+        subject_type: artifact.subjectType,
+        subject_id: artifact.subjectId,
+        kind: artifact.kind,
+        severity: artifact.severity || 'info',
+        status: artifact.status || 'active',
+        confidence: artifact.confidence ?? 0,
+        model: artifact.model,
+        prompt_version: artifact.promptVersion,
+        input_hash: artifact.inputHash,
+        payload: artifact.payload || {},
+        created_at: artifact.createdAt || nowIso(),
+        decided_at: artifact.decidedAt || null,
+        decided_by: artifact.decidedBy || null
+      };
+      const { data, error } = await supabase.from('ai_artifacts').insert(row).select('*').single();
+      if (error) throw error;
+      return toAiArtifact(data || row);
+    },
+
+    async updateAiArtifact(user, deckId, artifactId, patch) {
+      await assertMembership(user.id, deckId, 'owner');
+      const updates = { updated_at: nowIso() };
+      if (patch.status) {
+        if (!AI_ARTIFACT_STATUSES.has(patch.status)) fail(400, 'invalid_ai_artifact_status', 'Invalid AI artifact status');
+        updates.status = patch.status;
+        updates.decided_at = nowIso();
+        updates.decided_by = user.id;
+      }
+      if (patch.payload && typeof patch.payload === 'object') updates.payload = patch.payload;
+      const { data, error } = await supabase
+        .from('ai_artifacts')
+        .update(updates)
+        .eq('id', artifactId)
+        .eq('deck_id', deckId)
+        .select('*')
+        .single();
+      if (error || !data) fail(404, 'ai_artifact_not_found', 'AI artifact not found');
+      return toAiArtifact(data);
+    },
+
+    async dismissAiArtifact(user, deckId, artifactId) {
+      return this.updateAiArtifact(user, deckId, artifactId, { status: 'dismissed' });
+    },
+
+    async markAiArtifactsStale(user, deckId, filters = {}) {
+      await assertMembership(user.id, deckId, 'owner');
+      const updates = {
+        status: 'stale',
+        updated_at: nowIso(),
+        decided_at: nowIso(),
+        decided_by: user.id
+      };
+      let query = supabase.from('ai_artifacts')
+        .update(updates)
+        .eq('deck_id', deckId)
+        .eq('status', 'active');
+      if (filters.subjectType) query = query.eq('subject_type', filters.subjectType);
+      if (filters.subjectId) query = query.eq('subject_id', filters.subjectId);
+      if (filters.kind) query = query.eq('kind', filters.kind);
+      const { data, error } = await query.select('id');
+      if (error) throw error;
+      return { stale: data?.length || 0 };
+    },
+
+    async upsertCardEmbedding(user, deckId, embedding) {
+      await assertMembership(user.id, deckId, 'owner');
+      const row = {
+        card_id: embedding.cardId,
+        deck_id: deckId,
+        model: embedding.model,
+        dimensions: embedding.dimensions,
+        input_hash: embedding.inputHash,
+        embedding: Array.isArray(embedding.embedding) ? embedding.embedding : [],
+        status: embedding.status || 'active',
+        metadata: embedding.metadata || {},
+        updated_at: nowIso()
+      };
+      const { data, error } = await supabase
+        .from('card_embeddings')
+        .upsert(row, { onConflict: 'card_id' })
+        .select('*')
+        .single();
+      if (error) throw error;
+      return toCardEmbedding(data || row);
+    },
+
+    async listCardEmbeddings(user, deckId, filters = {}) {
+      await assertMembership(user.id, deckId);
+      let query = supabase.from('card_embeddings').select('*').eq('deck_id', deckId);
+      if (filters.status) query = query.eq('status', filters.status);
+      if (filters.cardId) query = query.eq('card_id', filters.cardId);
+      const { data, error } = await query;
+      if (error) throw error;
+      return (data || []).map(toCardEmbedding);
+    },
+
+    async markCardEmbeddingsStale(user, deckId, cardIds = []) {
+      await assertMembership(user.id, deckId, 'owner');
+      const ids = (Array.isArray(cardIds) ? cardIds : [cardIds]).filter(Boolean).map(String);
+      const now = nowIso();
+      let embeddingQuery = supabase.from('card_embeddings')
+        .update({ status: 'stale', updated_at: now })
+        .eq('deck_id', deckId)
+        .eq('status', 'active');
+      if (ids.length) embeddingQuery = embeddingQuery.in('card_id', ids);
+      const { data, error } = await embeddingQuery.select('card_id');
+      if (error) throw error;
+
+      if (ids.length) {
+        const { error: sourceLinkError } = await supabase.from('ai_duplicate_links')
+          .update({ status: 'stale', updated_at: now })
+          .eq('deck_id', deckId)
+          .eq('status', 'active')
+          .in('source_card_id', ids);
+        if (sourceLinkError) throw sourceLinkError;
+        const { error: targetLinkError } = await supabase.from('ai_duplicate_links')
+          .update({ status: 'stale', updated_at: now })
+          .eq('deck_id', deckId)
+          .eq('status', 'active')
+          .in('target_card_id', ids);
+        if (targetLinkError) throw targetLinkError;
+      } else {
+        const { error: linkError } = await supabase.from('ai_duplicate_links')
+          .update({ status: 'stale', updated_at: now })
+          .eq('deck_id', deckId)
+          .eq('status', 'active');
+        if (linkError) throw linkError;
+      }
+      return { stale: data?.length || 0 };
+    },
+
+    async upsertAiDuplicateLink(user, deckId, link) {
+      await assertMembership(user.id, deckId, 'owner');
+      const id = link.id || `dup-${randomUUID()}`;
+      const row = {
+        id,
+        deck_id: deckId,
+        source_card_id: link.sourceCardId,
+        target_card_id: link.targetCardId,
+        artifact_id: link.artifactId || null,
+        score: link.score,
+        relationship: link.relationship,
+        rationale: link.rationale || '',
+        compared_fields: Array.isArray(link.comparedFields) ? link.comparedFields : [],
+        status: link.status || 'active',
+        updated_at: nowIso()
+      };
+      const { data: existing, error: existingError } = await supabase
+        .from('ai_duplicate_links')
+        .select('id')
+        .eq('deck_id', deckId)
+        .eq('source_card_id', link.sourceCardId)
+        .eq('target_card_id', link.targetCardId)
+        .maybeSingle();
+      if (existingError) throw existingError;
+      const query = existing?.id
+        ? supabase.from('ai_duplicate_links').update({ ...row, id: existing.id }).eq('id', existing.id)
+        : supabase.from('ai_duplicate_links').insert(row);
+      const { data, error } = await query.select('*').single();
+      if (error) throw error;
+      return toAiDuplicateLink(data || row);
+    },
+
+    async listAiDuplicateLinks(user, deckId, filters = {}) {
+      await assertMembership(user.id, deckId);
+      const limit = Math.min(Math.max(Number(filters.limit) || 25, 1), 100);
+      let query = supabase.from('ai_duplicate_links')
+        .select('*')
+        .eq('deck_id', deckId)
+        .order('score', { ascending: false })
+        .limit(limit);
+      if (filters.status) query = query.eq('status', filters.status);
+      if (filters.cardId) {
+        query = query.or(`source_card_id.eq.${filters.cardId},target_card_id.eq.${filters.cardId}`);
+      }
+      const { data, error } = await query;
+      if (error) throw error;
+      return (data || []).map(toAiDuplicateLink);
     },
 
     async createSuggestion(user, payload) {
@@ -430,6 +735,7 @@ export function createSupabaseRepository(options = {}) {
         modified_by: user.name
       }).eq('deck_id', deckId).eq('model_name', modelName);
       if (error) throw error;
+      await this.markCardEmbeddingsStale(user, deckId, (rows || []).map((row) => row.id));
       await supabase.from('activity').insert({
         id: `act-${randomUUID()}`,
         deck_id: deckId,
@@ -457,6 +763,7 @@ export function createSupabaseRepository(options = {}) {
           modified_by: nextCard.modifiedBy
         }).eq('id', suggestion.card_id);
         if (updateCardError) throw updateCardError;
+        await this.markCardEmbeddingsStale(user, suggestion.deck_id, [suggestion.card_id]);
       }
       const reviewedAt = nowIso();
       const { error: updateError } = await supabase.from('suggestions').update({
@@ -479,6 +786,16 @@ export function createSupabaseRepository(options = {}) {
     async bulkDecideSuggestions(user, deckId, suggestionIds, decision) {
       if (new Set(suggestionIds).size !== suggestionIds.length) fail(400, 'duplicate_suggestion_ids', 'suggestionIds must be unique');
       const reviewedAt = nowIso();
+      let acceptedCardIds = [];
+      if (decision === 'accepted') {
+        const { data: acceptedRows, error: acceptedRowsError } = await supabase
+          .from('suggestions')
+          .select('card_id')
+          .eq('deck_id', deckId)
+          .in('id', suggestionIds);
+        if (acceptedRowsError) throw acceptedRowsError;
+        acceptedCardIds = (acceptedRows || []).map((row) => row.card_id).filter(Boolean);
+      }
       const { error } = await supabase.rpc('bulk_decide_suggestions', {
         p_deck_id: deckId,
         p_suggestion_ids: suggestionIds,
@@ -489,6 +806,7 @@ export function createSupabaseRepository(options = {}) {
         p_reviewed_at: reviewedAt
       });
       if (error) throw error;
+      if (acceptedCardIds.length) await this.markCardEmbeddingsStale(user, deckId, acceptedCardIds);
       return getDeckRows(user, deckId);
     },
 
@@ -846,6 +1164,10 @@ export function createSupabaseRepository(options = {}) {
           }).eq('id', card.id).eq('deck_id', deck.id);
           if (error) throw error;
         }
+        await this.markCardEmbeddingsStale(user, deck.id, [
+          ...result.createdCards.map((card) => card.id),
+          ...result.updatedCards.map((card) => card.id)
+        ]);
         if (isFirstBatchChunk) {
           await supabase.from('sync_conflicts').delete().eq('deck_id', deck.id);
         }

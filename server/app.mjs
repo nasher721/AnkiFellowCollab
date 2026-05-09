@@ -7,10 +7,12 @@ import path from 'node:path';
 import { createClient } from '@supabase/supabase-js';
 import { createAuth } from './auth.mjs';
 import { requireContributor, requireEditor, requireOwner, requireReviewer, resolveSuggestionDeck } from './rbac.mjs';
-import { cleanText, deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeMediaUploadFiles, normalizeParsedDeck, normalizeSuggestionInput, safeMediaMimeType, tagList } from './domain.mjs';
+import { canonicalCardInputHash, canonicalCardText, cleanText, deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeMediaUploadFiles, normalizeParsedDeck, normalizeSuggestionInput, nowIso, safeMediaMimeType, tagList } from './domain.mjs';
 import { AppError, errorPayload, fail } from './errors.mjs';
 import { checkAnki, pullDeck, pushDeck } from './ankiConnect.mjs';
 import { createApkg, parseApkg } from './ankiPackage.mjs';
+import { createAiGateway } from './aiGateway.mjs';
+import { generateConflictSummary, generateSetupDiagnostic, generateSuggestionReviewBrief } from './aiOwnerAssist.mjs';
 import { createRepository } from './repositories/index.mjs';
 import { createRateLimiters } from './rateLimits.mjs';
 import { ensureDataDirs, loadState, paths, saveState } from './store.mjs';
@@ -97,6 +99,290 @@ function parseNotificationCursor(value) {
     // fall through to a typed API error below
   }
   fail(400, 'invalid_cursor', 'Invalid notification cursor');
+}
+
+const AI_SETTING_KEYS = ['reviewBriefs', 'embeddings', 'conflictSummaries', 'diagnostics', 'qualityPulse'];
+const AI_SUBJECT_TYPES = new Set(['suggestion', 'card', 'conflict', 'setup-error', 'study-hint', 'digest']);
+const AI_ARTIFACT_KINDS = new Set(['review-brief', 'duplicate-link', 'conflict-summary', 'quality-issue', 'diagnostic', 'hint', 'digest']);
+const AI_ARTIFACT_SEVERITIES = new Set(['info', 'low', 'medium', 'high']);
+const AI_ARTIFACT_STATUSES = new Set(['active', 'dismissed', 'accepted', 'rejected', 'stale']);
+const AI_DUPLICATE_RELATIONSHIPS = new Set(['duplicate', 'near-duplicate', 'related']);
+const DEFAULT_DUPLICATE_MIN_SCORE = 0.78;
+const DEFAULT_DUPLICATE_LIMIT = 10;
+const PULSE_STALENESS_DAYS = {
+  fresh: 3,
+  aging: 14
+};
+
+function normalizeAiSettingsBody(body = {}) {
+  const settings = {};
+  for (const key of AI_SETTING_KEYS) {
+    if (body[key] !== undefined) settings[key] = body[key] === true;
+  }
+  return settings;
+}
+
+function normalizeAiArtifactBody(body = {}) {
+  const subjectType = cleanShortText(body.subjectType, '', 40);
+  const kind = cleanShortText(body.kind, '', 40);
+  const severity = cleanShortText(body.severity, 'info', 20);
+  const status = cleanShortText(body.status, 'active', 20);
+  if (!AI_SUBJECT_TYPES.has(subjectType)) fail(400, 'invalid_ai_subject_type', 'Invalid AI artifact subjectType');
+  if (!AI_ARTIFACT_KINDS.has(kind)) fail(400, 'invalid_ai_artifact_kind', 'Invalid AI artifact kind');
+  if (!AI_ARTIFACT_SEVERITIES.has(severity)) fail(400, 'invalid_ai_artifact_severity', 'Invalid AI artifact severity');
+  if (!AI_ARTIFACT_STATUSES.has(status)) fail(400, 'invalid_ai_artifact_status', 'Invalid AI artifact status');
+  const subjectId = cleanShortText(body.subjectId, '', 200);
+  const model = cleanShortText(body.model, '', 200);
+  const promptVersion = cleanShortText(body.promptVersion, '', 120);
+  const inputHash = cleanShortText(body.inputHash, '', 128);
+  if (!subjectId) fail(400, 'missing_ai_subject_id', 'AI artifact subjectId is required');
+  if (!model) fail(400, 'missing_ai_model', 'AI artifact model is required');
+  if (!promptVersion) fail(400, 'missing_ai_prompt_version', 'AI artifact promptVersion is required');
+  if (!inputHash) fail(400, 'missing_ai_input_hash', 'AI artifact inputHash is required');
+  const confidence = Number(body.confidence);
+  return {
+    subjectType,
+    subjectId,
+    kind,
+    severity,
+    status,
+    confidence: Number.isFinite(confidence) ? Math.min(Math.max(confidence, 0), 1) : 0,
+    model,
+    promptVersion,
+    inputHash,
+    payload: body.payload && typeof body.payload === 'object' && !Array.isArray(body.payload) ? body.payload : {}
+  };
+}
+
+function normalizeAiArtifactFilters(source = {}) {
+  const filters = {};
+  for (const key of ['status', 'kind', 'subjectType', 'subjectId']) {
+    if (source[key] !== undefined && source[key] !== '') filters[key] = cleanShortText(source[key], '', 200);
+  }
+  if (filters.status && !AI_ARTIFACT_STATUSES.has(filters.status)) fail(400, 'invalid_ai_artifact_status', 'Invalid AI artifact status');
+  if (filters.kind && !AI_ARTIFACT_KINDS.has(filters.kind)) fail(400, 'invalid_ai_artifact_kind', 'Invalid AI artifact kind');
+  if (filters.subjectType && !AI_SUBJECT_TYPES.has(filters.subjectType)) fail(400, 'invalid_ai_subject_type', 'Invalid AI artifact subjectType');
+  return filters;
+}
+
+function pulseStaleness(createdAt) {
+  const created = Date.parse(createdAt || '');
+  if (!Number.isFinite(created)) return 'unknown';
+  const ageDays = Math.max(0, Math.floor((Date.now() - created) / 86400000));
+  if (ageDays <= PULSE_STALENESS_DAYS.fresh) return 'fresh';
+  if (ageDays <= PULSE_STALENESS_DAYS.aging) return 'aging';
+  return 'old';
+}
+
+function incrementGroup(group, key) {
+  group[key] = (group[key] || 0) + 1;
+}
+
+function pulseActionForArtifact(artifact) {
+  if (artifact.subjectType === 'suggestion' || artifact.kind === 'review-brief') return 'suggestion';
+  if (artifact.subjectType === 'conflict' || artifact.kind === 'conflict-summary') return 'conflict';
+  if (artifact.subjectType === 'setup-error' || artifact.kind === 'diagnostic') return 'setup';
+  if (artifact.subjectType === 'card' || artifact.kind === 'duplicate-link' || artifact.kind === 'quality-issue') return 'card';
+  return 'artifact';
+}
+
+function artifactPulseLabel(artifact) {
+  if (artifact.kind === 'review-brief') return `Suggestion brief: ${artifact.payload?.category || artifact.subjectId}`;
+  if (artifact.kind === 'duplicate-link') return `Duplicate risk: ${artifact.payload?.relationship || artifact.subjectId}`;
+  if (artifact.kind === 'conflict-summary') return `Conflict summary: ${artifact.payload?.risk || artifact.severity} risk`;
+  if (artifact.kind === 'diagnostic') return `Setup diagnostic: ${artifact.payload?.citedError?.code || artifact.subjectId}`;
+  if (artifact.kind === 'quality-issue') return `Quality issue: ${artifact.subjectId}`;
+  return `${artifact.kind}: ${artifact.subjectId}`;
+}
+
+function artifactPulseDetail(artifact) {
+  const payload = artifact.payload || {};
+  return cleanShortText(
+    payload.rationale || payload.summary || payload.recommendedAction || payload.rationaleText || '',
+    `${artifact.subjectType} artifact from ${artifact.model}`,
+    180
+  );
+}
+
+function buildAiQualityPulse(settings, artifacts) {
+  if (!settings?.qualityPulse) {
+    return {
+      enabled: false,
+      status: 'disabled',
+      generatedAt: nowIso(),
+      totalActive: 0,
+      summary: { bySeverity: {}, bySubjectType: {}, byStaleness: {} },
+      groups: { severity: [], subjectType: [], staleness: [] },
+      items: []
+    };
+  }
+
+  const activeArtifacts = (artifacts || []).filter((artifact) => artifact.status === 'active');
+  const summary = { bySeverity: {}, bySubjectType: {}, byStaleness: {} };
+  for (const artifact of activeArtifacts) {
+    incrementGroup(summary.bySeverity, artifact.severity || 'info');
+    incrementGroup(summary.bySubjectType, artifact.subjectType || 'unknown');
+    incrementGroup(summary.byStaleness, pulseStaleness(artifact.createdAt));
+  }
+  const grouped = (source, order) => order
+    .filter((key) => source[key])
+    .map((key) => ({ key, count: source[key] }));
+  const severityRank = { high: 0, medium: 1, low: 2, info: 3 };
+  const items = activeArtifacts
+    .map((artifact) => ({
+      artifactId: artifact.id,
+      subjectType: artifact.subjectType,
+      subjectId: artifact.subjectId,
+      kind: artifact.kind,
+      severity: artifact.severity,
+      staleness: pulseStaleness(artifact.createdAt),
+      action: pulseActionForArtifact(artifact),
+      label: artifactPulseLabel(artifact),
+      detail: artifactPulseDetail(artifact),
+      createdAt: artifact.createdAt
+    }))
+    .sort((a, b) => (severityRank[a.severity] ?? 4) - (severityRank[b.severity] ?? 4)
+      || String(a.createdAt).localeCompare(String(b.createdAt)) * -1)
+    .slice(0, 5);
+
+  return {
+    enabled: true,
+    status: activeArtifacts.length ? 'attention' : 'healthy',
+    generatedAt: nowIso(),
+    totalActive: activeArtifacts.length,
+    summary,
+    groups: {
+      severity: grouped(summary.bySeverity, ['high', 'medium', 'low', 'info']),
+      subjectType: grouped(summary.bySubjectType, ['suggestion', 'conflict', 'setup-error', 'card', 'study-hint', 'digest']),
+      staleness: grouped(summary.byStaleness, ['fresh', 'aging', 'old', 'unknown'])
+    },
+    items
+  };
+}
+
+function isRecoverableAiError(error) {
+  return typeof error?.code === 'string' && error.code.startsWith('ai_');
+}
+
+function normalizeVector(value) {
+  return (Array.isArray(value) ? value : [])
+    .map(Number)
+    .filter((item) => Number.isFinite(item));
+}
+
+function cosineSimilarity(left, right) {
+  const a = normalizeVector(left);
+  const b = normalizeVector(right);
+  const length = Math.min(a.length, b.length);
+  if (!length) return 0;
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let index = 0; index < length; index += 1) {
+    dot += a[index] * b[index];
+    leftNorm += a[index] ** 2;
+    rightNorm += b[index] ** 2;
+  }
+  if (!leftNorm || !rightNorm) return 0;
+  return Math.max(0, Math.min(1, dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm))));
+}
+
+function relationshipForScore(score) {
+  if (score >= 0.94) return 'duplicate';
+  if (score >= 0.86) return 'near-duplicate';
+  return 'related';
+}
+
+function duplicateRationale(sourceCard, targetCard, score, relationship) {
+  const sourceFront = cleanText(sourceCard?.fields?.Front || Object.values(sourceCard?.fields || {})[0], sourceCard?.id, 180);
+  const targetFront = cleanText(targetCard?.fields?.Front || Object.values(targetCard?.fields || {})[0], targetCard?.id, 180);
+  return `${relationship.replace('-', ' ')} candidate (${Math.round(score * 100)}% cosine similarity): "${sourceFront}" compared with "${targetFront}".`;
+}
+
+function comparedFieldsForCards(sourceCard, targetCard) {
+  const sourceFields = sourceCard?.fields && typeof sourceCard.fields === 'object' ? Object.keys(sourceCard.fields) : [];
+  const targetFields = targetCard?.fields && typeof targetCard.fields === 'object' ? Object.keys(targetCard.fields) : [];
+  return Array.from(new Set([...sourceFields, ...targetFields])).slice(0, 20);
+}
+
+function disabledAiEmbeddingResult() {
+  return {
+    status: 'disabled',
+    code: 'ai_embeddings_disabled',
+    message: 'AI semantic duplicate indexing is disabled for this deck.',
+    embedding: null,
+    links: []
+  };
+}
+
+function embeddingUnavailableResult(error) {
+  return {
+    status: error?.code === 'ai_validation_failed' || error?.code === 'ai_malformed_json' ? 'invalid' : 'unavailable',
+    code: error?.code || 'ai_embedding_unavailable',
+    message: error?.message || 'AI embeddings are unavailable.',
+    embedding: null,
+    links: []
+  };
+}
+
+function disabledConflictSummaryResult() {
+  return {
+    status: 'disabled',
+    code: 'ai_conflict_summaries_disabled',
+    message: 'AI conflict summaries are disabled for this deck.',
+    artifact: null
+  };
+}
+
+function disabledDiagnosticResult() {
+  return {
+    status: 'disabled',
+    code: 'ai_diagnostics_disabled',
+    message: 'AI setup diagnostics are disabled for this deck.',
+    artifact: null
+  };
+}
+
+function aiArtifactUnavailableResult(error, fallbackCode, fallbackMessage) {
+  return {
+    status: error?.code === 'ai_validation_failed' || error?.code === 'ai_malformed_json' ? 'invalid' : 'unavailable',
+    code: error?.code || fallbackCode,
+    message: error?.message || fallbackMessage,
+    artifact: null
+  };
+}
+
+function normalizeStructuredSetupError(body = {}) {
+  const source = body.error && typeof body.error === 'object' && !Array.isArray(body.error) ? body.error : body;
+  const code = cleanShortText(source.code, '', 120);
+  const pathValue = cleanShortText(source.path || source.url || source.endpoint, '', 240);
+  const message = cleanShortText(source.message, '', 1000);
+  if (!code || !pathValue || !message) {
+    fail(400, 'invalid_setup_error_payload', 'Diagnostic generation requires structured error code, path, and message');
+  }
+  const status = Number(source.status);
+  const details = source.details && typeof source.details === 'object' && !Array.isArray(source.details) ? source.details : {};
+  return {
+    code,
+    path: pathValue,
+    message,
+    status: Number.isFinite(status) ? status : null,
+    method: cleanShortText(source.method, '', 20) || null,
+    source: cleanShortText(source.source || body.source, 'setup-wizard', 120),
+    details
+  };
+}
+
+function parseDuplicateQuery(query = {}) {
+  const minScore = Number(query.minScore);
+  const limit = Number(query.limit);
+  const relationship = cleanShortText(query.relationship, '', 40);
+  if (relationship && !AI_DUPLICATE_RELATIONSHIPS.has(relationship)) fail(400, 'invalid_relationship', 'Invalid duplicate relationship');
+  return {
+    minScore: Number.isFinite(minScore) ? Math.min(Math.max(minScore, 0), 1) : DEFAULT_DUPLICATE_MIN_SCORE,
+    limit: Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 100) : DEFAULT_DUPLICATE_LIMIT,
+    relationship: relationship || null
+  };
 }
 
 function encodePostgrestValue(value) {
@@ -236,6 +522,7 @@ export function createApp(options = {}) {
   const auth = options.auth || createAuth({ ...options, production });
   const parsePackage = options.parseApkg || parseApkg;
   const createPackage = options.createApkg || createApkg;
+  const aiGateway = options.aiGateway || createAiGateway(options.aiGatewayOptions || {});
   const anonKey = options.supabaseAnonKey || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
   const loginClient = options.authLoginClient || ((options.supabaseUrl || process.env.SUPABASE_URL) && anonKey
     ? createClient(options.supabaseUrl || process.env.SUPABASE_URL, anonKey, {
@@ -295,6 +582,14 @@ export function createApp(options = {}) {
         repository: repository.constructor?.name || 'DeckBridgeRepository',
         dataDir: paths().dataDir
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/ai/status', async (_req, res, next) => {
+    try {
+      res.json(await aiGateway.capabilities());
     } catch (error) {
       next(error);
     }
@@ -416,6 +711,377 @@ export function createApp(options = {}) {
     try {
       const deckId = deckIdFromRequest(req);
       res.json(await repository.getDeckState(req.user, deckId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/decks/:deckId/ai/settings', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.getDeckAiSettings) fail(501, 'ai_settings_unavailable', 'AI settings are unavailable');
+      res.json({ settings: await repository.getDeckAiSettings(req.user, deckId) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch('/api/decks/:deckId/ai/settings', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.updateDeckAiSettings) fail(501, 'ai_settings_unavailable', 'AI settings are unavailable');
+      res.json({ settings: await repository.updateDeckAiSettings(req.user, deckId, normalizeAiSettingsBody(req.body)) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/decks/:deckId/ai/artifacts', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.listAiArtifacts) fail(501, 'ai_artifacts_unavailable', 'AI artifacts are unavailable');
+      res.json({ artifacts: await repository.listAiArtifacts(req.user, deckId, normalizeAiArtifactFilters(req.query)) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/decks/:deckId/ai/pulse', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.getDeckAiSettings || !repository.listAiArtifacts) {
+        fail(501, 'ai_quality_pulse_unavailable', 'AI quality pulse is unavailable');
+      }
+      const settings = await repository.getDeckAiSettings(req.user, deckId);
+      if (!settings.qualityPulse) {
+        res.json(buildAiQualityPulse(settings, []));
+        return;
+      }
+      const artifacts = await repository.listAiArtifacts(req.user, deckId, { status: 'active' });
+      res.json(buildAiQualityPulse(settings, artifacts));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/decks/:deckId/ai/artifacts', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.createAiArtifact) fail(501, 'ai_artifacts_unavailable', 'AI artifacts are unavailable');
+      res.status(201).json({ artifact: await repository.createAiArtifact(req.user, deckId, normalizeAiArtifactBody(req.body)) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch('/api/decks/:deckId/ai/artifacts/:artifactId', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.updateAiArtifact) fail(501, 'ai_artifacts_unavailable', 'AI artifacts are unavailable');
+      const status = req.body.status === undefined ? undefined : cleanShortText(req.body.status, '', 20);
+      if (status && !AI_ARTIFACT_STATUSES.has(status)) fail(400, 'invalid_ai_artifact_status', 'Invalid AI artifact status');
+      const payload = req.body.payload && typeof req.body.payload === 'object' && !Array.isArray(req.body.payload) ? req.body.payload : undefined;
+      res.json({ artifact: await repository.updateAiArtifact(req.user, deckId, req.params.artifactId, { status, payload }) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/decks/:deckId/ai/artifacts/:artifactId/dismiss', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.dismissAiArtifact) fail(501, 'ai_artifacts_unavailable', 'AI artifacts are unavailable');
+      res.json({ artifact: await repository.dismissAiArtifact(req.user, deckId, req.params.artifactId) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/decks/:deckId/ai/artifacts/stale', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.markAiArtifactsStale) fail(501, 'ai_artifacts_unavailable', 'AI artifacts are unavailable');
+      res.json(await repository.markAiArtifactsStale(req.user, deckId, normalizeAiArtifactFilters(req.body)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/decks/:deckId/ai/suggestions/:suggestionId/brief', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.getDeckState || !repository.getDeckAiSettings || !repository.createAiArtifact) {
+        fail(501, 'ai_review_briefs_unavailable', 'AI suggestion briefs are unavailable');
+      }
+      const settings = await repository.getDeckAiSettings(req.user, deckId);
+      if (!settings.reviewBriefs) {
+        res.json({
+          status: 'disabled',
+          code: 'ai_review_briefs_disabled',
+          message: 'AI suggestion review briefs are disabled for this deck.',
+          artifact: null
+        });
+        return;
+      }
+      const deckState = await repository.getDeckState(req.user, deckId);
+      const deck = deckState.decks.find((item) => item.id === deckId) || deckState.decks[0];
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+      const suggestionId = cleanShortText(req.params.suggestionId, '', 200);
+      const suggestion = (deckState.suggestions || []).find((item) => item.id === suggestionId && item.deckId === deckId);
+      if (!suggestion) fail(404, 'suggestion_not_found', 'Suggestion not found');
+      const card = (deck.cards || []).find((item) => item.id === suggestion.cardId);
+      if (!card) fail(404, 'card_not_found', 'Card not found');
+
+      const { artifact } = await generateSuggestionReviewBrief({ aiGateway, deck, card, suggestion });
+      const saved = await repository.createAiArtifact(req.user, deckId, artifact);
+      res.status(201).json({ status: 'created', artifact: saved });
+    } catch (error) {
+      if (isRecoverableAiError(error)) {
+        res.json({
+          status: error.code === 'ai_validation_failed' || error.code === 'ai_malformed_json' ? 'invalid' : 'unavailable',
+          code: error.code || 'ai_unavailable',
+          message: error.message || 'AI suggestion brief is unavailable.',
+          artifact: null
+        });
+        return;
+      }
+      next(error);
+    }
+  });
+
+  app.post('/api/decks/:deckId/ai/conflicts/:conflictId/summary', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.getDeckState || !repository.getDeckAiSettings || !repository.createAiArtifact) {
+        fail(501, 'ai_conflict_summaries_unavailable', 'AI conflict summaries are unavailable');
+      }
+      const settings = await repository.getDeckAiSettings(req.user, deckId);
+      if (!settings.conflictSummaries) return res.json(disabledConflictSummaryResult());
+      const deckState = await repository.getDeckState(req.user, deckId);
+      const deck = deckState.decks.find((item) => item.id === deckId);
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+      const conflictId = cleanShortText(req.params.conflictId, '', 200);
+      const conflict = (deckState.sync?.conflicts || []).find((item) => item.id === conflictId && item.deckId === deckId);
+      if (!conflict) fail(404, 'conflict_not_found', 'Conflict not found');
+
+      const { artifact } = await generateConflictSummary({ aiGateway, deck, conflict });
+      const saved = await repository.createAiArtifact(req.user, deckId, artifact);
+      res.status(201).json({ status: 'created', artifact: saved });
+    } catch (error) {
+      if (isRecoverableAiError(error)) {
+        return res.json(aiArtifactUnavailableResult(error, 'ai_conflict_summary_unavailable', 'AI conflict summary is unavailable.'));
+      }
+      next(error);
+    }
+  });
+
+  app.post('/api/decks/:deckId/ai/diagnostics/setup-error', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.getDeckState || !repository.getDeckAiSettings || !repository.createAiArtifact) {
+        fail(501, 'ai_diagnostics_unavailable', 'AI setup diagnostics are unavailable');
+      }
+      const setupError = normalizeStructuredSetupError(req.body || {});
+      const settings = await repository.getDeckAiSettings(req.user, deckId);
+      if (!settings.diagnostics) return res.json(disabledDiagnosticResult());
+      const deckState = await repository.getDeckState(req.user, deckId);
+      const deck = deckState.decks.find((item) => item.id === deckId);
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+
+      const { artifact } = await generateSetupDiagnostic({ aiGateway, deck, error: setupError });
+      const saved = await repository.createAiArtifact(req.user, deckId, artifact);
+      res.status(201).json({ status: 'created', artifact: saved });
+    } catch (error) {
+      if (isRecoverableAiError(error)) {
+        return res.json(aiArtifactUnavailableResult(error, 'ai_diagnostic_unavailable', 'AI setup diagnostic is unavailable.'));
+      }
+      next(error);
+    }
+  });
+
+  async function ensureEmbeddingRepository() {
+    if (!repository.upsertCardEmbedding || !repository.listCardEmbeddings || !repository.markCardEmbeddingsStale || !repository.upsertAiDuplicateLink || !repository.listAiDuplicateLinks) {
+      fail(501, 'ai_embeddings_unavailable', 'AI semantic duplicate indexing is unavailable');
+    }
+  }
+
+  async function staleChangedEmbeddings(user, deck) {
+    const embeddings = await repository.listCardEmbeddings(user, deck.id, { status: 'active' });
+    const byCardId = new Map((deck.cards || []).map((card) => [card.id, card]));
+    const changedIds = embeddings
+      .filter((embedding) => {
+        const card = byCardId.get(embedding.cardId);
+        return !card || canonicalCardInputHash(card) !== embedding.inputHash;
+      })
+      .map((embedding) => embedding.cardId);
+    if (changedIds.length) await repository.markCardEmbeddingsStale(user, deck.id, changedIds);
+    return changedIds.length;
+  }
+
+  async function buildDuplicateLinks(user, deck, sourceCard, sourceEmbedding, options = {}) {
+    const minScore = options.minScore ?? DEFAULT_DUPLICATE_MIN_SCORE;
+    const limit = options.limit ?? DEFAULT_DUPLICATE_LIMIT;
+    const cardsById = new Map((deck.cards || []).map((card) => [card.id, card]));
+    const candidates = await repository.listCardEmbeddings(user, deck.id, { status: 'active' });
+    const links = [];
+    for (const candidate of candidates) {
+      if (candidate.cardId === sourceCard.id) continue;
+      if (candidate.model !== sourceEmbedding.model || candidate.dimensions !== sourceEmbedding.dimensions) continue;
+      const targetCard = cardsById.get(candidate.cardId);
+      if (!targetCard) continue;
+      if (canonicalCardInputHash(targetCard) !== candidate.inputHash) {
+        await repository.markCardEmbeddingsStale(user, deck.id, [targetCard.id]);
+        continue;
+      }
+      const score = cosineSimilarity(sourceEmbedding.embedding, candidate.embedding);
+      if (score < minScore) continue;
+      const relationship = relationshipForScore(score);
+      const artifact = await repository.createAiArtifact(user, deck.id, {
+        subjectType: 'card',
+        subjectId: sourceCard.id,
+        kind: 'duplicate-link',
+        severity: relationship === 'duplicate' ? 'high' : relationship === 'near-duplicate' ? 'medium' : 'low',
+        status: 'active',
+        confidence: score,
+        model: sourceEmbedding.model,
+        promptVersion: 'semantic-duplicate-v1',
+        inputHash: sourceEmbedding.inputHash,
+        payload: {
+          sourceCardId: sourceCard.id,
+          targetCardId: targetCard.id,
+          score,
+          relationship,
+          rationale: duplicateRationale(sourceCard, targetCard, score, relationship),
+          comparedFields: comparedFieldsForCards(sourceCard, targetCard)
+        }
+      });
+      const link = await repository.upsertAiDuplicateLink(user, deck.id, {
+        sourceCardId: sourceCard.id,
+        targetCardId: targetCard.id,
+        artifactId: artifact.id,
+        score,
+        relationship,
+        rationale: artifact.payload.rationale,
+        comparedFields: artifact.payload.comparedFields,
+        status: 'active'
+      });
+      links.push(link);
+    }
+    return links.sort((a, b) => b.score - a.score).slice(0, limit);
+  }
+
+  async function embedCardForDeck(user, deck, card, options = {}) {
+    await ensureEmbeddingRepository();
+    const settings = await repository.getDeckAiSettings(user, deck.id);
+    if (!settings.embeddings) return disabledAiEmbeddingResult();
+    const text = canonicalCardText(card);
+    const inputHash = canonicalCardInputHash(card);
+    const existing = await repository.listCardEmbeddings(user, deck.id, { cardId: card.id });
+    const activeExisting = existing.find((embedding) => embedding.status === 'active' && embedding.inputHash === inputHash);
+    if (activeExisting && options.reuse !== false) {
+      const links = await buildDuplicateLinks(user, deck, card, activeExisting, options);
+      return { status: 'indexed', embedding: activeExisting, links };
+    }
+
+    if (existing.some((embedding) => embedding.status === 'active' && embedding.inputHash !== inputHash)) {
+      await repository.markCardEmbeddingsStale(user, deck.id, [card.id]);
+    }
+    const result = await aiGateway.embed(text);
+    const vector = result.embeddings[0];
+    const embedding = await repository.upsertCardEmbedding(user, deck.id, {
+      cardId: card.id,
+      model: result.model,
+      dimensions: result.dimensions,
+      inputHash,
+      embedding: vector,
+      status: 'active',
+      metadata: {
+        inputCharacters: text.length,
+        indexedAt: nowIso()
+      }
+    });
+    const links = await buildDuplicateLinks(user, deck, card, embedding, options);
+    return { status: 'indexed', embedding, links };
+  }
+
+  app.post('/api/decks/:deckId/ai/cards/:cardId/embed', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      await ensureEmbeddingRepository();
+      const deckState = await repository.getDeckState(req.user, deckId);
+      const deck = deckState.decks.find((item) => item.id === deckId);
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+      const cardId = cleanShortText(req.params.cardId, '', 200);
+      const card = (deck.cards || []).find((item) => item.id === cardId);
+      if (!card) fail(404, 'card_not_found', 'Card not found');
+      await staleChangedEmbeddings(req.user, deck);
+      const result = await embedCardForDeck(req.user, deck, card, parseDuplicateQuery(req.body || {}));
+      res.status(result.status === 'indexed' ? 201 : 200).json(result);
+    } catch (error) {
+      if (isRecoverableAiError(error)) return res.status(200).json(embeddingUnavailableResult(error));
+      next(error);
+    }
+  });
+
+  app.post('/api/decks/:deckId/ai/cards/embed', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      await ensureEmbeddingRepository();
+      const settings = await repository.getDeckAiSettings(req.user, deckId);
+      if (!settings.embeddings) return res.json({ ...disabledAiEmbeddingResult(), results: [] });
+      const deckState = await repository.getDeckState(req.user, deckId);
+      const deck = deckState.decks.find((item) => item.id === deckId);
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+      await staleChangedEmbeddings(req.user, deck);
+      const requestedIds = Array.isArray(req.body?.cardIds) ? req.body.cardIds.map((id) => cleanShortText(id, '', 200)).filter(Boolean) : [];
+      const limit = Math.min(Math.max(Number(req.body?.limit) || 25, 1), 100);
+      const requestedSet = new Set(requestedIds);
+      const cards = (deck.cards || [])
+        .filter((card) => !requestedSet.size || requestedSet.has(card.id))
+        .slice(0, limit);
+      const results = [];
+      for (const card of cards) {
+        try {
+          results.push({ cardId: card.id, ...(await embedCardForDeck(req.user, deck, card, parseDuplicateQuery(req.body || {}))) });
+        } catch (error) {
+          if (!isRecoverableAiError(error)) throw error;
+          results.push({ cardId: card.id, ...embeddingUnavailableResult(error) });
+        }
+      }
+      const indexed = results.filter((item) => item.status === 'indexed').length;
+      res.status(indexed ? 201 : 200).json({ status: indexed ? 'indexed' : 'unavailable', indexed, results });
+    } catch (error) {
+      if (isRecoverableAiError(error)) return res.status(200).json({ ...embeddingUnavailableResult(error), results: [] });
+      next(error);
+    }
+  });
+
+  app.get('/api/decks/:deckId/ai/cards/:cardId/related', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      await ensureEmbeddingRepository();
+      const query = parseDuplicateQuery(req.query);
+      const settings = await repository.getDeckAiSettings(req.user, deckId);
+      if (!settings.embeddings) {
+        return res.json({
+          status: 'disabled',
+          code: 'ai_embeddings_disabled',
+          message: 'AI semantic duplicate search is disabled for this deck.',
+          links: []
+        });
+      }
+      const deckState = await repository.getDeckState(req.user, deckId);
+      const deck = deckState.decks.find((item) => item.id === deckId);
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+      const cardId = cleanShortText(req.params.cardId, '', 200);
+      if (!deck.cards.some((card) => card.id === cardId)) fail(404, 'card_not_found', 'Card not found');
+      await staleChangedEmbeddings(req.user, deck);
+      const links = (await repository.listAiDuplicateLinks(req.user, deckId, {
+        status: 'active',
+        cardId,
+        limit: query.limit
+      })).filter((link) => link.score >= query.minScore && (!query.relationship || link.relationship === query.relationship));
+      res.json({ status: 'ready', links });
     } catch (error) {
       next(error);
     }

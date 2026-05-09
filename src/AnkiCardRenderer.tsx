@@ -9,6 +9,7 @@ interface Props {
   frontHtml?: string;
   clozeOrd?: number;
   className?: string;
+  onDocumentClick?: () => void;
 }
 
 // Anki's default card CSS (matches Anki's built-in baseline)
@@ -234,7 +235,7 @@ ${bodyHtml}
 </html>`;
 }
 
-export function AnkiCardRenderer({ card, deckId, side, frontHtml, clozeOrd, className = '' }: Props) {
+export function AnkiCardRenderer({ card, deckId, side, frontHtml, clozeOrd, className = '', onDocumentClick }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const bodyHtml = useMemo(
@@ -266,8 +267,15 @@ export function AnkiCardRenderer({ card, deckId, side, frontHtml, clozeOrd, clas
     };
     resize();
     const t = setTimeout(resize, 150);
-    return () => clearTimeout(t);
-  }, [htmlDoc]);
+    const handleDocumentClick = () => onDocumentClick?.();
+    if (onDocumentClick) {
+      doc.addEventListener('click', handleDocumentClick);
+    }
+    return () => {
+      clearTimeout(t);
+      doc.removeEventListener('click', handleDocumentClick);
+    };
+  }, [htmlDoc, onDocumentClick]);
 
   return (
     <iframe
