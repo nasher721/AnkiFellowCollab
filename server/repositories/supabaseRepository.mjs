@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { createClient } from '@supabase/supabase-js';
 import { applySuggestion, buildAddonSyncResult, mergeAddonCards, nowIso, summarizeDeck } from '../domain.mjs';
@@ -267,6 +268,74 @@ function storagePathForMedia(deckId, file) {
   return `${deckId}/${file.sha256}/${storageFilename(file.filename)}`;
 }
 
+function managedFileId(bucket, storagePath) {
+  const digest = createHash('sha256').update(`${bucket}/${storagePath}`).digest('hex').slice(0, 32);
+  return `file-${digest}`;
+}
+
+export function managedFileRow({
+  deckId,
+  kind,
+  filename,
+  bucket,
+  storagePath,
+  sha256 = null,
+  sizeBytes = 0,
+  mimeType = 'application/octet-stream',
+  status = 'pending_upload',
+  userId = null,
+  metadata = {},
+  now = nowIso()
+}) {
+  return {
+    id: managedFileId(bucket, storagePath),
+    deck_id: deckId,
+    file_kind: kind,
+    filename,
+    storage_bucket: bucket,
+    storage_path: storagePath,
+    sha256,
+    size_bytes: sizeBytes,
+    mime_type: mimeType || 'application/octet-stream',
+    status,
+    created_by: userId,
+    updated_at: now,
+    uploaded_at: status === 'available' ? now : null,
+    metadata
+  };
+}
+
+export function managedMediaRows(deckId, media = {}, userId = null, status = 'available') {
+  const now = nowIso();
+  return Object.values(media || {})
+    .filter((asset) => asset?.storagePath)
+    .map((asset) => managedFileRow({
+      deckId,
+      kind: 'media',
+      filename: asset.filename || storageFilename(asset.storagePath.split('/').pop()),
+      bucket: asset.storageBucket || mediaBucket(),
+      storagePath: asset.storagePath,
+      sha256: asset.sha256 || null,
+      sizeBytes: Number(asset.sizeBytes || 0),
+      mimeType: asset.mimeType || 'application/octet-stream',
+      status,
+      userId,
+      now
+    }));
+}
+
+async function hashFile(filePath) {
+  const stat = await fs.stat(filePath);
+  const hash = createHash('sha256');
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return { sizeBytes: stat.size, sha256: hash.digest('hex') };
+}
+
 function assertDeckStoragePath(deckId, asset) {
   const storagePath = String(asset?.storagePath || '');
   if (!storagePath || storagePath.includes('..') || storagePath.includes('\\') || !storagePath.startsWith(`${deckId}/`)) {
@@ -348,6 +417,14 @@ async function upsertSyncCards(supabase, deckId, cards) {
       .upsert(chunk.map((card) => cardRowForUpsert(deckId, card)), { onConflict: 'id' });
     if (error) throw error;
   }
+}
+
+async function upsertManagedFileRows(supabase, rows) {
+  if (!rows.length) return;
+  const { error } = await supabase
+    .from('deck_files')
+    .upsert(rows, { onConflict: 'storage_bucket,storage_path' });
+  if (error) throw error;
 }
 
 function isOptionalAiSchemaError(error) {
@@ -1026,14 +1103,32 @@ export function createSupabaseRepository(options = {}) {
       await assertMembership(user.id, deckId);
       const bucket = process.env.SUPABASE_EXPORTS_BUCKET || 'deckbridge-exports';
       const storagePath = `${deckId}/${filename}`;
-      const bytes = await fs.readFile(apkgPath);
+      const { sizeBytes, sha256 } = await hashFile(apkgPath);
       const { error: uploadError } = await supabase.storage
         .from(bucket)
-        .upload(storagePath, bytes, {
+        .upload(storagePath, createReadStream(apkgPath), {
           contentType: 'application/octet-stream',
-          upsert: true
+          upsert: true,
+          metadata: {
+            deckId,
+            filename,
+            sha256,
+            sizeBytes
+          }
         });
       if (uploadError) throw uploadError;
+      await upsertManagedFileRows(supabase, [managedFileRow({
+        deckId,
+        kind: 'export',
+        filename,
+        bucket,
+        storagePath,
+        sha256,
+        sizeBytes,
+        status: 'available',
+        userId: user.id,
+        metadata: { source: 'deck-export' }
+      })]);
       const expiresIn = Number(process.env.EXPORT_SIGNED_URL_SECONDS || 3600);
       const { data, error } = await supabase.storage.from(bucket).createSignedUrl(storagePath, expiresIn);
       if (error) throw error;
@@ -1049,12 +1144,28 @@ export function createSupabaseRepository(options = {}) {
       const bucket = mediaBucket();
       const expiresIn = 7200;
       const uploads = [];
+      const fileRows = [];
+      const now = nowIso();
       for (const file of files) {
         const storagePath = storagePathForMedia(deckId, file);
         const { data, error } = await supabase.storage
           .from(bucket)
           .createSignedUploadUrl(storagePath, { upsert: true });
         if (error) throw error;
+        fileRows.push(managedFileRow({
+          deckId,
+          kind: 'media',
+          filename: file.filename,
+          bucket,
+          storagePath,
+          sha256: file.sha256,
+          sizeBytes: file.sizeBytes,
+          mimeType: file.mimeType,
+          status: 'pending_upload',
+          userId: user.id,
+          metadata: { source: 'signed-upload-target' },
+          now
+        }));
         uploads.push({
           filename: file.filename,
           mimeType: file.mimeType,
@@ -1066,6 +1177,7 @@ export function createSupabaseRepository(options = {}) {
           expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString()
         });
       }
+      await upsertManagedFileRows(supabase, fileRows);
       return uploads;
     },
 
@@ -1076,6 +1188,10 @@ export function createSupabaseRepository(options = {}) {
       const expiresIn = Number(process.env.MEDIA_SIGNED_URL_SECONDS || 3600);
       const { data, error } = await supabase.storage.from(bucket).createSignedUrl(storagePath, expiresIn);
       if (error) throw error;
+      await supabase.from('deck_files')
+        .update({ last_accessed_at: nowIso(), updated_at: nowIso() })
+        .eq('storage_bucket', bucket)
+        .eq('storage_path', storagePath);
       return {
         url: data.signedUrl,
         expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString()
@@ -1260,6 +1376,13 @@ export function createSupabaseRepository(options = {}) {
           media: deck.media || {}
         }).eq('id', deck.id);
         if (deckError) throw deckError;
+        const appliedStorageMedia = Object.fromEntries(
+          Object.entries(syncInput.media || {}).filter(([filename, asset]) => {
+            const current = deck.media?.[filename];
+            return asset?.storagePath && current?.storagePath === asset.storagePath;
+          })
+        );
+        await upsertManagedFileRows(supabase, managedMediaRows(deck.id, appliedStorageMedia, user.id, 'available'));
         if (isFinalBatchChunk) {
           await supabase.from('activity').insert({
             id: `act-${randomUUID()}`,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { roleMeetsMinimum } from './repositories/supabaseRepository.mjs';
+import { managedFileRow, managedMediaRows, roleMeetsMinimum } from './repositories/supabaseRepository.mjs';
 
 test('Supabase repository role ladder includes collaboration roles', () => {
   assert.equal(roleMeetsMinimum('owner', 'editor'), true);
@@ -15,4 +15,55 @@ test('Supabase repository role ladder rejects unknown roles', () => {
   assert.equal(roleMeetsMinimum('admin', 'viewer'), false);
   assert.equal(roleMeetsMinimum('owner', 'admin'), false);
   assert.equal(roleMeetsMinimum(undefined, 'viewer'), false);
+});
+
+test('managed file rows capture storage identity and upload lifecycle', () => {
+  const row = managedFileRow({
+    deckId: 'deck-1',
+    kind: 'media',
+    filename: 'large.png',
+    bucket: 'deckbridge-media',
+    storagePath: 'deck-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/large.png',
+    sha256: 'a'.repeat(64),
+    sizeBytes: 12_000_000,
+    mimeType: 'image/png',
+    status: 'pending_upload',
+    userId: 'user-1',
+    now: '2026-05-09T12:00:00.000Z'
+  });
+
+  assert.match(row.id, /^file-[a-f0-9]{32}$/);
+  assert.equal(row.deck_id, 'deck-1');
+  assert.equal(row.file_kind, 'media');
+  assert.equal(row.storage_bucket, 'deckbridge-media');
+  assert.equal(row.storage_path, 'deck-1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/large.png');
+  assert.equal(row.sha256, 'a'.repeat(64));
+  assert.equal(row.size_bytes, 12_000_000);
+  assert.equal(row.mime_type, 'image/png');
+  assert.equal(row.status, 'pending_upload');
+  assert.equal(row.uploaded_at, null);
+});
+
+test('managed media rows mark storage-backed assets available without inline blobs', () => {
+  const rows = managedMediaRows('deck-1', {
+    'small.png': {
+      filename: 'small.png',
+      mimeType: 'image/png',
+      dataBase64: 'c21hbGw='
+    },
+    'large.png': {
+      filename: 'large.png',
+      mimeType: 'image/png',
+      sha256: 'b'.repeat(64),
+      sizeBytes: 25_000_000,
+      storageBucket: 'deckbridge-media',
+      storagePath: `deck-1/${'b'.repeat(64)}/large.png`
+    }
+  }, 'user-1');
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].filename, 'large.png');
+  assert.equal(rows[0].status, 'available');
+  assert.equal(rows[0].uploaded_at, rows[0].updated_at);
+  assert.equal(rows[0].metadata && Object.keys(rows[0].metadata).length, 0);
 });
