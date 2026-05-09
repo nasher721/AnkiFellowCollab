@@ -111,7 +111,7 @@ test.describe('Review Queue', () => {
     await page.getByLabel('Filter review queue by author').selectOption('Maya Patel');
     await expect(page.getByRole('button', { name: /Maya Patel.*pending/ })).toBeVisible();
     await page.getByLabel('Filter review queue by status').selectOption('accepted');
-    await expect(page.getByText('No suggestions match the queue filters.')).toBeVisible();
+    await expect(page.getByText('No owner review items match the queue filters.')).toBeVisible();
     await page.getByRole('button', { name: 'Reset' }).click();
     await expect(page.getByRole('button', { name: /Maya Patel.*pending/ })).toBeVisible();
   });

@@ -373,6 +373,9 @@ paths:
                         subscribedAt: { type: string, format: date-time, nullable: true }
                         role: { type: string }
                         pendingSuggestions: { type: integer }
+                        pendingReviewCount: { type: integer }
+                        unresolvedConflictCount: { type: integer }
+                        capabilities: { type: object }
                   api:
                     type: object
                     properties:
@@ -381,6 +384,34 @@ paths:
                       confirmedFeatures:
                         type: array
                         items: { type: string }
+              example:
+                subscriptions:
+                  - deck:
+                      uuid: deck-demo-zanki
+                      id: deck-demo-zanki
+                      name: Zanki Step 2 CK
+                      card_count: 4
+                      note_count: 4
+                      last_updated: "2026-05-09T12:00:00.000Z"
+                    deckMetadata:
+                      uuid: deck-demo-zanki
+                      id: deck-demo-zanki
+                      name: Zanki Step 2 CK
+                    role: owner
+                    lastSyncAt: "2026-05-09T12:00:00.000Z"
+                    pendingReviewCount: 1
+                    unresolvedConflictCount: 0
+                    capabilities:
+                      subscriptions: true
+                      deltaUpdates: true
+                      cardSync: true
+                      mediaUploadTargets: true
+                      syncProof: true
+                api:
+                  namespace: /api
+                  compatibility: ankihub-inspired
+                  protocol: deckbridge
+                  protocolVersion: "2026-05-09"
 
   /api/decks/{deckId}:
     get:
@@ -436,11 +467,68 @@ paths:
                   suggestions:
                     type: array
                     items: { $ref: "#/components/schemas/CompatSuggestion" }
+                  suggestionStatusUpdates:
+                    type: array
+                    items:
+                      type: object
+                  media:
+                    type: array
+                    items:
+                      type: object
+                  templates:
+                    type: array
+                    items:
+                      type: object
+                  scheduling:
+                    type: array
+                    items:
+                      type: object
+                  syncProof:
+                    type: object
+                    nullable: true
                   counts:
                     type: object
                     properties:
                       notes: { type: integer }
                       suggestions: { type: integer }
+              example:
+                deck:
+                  uuid: deck-demo-zanki
+                  id: deck-demo-zanki
+                  name: Zanki Step 2 CK
+                since: "2026-05-09T11:30:00.000Z"
+                lastUpdated: "2026-05-09T12:00:00.000Z"
+                notes:
+                  - guid: card-anca
+                    anki_note_id: 9001
+                    note_type: Basic
+                    fields: { Front: "Question?", Back: "Answer" }
+                    tags: [Rheumatology]
+                    content_hash: 0f4c2d4ac5b9b7a7f850f062016eaf9c9d7f3ecb13a9fe271de43df18a12f7a1
+                    updated_at: "2026-05-09T12:00:00.000Z"
+                suggestionStatusUpdates:
+                  - id: sugg-anca
+                    status: accepted
+                    compatStatus: approved
+                    updatedAt: "2026-05-09T12:00:00.000Z"
+                media:
+                  - filename: large.png
+                    storageBucket: deckbridge-media
+                    storagePath: deck-demo-zanki/hash/large.png
+                templates: []
+                scheduling:
+                  - cardId: card-anca
+                    due: 47
+                    state: Review
+                    suspended: false
+                syncProof:
+                  syncedAt: "2026-05-09T12:00:00.000Z"
+                  source: DeckBridge Anki add-on
+                  stats: { total: 1, created: 0, updated: 1, skipped: 0, conflicts: 0, dryRun: false, mediaReceived: 1 }
+                  mediaReceived: 1
+                counts: { notes: 1, cards: 1, suggestions: 0, suggestionStatusUpdates: 1 }
+        "400":
+          $ref: "#/components/responses/BadRequest"
 
   /api/decks/{deckId}/cards:
     delete:
@@ -675,7 +763,12 @@ paths:
                 diff:
                   type: object
                   deprecated: true
-                  description: AnkiHub-compatible diff format
+                  description: >
+                    AnkiHub-compatible field/tag diff format. Only field and tag
+                    diffs are accepted in this slice; media refs, template changes,
+                    source metadata, and discussion state remain represented on
+                    cards, sync proof, comments, and AI artifacts rather than as
+                    suggestion diff fields.
       responses:
         "201":
           description: Suggestion created
@@ -715,6 +808,9 @@ paths:
                 decision:
                   type: string
                   enum: [accepted, rejected, revision]
+            example:
+              suggestionIds: [sugg-anca, sugg-hpylori]
+              decision: rejected
       responses:
         "200":
           description: Bulk decision applied
@@ -722,6 +818,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppState"
+              example:
+                decks:
+                  - id: deck-demo-zanki
+                    name: Zanki Step 2 CK
+                suggestions:
+                  - id: sugg-anca
+                    status: rejected
+                    reviewedAt: "2026-05-09T12:00:00.000Z"
+                  - id: sugg-hpylori
+                    status: rejected
+                    reviewedAt: "2026-05-09T12:00:00.000Z"
         "400":
           $ref: "#/components/responses/BadRequest"
 
@@ -752,6 +859,9 @@ paths:
                   type: string
                   default: "cards.csv"
                   description: Used to detect delimiter (.tsv → tab)
+            example:
+              filename: changes.csv
+              content: "Card ID,Front,Back,Reason\ncard-anca,Updated question?,Updated answer,Clarify wording\n"
       responses:
         "201":
           description: Import results
@@ -770,6 +880,16 @@ paths:
                         reason: { type: string }
                   truncated: { type: boolean }
                   state: { $ref: "#/components/schemas/AppState" }
+              example:
+                imported: 1
+                skipped: []
+                state:
+                  suggestions:
+                    - id: sugg-imported
+                      cardId: card-anca
+                      status: pending
+                      proposedFields:
+                        Front: Updated question?
 
   /api/suggestions:
     get:
@@ -867,6 +987,8 @@ paths:
                 decision:
                   type: string
                   enum: [accepted, rejected, revision]
+            example:
+              decision: accepted
       responses:
         "200":
           description: Decision applied
@@ -874,6 +996,11 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppState"
+              example:
+                suggestions:
+                  - id: sugg-anca
+                    status: accepted
+                    reviewedAt: "2026-05-09T12:00:00.000Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "403":
@@ -1420,6 +1547,27 @@ paths:
                     index: { type: integer, minimum: 0 }
                     total: { type: integer, minimum: 1, maximum: 1000 }
                     totalCards: { type: integer }
+            example:
+              returnState: false
+              conflictPolicy: detect
+              source: DeckBridge Anki add-on
+              client:
+                name: DeckBridge Sync
+                version: 0.1.0
+                fingerprint: macbook-local
+              batch:
+                id: batch-2026-05-09
+                index: 0
+                total: 1
+                totalCards: 1
+              cards:
+                - id: anki-9001
+                  ankiNoteId: 9001
+                  modelName: Basic
+                  fieldOrder: [Front, Back]
+                  fields: { Front: "Question?", Back: "Answer" }
+                  tags: [DeckBridge]
+                  mediaRefs: [large.png]
       responses:
         "200":
           description: Sync result with stats and conflicts
@@ -1432,6 +1580,20 @@ paths:
                     $ref: "#/components/schemas/AddonSyncResult"
                   state:
                     $ref: "#/components/schemas/AppState"
+            example:
+              result:
+                syncedAt: "2026-05-09T12:00:00.000Z"
+                source: DeckBridge Anki add-on
+                client: { name: DeckBridge Sync, version: 0.1.0, fingerprint: macbook-local }
+                stats: { total: 1, created: 0, updated: 1, skipped: 0, conflicts: 0, dryRun: false, mediaReceived: 1 }
+                proof:
+                  syncedAt: "2026-05-09T12:00:00.000Z"
+                  source: DeckBridge Anki add-on
+                  client: { name: DeckBridge Sync, version: 0.1.0, fingerprint: macbook-local }
+                  stats: { total: 1, created: 0, updated: 1, skipped: 0, conflicts: 0, dryRun: false, mediaReceived: 1 }
+                  batch: { id: batch-2026-05-09, index: 0, total: 1, totalCards: 1, received: 1, complete: true }
+                  mediaReceived: 1
+                conflicts: []
         "400":
           $ref: "#/components/responses/BadRequest"
         "429":
@@ -1901,6 +2063,12 @@ paths:
                       mimeType:
                         type: string
                         default: "application/octet-stream"
+            example:
+              files:
+                - filename: large.png
+                  mimeType: image/png
+                  sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+                  sizeBytes: 12000000
       responses:
         "201":
           description: Upload URLs
@@ -1915,8 +2083,23 @@ paths:
                       type: object
                       properties:
                         filename: { type: string }
-                        url: { type: string, format: uri }
+                        mimeType: { type: string }
+                        sha256: { type: string }
+                        sizeBytes: { type: integer }
+                        storageBucket: { type: string }
+                        storagePath: { type: string }
+                        uploadUrl: { type: string, format: uri }
                         expiresAt: { type: string, format: date-time }
+              example:
+                uploads:
+                  - filename: large.png
+                    mimeType: image/png
+                    sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+                    sizeBytes: 12000000
+                    storageBucket: deckbridge-media
+                    storagePath: deck-demo-zanki/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/large.png
+                    uploadUrl: "https://storage.example/upload/sign/large.png?token=signed"
+                    expiresAt: "2026-05-09T14:00:00.000Z"
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
@@ -2865,6 +3048,9 @@ components:
             skipped: { type: integer }
             conflicts: { type: integer }
             dryRun: { type: boolean }
+            mediaReceived:
+              type: integer
+              description: Count of normalized media assets received with this sync result or batch.
         batch:
           type: object
           nullable: true
@@ -2875,6 +3061,49 @@ components:
             totalCards: { type: integer }
             received: { type: integer }
             complete: { type: boolean }
+        mediaReceived:
+          type: integer
+          description: Count of normalized media assets received with this sync result or batch.
+        proof:
+          $ref: "#/components/schemas/SyncProof"
+        conflicts:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncConflict"
+
+    SyncProof:
+      type: object
+      properties:
+        syncedAt: { type: string, format: date-time }
+        source: { type: string }
+        client:
+          type: object
+          nullable: true
+          properties:
+            name: { type: string }
+            version: { type: string }
+            fingerprint: { type: string }
+        stats:
+          type: object
+          properties:
+            total: { type: integer }
+            created: { type: integer }
+            updated: { type: integer }
+            skipped: { type: integer }
+            conflicts: { type: integer }
+            dryRun: { type: boolean }
+            mediaReceived: { type: integer }
+        batch:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string }
+            index: { type: integer }
+            total: { type: integer }
+            totalCards: { type: integer }
+            received: { type: integer }
+            complete: { type: boolean }
+        mediaReceived: { type: integer }
 
     # ─── Comments ──────────────────────────────────────────
     Comment:
@@ -3383,17 +3612,17 @@ components:
     Problem:
       type: object
       description: RFC 7807 Problem Details
-      required: [type, title, status]
+      required: [type, title, status, detail, code, details]
       properties:
         type:
           type: string
           format: uri
           description: URI identifying the error type
-          example: "https://api.deckbridge.app/errors/validation-error"
+          example: "https://api.deckbridge.app/errors/invalid_since"
         title:
           type: string
           description: Short human-readable error title
-          example: "Validation Error"
+          example: "Invalid Since Parameter"
         status:
           type: integer
           description: HTTP status code
@@ -3401,7 +3630,7 @@ components:
         detail:
           type: string
           description: Human-readable error detail
-          example: "The 'cardId' field must reference an existing card."
+          example: "since must be a valid RFC 3339 UTC timestamp"
         instance:
           type: string
           format: uri
@@ -3418,7 +3647,14 @@ components:
         code:
           type: string
           description: Machine-readable error code
-          example: "card_not_found"
+          example: "invalid_since"
+        details:
+          type: object
+          description: Bounded machine-readable context for recovery.
+          additionalProperties: true
+          example:
+            parameter: since
+            expected: YYYY-MM-DDTHH:mm:ss.sssZ
 
   responses:
     BadRequest:
@@ -3428,14 +3664,15 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
           example:
-            type: "https://api.deckbridge.app/errors/validation-error"
-            title: "Validation Error"
+            type: "https://api.deckbridge.app/errors/invalid_sync_payload"
+            title: "Invalid Sync Payload"
             status: 400
-            detail: "The 'cardId' field must reference an existing card."
-            instance: "/api/decks/deck-abc123/suggestions"
-            errors:
-              - field: "cardId"
-                message: "Card not found in deck"
+            detail: "Sync payload must include cards"
+            code: "invalid_sync_payload"
+            details:
+              endpoint: sync_cards
+              expected: "cards array with at least one card containing fields"
+            instance: "/api/decks/deck-abc123/sync/cards"
     Unauthorized:
       description: Missing or invalid authentication
       content:
@@ -3447,6 +3684,8 @@ components:
             title: "Unauthorized"
             status: 401
             detail: "Missing or invalid Bearer token."
+            code: "unauthorized"
+            details: {}
     Forbidden:
       description: Insufficient permissions
       content:
@@ -3458,6 +3697,8 @@ components:
             title: "Forbidden"
             status: 403
             detail: "You do not have the required role for this action."
+            code: "forbidden"
+            details: {}
     NotFound:
       description: Resource not found
       content:
@@ -3465,10 +3706,12 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
           example:
-            type: "https://api.deckbridge.app/errors/not-found"
-            title: "Not Found"
+            type: "https://api.deckbridge.app/errors/deck_not_found"
+            title: "Deck Not Found"
             status: 404
             detail: "The requested deck was not found."
+            code: "deck_not_found"
+            details: {}
     Conflict:
       description: Resource conflict
       content:
@@ -3480,6 +3723,8 @@ components:
             title: "Conflict"
             status: 409
             detail: "Invite has already been accepted."
+            code: "conflict"
+            details: {}
     Gone:
       description: Resource no longer available
       content:
@@ -3491,6 +3736,8 @@ components:
             title: "Gone"
             status: 410
             detail: "This feature is only available in local development mode."
+            code: "gone"
+            details: {}
     TooManyRequests:
       description: Rate limit exceeded
       headers:
@@ -3503,10 +3750,12 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
           example:
-            type: "https://api.deckbridge.app/errors/rate-limited"
+            type: "https://api.deckbridge.app/errors/rate_limited"
             title: "Rate Limit Exceeded"
             status: 429
             detail: "Too many requests. Please wait before retrying."
+            code: "rate_limited"
+            details: {}
     NotImplemented:
       description: Feature not available for this repository mode
       content:
@@ -3514,10 +3763,12 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
           example:
-            type: "https://api.deckbridge.app/errors/not-implemented"
-            title: "Not Implemented"
+            type: "https://api.deckbridge.app/errors/sync_unavailable"
+            title: "Request Error"
             status: 501
             detail: "This feature requires Supabase and is unavailable in local mode."
+            code: "sync_unavailable"
+            details: {}
 
   parameters:
     deckId:

@@ -38,12 +38,16 @@ from deckbridge_sync import (
     note_to_card,
     note_to_cards,
     open_settings,
+    parse_deck_updates_response,
+    fetch_deck_updates,
     pull_scheduling_from_platform,
     platform_url,
     post_cards,
+    protocol_recovery_message,
     pull_to_anki,
     request_json,
     save_config,
+    store_updates_checkpoint,
     safe_tag,
     sync_payload_chunks,
     tracking_tag,
@@ -513,7 +517,7 @@ class TestRequestTimeouts(unittest.TestCase):
 
     @patch('deckbridge_sync.urllib.request.urlopen', side_effect=socket.timeout('The read operation timed out'))
     def test_request_json_timeout_error_names_wait_and_retry_behavior(self, _mock_urlopen):
-        with self.assertRaisesRegex(RuntimeError, r'timed out after 120 seconds.*try the push again'):
+        with self.assertRaisesRegex(RuntimeError, r'timed out after 120 seconds.*try the push again.*smaller batch size'):
             request_json(
                 'POST',
                 '/api/decks/deck-1/sync/cards',
@@ -521,6 +525,137 @@ class TestRequestTimeouts(unittest.TestCase):
                 cfg={**DEFAULT_CONFIG, 'api_token': '', 'timeout_seconds': 30},
                 timeout_floor=120,
             )
+
+
+class TestProtocolRecoveryMessages(unittest.TestCase):
+    def test_invalid_token_message_names_reconnect(self):
+        message = protocol_recovery_message(status=401, detail='invalid token')
+
+        self.assertIn('invalid token', message)
+        self.assertIn('Reconnect DeckBridge', message)
+        self.assertIn('refresh the API token', message)
+
+    def test_missing_deck_mapping_message_names_settings_action(self):
+        message = protocol_recovery_message(detail='No DeckBridge deck mapping is configured.')
+
+        self.assertIn('Choose a local Anki deck', message)
+        self.assertIn('mapped DeckBridge deck', message)
+
+    def test_conflict_message_preserves_detect_default_guidance(self):
+        message = protocol_recovery_message(method='POST', path='/api/decks/deck-1/sync/cards', status=409, detail='conflict detected')
+
+        self.assertIn('Review conflicts in DeckBridge', message)
+        self.assertIn('conflictPolicy=detect', message)
+
+    def test_media_target_message_names_retry_before_card_sync(self):
+        message = protocol_recovery_message(method='POST', path='/api/decks/deck-1/media/uploads', detail='media upload target missing')
+
+        self.assertIn('media upload target failed', message)
+        self.assertIn('Retry media upload before card sync', message)
+
+    def test_ssl_message_names_proxy_vpn_antivirus(self):
+        message = protocol_recovery_message(method='GET', path='/api/me', detail='CERTIFICATE_VERIFY_FAILED')
+
+        self.assertIn('secure HTTPS connection', message)
+        self.assertIn('proxy', message)
+        self.assertIn('VPN', message)
+        self.assertIn('antivirus', message)
+
+    def test_proxy_message_names_network_path(self):
+        message = protocol_recovery_message(method='GET', path='/api/me', detail='proxy tunnel failed')
+
+        self.assertIn('network path failed', message)
+        self.assertIn('proxy or VPN', message)
+
+    @patch('deckbridge_sync.urllib.request.urlopen')
+    def test_request_json_conflict_uses_review_before_overwrite_wording(self, mock_urlopen):
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            url='https://deckbridge.example/api/decks/deck-1/sync/cards',
+            code=409,
+            msg='Conflict',
+            hdrs={},
+            fp=BytesIO(json.dumps({'error': {'message': 'conflict detected'}}).encode('utf-8')),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, r'Review conflicts in DeckBridge.*conflictPolicy=detect'):
+            request_json(
+                'POST',
+                '/api/decks/deck-1/sync/cards',
+                {'cards': [{'id': 'anki-1'}]},
+                cfg={**DEFAULT_CONFIG, 'platform_url': 'https://deckbridge.example', 'api_token': 'db_token'},
+            )
+
+    @patch('deckbridge_sync.urllib.request.urlopen', side_effect=urllib.error.URLError('connection refused'))
+    def test_request_json_unreachable_mentions_vpn_proxy_antivirus(self, _mock_urlopen):
+        with self.assertRaisesRegex(RuntimeError, r'VPN/proxy/antivirus'):
+            request_json(
+                'GET',
+                '/api/me',
+                cfg={**DEFAULT_CONFIG, 'platform_url': 'https://deckbridge.example', 'api_token': 'db_token'},
+            )
+
+
+class TestDeckUpdatesCheckpoint(unittest.TestCase):
+    def setUp(self):
+        aqt_mock.mw.col.conf = {}
+        aqt_mock.mw.addonManager.getConfig.return_value = None
+
+    def test_parse_deck_updates_response_uses_updates_and_checkpoint(self):
+        parsed = parse_deck_updates_response({
+            'updates': [{'cardId': 'card-1'}],
+            'nextCheckpoint': '2026-05-09T10:00:00.000Z',
+        })
+
+        self.assertEqual(parsed['updates'], [{'cardId': 'card-1'}])
+        self.assertEqual(parsed['checkpoint'], '2026-05-09T10:00:00.000Z')
+
+    def test_parse_deck_updates_response_can_fallback_to_sync_proof_timestamp(self):
+        parsed = parse_deck_updates_response({
+            'changes': [{'type': 'card.updated'}],
+            'syncProof': {'timestamp': '2026-05-09T11:00:00.000Z'},
+        })
+
+        self.assertEqual(parsed['updates'], [{'type': 'card.updated'}])
+        self.assertEqual(parsed['checkpoint'], '2026-05-09T11:00:00.000Z')
+
+    def test_parse_deck_updates_response_rejects_invalid_updates(self):
+        with self.assertRaisesRegex(RuntimeError, 'invalid updates list'):
+            parse_deck_updates_response({'updates': {'cardId': 'card-1'}})
+
+    def test_store_updates_checkpoint_persists_by_deck_id(self):
+        aqt_mock.mw.col.conf = {
+            CONFIG_KEY: {
+                'url': 'https://deckbridge.example',
+                'token': 'db_token',
+                'deckMappings': [{'localDeck': 'Local Deck', 'deckId': 'deck-1', 'conflictPolicy': 'detect'}],
+            }
+        }
+
+        store_updates_checkpoint('deck-1', '2026-05-09T12:00:00.000Z')
+
+        stored = aqt_mock.mw.col.conf[CONFIG_KEY]
+        self.assertEqual(stored['updateCheckpoints']['deck-1'], '2026-05-09T12:00:00.000Z')
+
+    @patch('deckbridge_sync.request_json')
+    def test_fetch_deck_updates_passes_since_and_stores_checkpoint(self, mock_request):
+        aqt_mock.mw.col.conf = {
+            CONFIG_KEY: {
+                'url': 'https://deckbridge.example',
+                'token': 'db_token',
+                'deckMappings': [{'localDeck': 'Local Deck', 'deckId': 'deck-1', 'conflictPolicy': 'detect'}],
+                'updateCheckpoints': {'deck-1': '2026-05-09T12:00:00.000Z'},
+            }
+        }
+        mock_request.return_value = {
+            'updates': [{'cardId': 'card-1'}],
+            'checkpoint': '2026-05-09T13:00:00.000Z',
+        }
+
+        parsed = fetch_deck_updates(config())
+
+        self.assertEqual(parsed['updates'], [{'cardId': 'card-1'}])
+        self.assertIn('/api/decks/deck-1/updates?since=2026-05-09T12%3A00%3A00.000Z', mock_request.call_args[0][1])
+        self.assertEqual(aqt_mock.mw.col.conf[CONFIG_KEY]['updateCheckpoints']['deck-1'], '2026-05-09T13:00:00.000Z')
 
 
 class TestPlatformUrl(unittest.TestCase):

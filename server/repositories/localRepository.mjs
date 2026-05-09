@@ -126,6 +126,26 @@ function mergeConflicts(existing = [], incoming = []) {
   return [...merged.values()];
 }
 
+function countReceivedMedia(syncInput = {}) {
+  return Object.keys(syncInput.media || {}).length;
+}
+
+function addMediaReceivedToSyncProof(syncInput, lastAddonSync, previousResult = null) {
+  const continuingBatch = syncInput.batch
+    && previousResult?.batch?.id === syncInput.batch.id
+    && syncInput.batch.index > 0;
+  const mediaReceived = (continuingBatch ? Number(previousResult.stats?.mediaReceived || 0) : 0)
+    + countReceivedMedia(syncInput);
+  return {
+    ...lastAddonSync,
+    stats: {
+      ...lastAddonSync.stats,
+      mediaReceived
+    },
+    mediaReceived
+  };
+}
+
 function addonImportSyncResult(deck) {
   if (deck.source?.format !== 'anki-addon') return null;
   const syncedAt = deck.lastSyncedAt || deck.importedAt || nowIso();
@@ -702,7 +722,11 @@ export function createLocalRepository() {
       ensureCollections(state);
       const { deck } = requireRole(state, user.id, deckId, 'contributor');
       const result = mergeAddonCards(deck, syncInput, user.name);
-      const lastAddonSync = buildAddonSyncResult(syncInput, result, state.sync.lastAddonSync);
+      const lastAddonSync = addMediaReceivedToSyncProof(
+        syncInput,
+        buildAddonSyncResult(syncInput, result, state.sync.lastAddonSync),
+        state.sync.lastAddonSync
+      );
       const isFirstBatchChunk = !syncInput.batch || syncInput.batch.index === 0;
       const isFinalBatchChunk = !syncInput.batch || syncInput.batch.index + 1 >= syncInput.batch.total;
       state.sync.lastAddonSync = lastAddonSync;
@@ -732,7 +756,8 @@ export function createLocalRepository() {
           syncedAt: result.syncedAt,
           source: lastAddonSync.source,
           client: lastAddonSync.client,
-          stats: result.stats,
+          stats: lastAddonSync.stats,
+          proof: lastAddonSync,
           conflicts: result.conflicts
         }
       };

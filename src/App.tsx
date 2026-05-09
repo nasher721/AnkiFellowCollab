@@ -31,7 +31,7 @@ interface AddonPackageState {
   error: string;
 }
 
-interface SyncHealth {
+export interface SyncHealth {
   state: 'not-connected' | 'ready-to-test' | 'dry-run-passed' | 'sync-healthy' | 'conflicts' | 'package-missing' | 'api-unavailable' | 'token-failed';
   tone: 'neutral' | 'info' | 'success' | 'warning' | 'danger';
   title: string;
@@ -47,7 +47,7 @@ interface SyncHealth {
   primaryLabel: string;
 }
 
-interface OwnerAttentionItem {
+export interface OwnerAttentionItem {
   id: string;
   label: string;
   detail: string;
@@ -56,6 +56,26 @@ interface OwnerAttentionItem {
   actionLabel: string;
   artifactId?: string;
   subjectId?: string;
+}
+
+export interface OwnerReviewQueueItem {
+  id: string;
+  kind: 'conflict' | 'suggestion' | 'ai' | 'recent-change';
+  source: string;
+  label: string;
+  detail: string;
+  status: 'pending' | 'revision' | 'accepted' | 'rejected';
+  tone: 'neutral' | 'info' | 'success' | 'warning' | 'danger';
+  risk: 'low' | 'medium' | 'high';
+  actionLabel: string;
+  affectsNextPull: boolean;
+  sortAt: string;
+  priority: number;
+  cardId?: string;
+  suggestionId?: string;
+  conflictId?: string;
+  artifactId?: string;
+  authorName?: string;
 }
 
 const TOAST_ICONS: Record<Toast['type'], string> = {
@@ -155,7 +175,7 @@ function changedInLastSync(deck: Deck | undefined, result: AddonSyncResult | nul
   }).length;
 }
 
-function deriveSyncHealth({
+export function deriveSyncHealth({
   activeDeck,
   addonPackage,
   apiHealth,
@@ -274,6 +294,142 @@ function deriveSyncHealth({
     primaryAction: 'setup',
     primaryLabel: 'Start setup'
   };
+}
+
+function severityRisk(severity: AiQualityPulse['items'][number]['severity']): OwnerReviewQueueItem['risk'] {
+  if (severity === 'high') return 'high';
+  if (severity === 'medium') return 'medium';
+  return 'low';
+}
+
+function severityTone(severity: AiQualityPulse['items'][number]['severity']): OwnerReviewQueueItem['tone'] {
+  if (severity === 'high') return 'danger';
+  if (severity === 'medium') return 'warning';
+  return 'info';
+}
+
+function recentSuggestionCutoff(nowMs: number) {
+  return nowMs - 7 * 24 * 60 * 60 * 1000;
+}
+
+export function deriveOwnerReviewQueue({
+  suggestions,
+  conflicts,
+  pulse,
+  now = Date.now()
+}: {
+  suggestions: Suggestion[];
+  conflicts: AppState['sync']['conflicts'];
+  pulse: AiQualityPulse | null;
+  now?: number;
+}): OwnerReviewQueueItem[] {
+  const items = new Map<string, OwnerReviewQueueItem>();
+  const addItem = (item: OwnerReviewQueueItem) => {
+    const existing = items.get(item.id);
+    if (!existing || item.priority < existing.priority || (item.priority === existing.priority && item.sortAt > existing.sortAt)) {
+      items.set(item.id, item);
+    }
+  };
+
+  for (const conflict of conflicts) {
+    addItem({
+      id: `conflict:${conflict.id}`,
+      kind: 'conflict',
+      source: conflict.source || 'Sync conflict',
+      label: 'Sync conflict',
+      detail: `Resolve field differences before accepted changes can push back to Anki.`,
+      status: 'pending',
+      tone: 'danger',
+      risk: 'high',
+      actionLabel: 'Resolve',
+      affectsNextPull: true,
+      sortAt: conflict.detectedAt,
+      priority: 10,
+      cardId: conflict.cardId,
+      conflictId: conflict.id
+    });
+  }
+
+  const recentCutoff = recentSuggestionCutoff(now);
+  for (const suggestion of suggestions) {
+    const sortAt = suggestion.reviewedAt || suggestion.createdAt;
+    if (suggestion.status === 'pending' || suggestion.status === 'revision') {
+      addItem({
+        id: `suggestion:${suggestion.id}`,
+        kind: 'suggestion',
+        source: suggestion.authorName,
+        label: suggestion.status === 'revision' ? 'Revision requested' : 'Pending suggestion',
+        detail: suggestion.reason || 'Review proposed card changes.',
+        status: suggestion.status,
+        tone: suggestion.status === 'revision' ? 'info' : 'warning',
+        risk: 'medium',
+        actionLabel: suggestion.status === 'revision' ? 'Review' : 'Decide',
+        affectsNextPull: suggestion.status === 'pending',
+        sortAt,
+        priority: suggestion.status === 'pending' ? 20 : 35,
+        cardId: suggestion.cardId,
+        suggestionId: suggestion.id,
+        authorName: suggestion.authorName
+      });
+      continue;
+    }
+
+    if (new Date(sortAt).getTime() >= recentCutoff) {
+      addItem({
+        id: `recent:${suggestion.id}`,
+        kind: 'recent-change',
+        source: suggestion.authorName,
+        label: suggestion.status === 'accepted' ? 'Recently accepted' : 'Recently rejected',
+        detail: suggestion.reason || 'Recent owner decision.',
+        status: suggestion.status,
+        tone: suggestion.status === 'accepted' ? 'success' : 'neutral',
+        risk: 'low',
+        actionLabel: 'Inspect',
+        affectsNextPull: suggestion.status === 'accepted',
+        sortAt,
+        priority: suggestion.status === 'accepted' ? 55 : 60,
+        cardId: suggestion.cardId,
+        suggestionId: suggestion.id,
+        authorName: suggestion.authorName
+      });
+    }
+  }
+
+  if (pulse?.enabled && pulse.status === 'attention') {
+    for (const pulseItem of pulse.items) {
+      const subjectKey = pulseItem.subjectId || pulseItem.artifactId;
+      const duplicateKey = pulseItem.subjectType === 'suggestion'
+        ? `suggestion:${pulseItem.subjectId}`
+        : pulseItem.subjectType === 'conflict'
+          ? `conflict:${pulseItem.subjectId}`
+          : '';
+      if (duplicateKey && items.has(duplicateKey)) continue;
+
+      const staleQualityFinding = pulseItem.kind === 'quality-issue' && pulseItem.staleness !== 'fresh';
+      addItem({
+        id: `ai:${pulseItem.artifactId || subjectKey}`,
+        kind: 'ai',
+        source: pulseItem.kind === 'review-brief' ? 'AI review brief' : staleQualityFinding ? 'Stale quality finding' : 'AI pulse',
+        label: pulseItem.label,
+        detail: `${pulseItem.severity} risk · ${pulseItem.staleness} · ${pulseItem.detail}`,
+        status: 'pending',
+        tone: severityTone(pulseItem.severity),
+        risk: severityRisk(pulseItem.severity),
+        actionLabel: pulseItem.action === 'conflict' ? 'Resolve' : pulseItem.action === 'setup' ? 'Repair' : 'Inspect',
+        affectsNextPull: pulseItem.action === 'suggestion' || pulseItem.action === 'conflict' || staleQualityFinding,
+        sortAt: pulseItem.createdAt,
+        priority: pulseItem.severity === 'high' ? 25 : pulseItem.severity === 'medium' ? 40 : 50,
+        cardId: pulseItem.subjectType === 'card' ? pulseItem.subjectId : undefined,
+        suggestionId: pulseItem.subjectType === 'suggestion' ? pulseItem.subjectId : undefined,
+        conflictId: pulseItem.subjectType === 'conflict' ? pulseItem.subjectId : undefined,
+        artifactId: pulseItem.artifactId
+      });
+    }
+  }
+
+  return Array.from(items.values()).sort((left, right) => (
+    left.priority - right.priority || new Date(right.sortAt).getTime() - new Date(left.sortAt).getTime() || left.id.localeCompare(right.id)
+  ));
 }
 
 function deriveOwnerAttentionItems({
@@ -436,7 +592,11 @@ function SyncHealthStrip({ health, onAction }: { health: SyncHealth; onAction: (
         <small>{health.packageLabel} · {health.deckLabel} · {health.localDeckLabel}</small>
       </div>
       <span className={`sync-badge sync-badge--${health.tone}`}>{health.badge}</span>
-      <small className="sync-strip-detail">{health.lastSyncedLabel === 'Not yet' || health.state === 'dry-run-passed' ? health.detail : `Last sync ${health.lastSyncedLabel} · ${health.conflictLabel}`}</small>
+      <small className="sync-strip-detail">
+        {health.state === 'dry-run-passed'
+          ? health.detail
+          : `Checked ${health.lastCheckedLabel} · Last success ${health.lastSyncedLabel} · ${health.conflictLabel}`}
+      </small>
       <button className="icon-button" title={health.primaryLabel} onClick={() => onAction(health.primaryAction)}>
         <Icon name={health.primaryAction === 'conflicts' ? 'x' : 'sync'} />
       </button>
@@ -597,6 +757,7 @@ export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
+  const [selectedOwnerQueueItemId, setSelectedOwnerQueueItemId] = useState<string | null>(null);
   const [selectedSuggestionIds, setSelectedSuggestionIds] = useState<Set<string>>(new Set());
   const [commentsVersion, setCommentsVersion] = useState(0);
   const [queryInput, setQueryInput] = useState('');
@@ -774,19 +935,37 @@ export default function App() {
   const canReview = ['owner', 'editor', 'reviewer'].includes(membershipRole);
   const canManageDeck = membershipRole === 'owner';
   const canSuggest = ['owner', 'editor', 'reviewer', 'contributor'].includes(membershipRole);
+  const syncSnapshot = state?.sync || {
+    ankiConnectUrl: '',
+    connected: false,
+    lastCheckedAt: null,
+    lastPullAt: null,
+    lastPushAt: null,
+    lastAddonSync: null,
+    conflicts: []
+  };
+  const activeSyncConflicts = syncSnapshot.conflicts;
+  const pendingConflictIds = useMemo(() => activeSyncConflicts.map((conflict) => conflict.id), [activeSyncConflicts]);
   const suggestions = useMemo(
     () => (state?.suggestions || []).filter((item) => item.deckId === activeDeck?.id),
     [state, activeDeck]
   );
   const pendingSuggestions = useMemo(() => suggestions.filter((item) => item.status === 'pending'), [suggestions]);
   const reviewAuthors = useMemo(() => ['All', ...Array.from(new Set(suggestions.map((item) => item.authorName))).sort()], [suggestions]);
-  const queueSuggestions = useMemo(() => suggestions.filter((item) => {
+  const ownerReviewQueue = useMemo(() => deriveOwnerReviewQueue({
+    suggestions,
+    conflicts: activeSyncConflicts,
+    pulse: qualityPulse
+  }), [activeSyncConflicts, qualityPulse, suggestions]);
+  const queueItems = useMemo(() => ownerReviewQueue.filter((item) => {
     const statusMatch = reviewStatusFilter === 'all' || item.status === reviewStatusFilter;
-    const authorMatch = reviewAuthorFilter === 'All' || item.authorName === reviewAuthorFilter;
+    const authorMatch = reviewAuthorFilter === 'All' || !item.authorName || item.authorName === reviewAuthorFilter;
     return statusMatch && authorMatch;
-  }), [suggestions, reviewStatusFilter, reviewAuthorFilter]);
-  const selectedSuggestion = queueSuggestions.find((item) => item.id === selectedSuggestionId) || queueSuggestions[0];
-  const selectedCard = activeDeck?.cards.find((card) => card.id === (selectedSuggestion?.cardId || selectedCardId)) || activeDeck?.cards[0];
+  }), [ownerReviewQueue, reviewStatusFilter, reviewAuthorFilter]);
+  const selectedOwnerQueueItem = queueItems.find((item) => item.id === selectedOwnerQueueItemId) || queueItems[0];
+  const selectedSuggestion = suggestions.find((item) => item.id === (selectedOwnerQueueItem?.suggestionId || selectedSuggestionId)) ||
+    suggestions.find((item) => item.id === selectedSuggestionId);
+  const selectedCard = activeDeck?.cards.find((card) => card.id === (selectedSuggestion?.cardId || selectedOwnerQueueItem?.cardId || selectedCardId)) || activeDeck?.cards[0];
   const selectedSuggestionBrief = selectedSuggestion ? suggestionBriefs[selectedSuggestion.id] : null;
   const selectedDuplicateLinks = useMemo(() => duplicateLinks.filter((link) => (
     selectedCard && (link.sourceCardId === selectedCard.id || link.targetCardId === selectedCard.id)
@@ -851,17 +1030,6 @@ export default function App() {
     };
   }, [suggestions]);
   const deckEmbedCode = activeDeck ? `<iframe src="${window.location.origin}/embed/decks/${activeDeck.id}" title="${activeDeck.name}" loading="lazy"></iframe>` : '';
-  const syncSnapshot = state?.sync || {
-    ankiConnectUrl: '',
-    connected: false,
-    lastCheckedAt: null,
-    lastPullAt: null,
-    lastPushAt: null,
-    lastAddonSync: null,
-    conflicts: []
-  };
-  const activeSyncConflicts = syncSnapshot.conflicts;
-  const pendingConflictIds = useMemo(() => activeSyncConflicts.map((conflict) => conflict.id), [activeSyncConflicts]);
   useEffect(() => {
     setConflictReviewSnapshot((previous) => {
       if (!activeDeck?.id) return previous.length ? [] : previous;
@@ -1148,7 +1316,10 @@ export default function App() {
     if (action === 'suggestions') {
       setReviewStatusFilter(item.subjectId ? 'all' : 'pending');
       setReviewAuthorFilter('All');
-      if (item.subjectId) setSelectedSuggestionId(item.subjectId);
+      if (item.subjectId) {
+        setSelectedSuggestionId(item.subjectId);
+        setSelectedOwnerQueueItemId(`suggestion:${item.subjectId}`);
+      }
       setReviewTab('changes');
       return;
     }
@@ -1165,6 +1336,7 @@ export default function App() {
         setCardStateFilter('All');
         setPage(targetPage);
         setSelectedSuggestionId(null);
+        setSelectedOwnerQueueItemId(null);
         setSelectedCardId(item.subjectId);
         window.setTimeout(() => setPage(targetPage), 260);
       }
@@ -1195,6 +1367,30 @@ export default function App() {
       },
       proposedTags: Array.from(new Set([...selectedCard.tags, 'Needs-owner-review']))
     }), 'Suggestion added to owner review queue');
+  }
+
+  function selectOwnerQueueItem(item: OwnerReviewQueueItem) {
+    setSelectedOwnerQueueItemId(item.id);
+    if (item.suggestionId) setSelectedSuggestionId(item.suggestionId);
+    else setSelectedSuggestionId(null);
+
+    if (item.cardId) {
+      setSelectedCardId(item.cardId);
+      setQueryInput('');
+      setTagFilter('All');
+      setCardStateFilter('All');
+      const targetIndex = activeDeck?.cards.findIndex((card) => card.id === item.cardId) ?? -1;
+      if (targetIndex >= 0) setPage(Math.floor(targetIndex / pageSize) + 1);
+    }
+
+    if (item.kind === 'conflict') {
+      setActiveTab('overview');
+    } else if (item.kind === 'ai' && item.conflictId) {
+      setActiveTab('overview');
+    } else if (item.cardId) {
+      setActiveTab('cards');
+    }
+    setReviewTab('changes');
   }
 
   function decideSuggestion(decision: 'accepted' | 'rejected' | 'revision') {
@@ -1848,7 +2044,12 @@ export default function App() {
                       }
                       setSelectedCardId(card.id);
                       const linked = suggestions.find((item) => item.cardId === card.id && item.status === 'pending');
-                      if (linked) setSelectedSuggestionId(linked.id);
+                      if (linked) {
+                        setSelectedSuggestionId(linked.id);
+                        setSelectedOwnerQueueItemId(`suggestion:${linked.id}`);
+                      } else {
+                        setSelectedOwnerQueueItemId(null);
+                      }
                     }}
                     onDoubleClick={() => canSuggest && selectedCardIds.size === 0 && setEditingCardId(card.id)}
                     title={canSuggest ? 'Double-click to edit / Shift-click to select' : 'Shift-click to select'}
@@ -1916,12 +2117,13 @@ export default function App() {
             />
 
             <div className="review-heading">
-              <strong>Review Queue <span>{pendingSuggestions.length}</span></strong>
+              <strong>Review Queue <span>{ownerReviewQueue.length}</span></strong>
               <button
                 type="button"
                 onClick={() => {
                   setReviewStatusFilter('pending');
                   setReviewAuthorFilter('All');
+                  setSelectedOwnerQueueItemId(null);
                 }}
                 disabled={reviewStatusFilter === 'pending' && reviewAuthorFilter === 'All'}
               >
@@ -1960,10 +2162,10 @@ export default function App() {
                 <div className="suggestion-author">
                   <span className="avatar">{initials(selectedSuggestion?.authorName || 'Card')}</span>
                   <span>
-                    <strong>{selectedSuggestion?.authorName || 'Selected card'}</strong>
-                    <small>{selectedSuggestion ? relativeTime(selectedSuggestion.createdAt) : 'No pending suggestion selected'}</small>
+                    <strong>{selectedSuggestion?.authorName || selectedOwnerQueueItem?.source || 'Selected card'}</strong>
+                    <small>{selectedSuggestion ? relativeTime(selectedSuggestion.createdAt) : selectedOwnerQueueItem ? selectedOwnerQueueItem.detail : 'No pending suggestion selected'}</small>
                   </span>
-                  <b className="pending-status">{selectedSuggestion?.status || 'draft'}</b>
+                  <b className="pending-status">{selectedSuggestion?.status || selectedOwnerQueueItem?.status || 'draft'}</b>
                 </div>
                 <p className="card-context">Card: {fieldValue(selectedCard, 'Front') || Object.values(selectedCard.fields)[0]}</p>
                 {activeDeck.aiSettings?.embeddings ? (
@@ -2033,9 +2235,19 @@ export default function App() {
                 ) : (
                   <div className="decision-row">
                     <button className="button secondary" onClick={createSuggestion} disabled={busy || !canSuggest}><Icon name="spark" /> Suggest edit</button>
-                    <button className="button primary" disabled={busy || state.sync.conflicts.length > 0} onClick={() => activeDeck && refreshWith(api.ankiPush(activeDeck.id), 'Pushed accepted note updates', (value) => value.state)}>
+                    <button
+                      className="button primary"
+                      disabled={busy || state.sync.conflicts.length > 0}
+                      title={state.sync.conflicts.length > 0 ? `Push blocked: resolve ${state.sync.conflicts.length} sync conflict${state.sync.conflicts.length === 1 ? '' : 's'} before writing accepted changes back to Anki.` : undefined}
+                      onClick={() => activeDeck && refreshWith(api.ankiPush(activeDeck.id), 'Pushed accepted note updates', (value) => value.state)}
+                    >
                       <Icon name="sync" /> Push to Anki
                     </button>
+                    {state.sync.conflicts.length > 0 ? (
+                      <small className="conflict-block-rationale" style={{ gridColumn: '1 / -1' }}>
+                        Push blocked because unresolved sync conflicts could overwrite local Anki or DeckBridge edits.
+                      </small>
+                    ) : null}
                   </div>
                 )}
                 </>) : (
@@ -2070,12 +2282,14 @@ export default function App() {
             ) : null}
 
             <div className="queue-list">
-              {queueSuggestions.length ? queueSuggestions.map((suggestion) => (
+              {queueItems.length ? queueItems.map((item) => {
+                const suggestion = item.suggestionId ? suggestions.find((candidate) => candidate.id === item.suggestionId) : undefined;
+                return (
                 <div
-                  className={`queue-item ${suggestion.id === selectedSuggestion?.id ? 'active' : ''}`}
-                  key={suggestion.id}
+                  className={`queue-item ${item.id === selectedOwnerQueueItem?.id ? 'active' : ''}`}
+                  key={item.id}
                 >
-                  {canReview && suggestion.status === 'pending' ? (
+                  {canReview && suggestion?.status === 'pending' ? (
                     <input
                       type="checkbox"
                       className="queue-select"
@@ -2093,17 +2307,18 @@ export default function App() {
                   <button
                     type="button"
                     className="queue-item-main"
-                    onClick={() => setSelectedSuggestionId(suggestion.id)}
+                    onClick={() => selectOwnerQueueItem(item)}
                   >
-                    <span className="avatar">{initials(suggestion.authorName)}</span>
+                    <span className="avatar">{initials(item.source)}</span>
                     <span>
-                      <strong>{suggestion.authorName}</strong>
-                      <small>{relativeTime(suggestion.createdAt)}</small>
+                      <strong>{item.label}</strong>
+                      <small>{item.source} · {relativeTime(item.sortAt)} · {item.affectsNextPull ? 'Affects next pull' : 'No pull impact'}</small>
                     </span>
-                    <b className={`queue-status ${suggestion.status}`}>{suggestion.status}</b>
+                    <b className={`queue-status ${item.status}`}>{item.status}</b>
                   </button>
                 </div>
-              )) : <EmptyState message="No suggestions match the queue filters." />}
+                );
+              }) : <EmptyState message="No owner review items match the queue filters." />}
             </div>
 
             <section className="go-to-features">

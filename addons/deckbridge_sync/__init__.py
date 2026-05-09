@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -117,6 +118,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "create_missing_notes": True,
     "pull_overwrites_local": False,
     "pull_scheduling_on_sync": True,
+    "updates_checkpoint": "",
     "sync_on_profile_open": False,
     "sync_on_close": False,
 }
@@ -135,6 +137,7 @@ DEFAULT_STORED_CONFIG: Dict[str, Any] = {
     "create_missing_notes": DEFAULT_CONFIG["create_missing_notes"],
     "pull_overwrites_local": DEFAULT_CONFIG["pull_overwrites_local"],
     "pull_scheduling_on_sync": DEFAULT_CONFIG["pull_scheduling_on_sync"],
+    "updateCheckpoints": {},
     "sync_on_profile_open": DEFAULT_CONFIG["sync_on_profile_open"],
     "sync_on_close": DEFAULT_CONFIG["sync_on_close"],
 }
@@ -240,9 +243,13 @@ def _stored_from_flat(flat: Dict[str, Any], base: Optional[Dict[str, Any]] = Non
         "create_missing_notes": bool(flat.get("create_missing_notes", base_config.get("create_missing_notes", True))),
         "pull_overwrites_local": bool(flat.get("pull_overwrites_local", base_config.get("pull_overwrites_local", False))),
         "pull_scheduling_on_sync": bool(flat.get("pull_scheduling_on_sync", base_config.get("pull_scheduling_on_sync", True))),
+        "updateCheckpoints": dict(base_config.get("updateCheckpoints", {}) or {}),
         "sync_on_profile_open": bool(flat.get("sync_on_profile_open", base_config.get("sync_on_profile_open", False))),
         "sync_on_close": bool(flat.get("sync_on_close", base_config.get("sync_on_close", False))),
     }
+    updates_checkpoint = str(flat.get("updates_checkpoint", "") or "").strip()
+    if deck_id and updates_checkpoint:
+        next_config["updateCheckpoints"][deck_id] = updates_checkpoint
     next_config["deckMappings"] = [{
         "localDeck": local_deck,
         "deckId": deck_id,
@@ -265,12 +272,14 @@ def _flat_from_stored(stored: Dict[str, Any]) -> Dict[str, Any]:
     platform = stored.get("url", stored.get("platform_url", DEFAULT_CONFIG["platform_url"]))
     if str(platform or "").strip().rstrip("/") in LEGACY_LOCAL_PLATFORM_URLS:
         platform = DEFAULT_PLATFORM_URL
+    deck_id = mapping.get("deckId", stored.get("deck_id", DEFAULT_CONFIG["deck_id"]))
+    checkpoints = stored.get("updateCheckpoints") if isinstance(stored.get("updateCheckpoints"), dict) else {}
     return {
         **DEFAULT_CONFIG,
         "platform_url": platform,
         "api_token": stored.get("token", stored.get("api_token", "")),
         "email": stored.get("email", stored.get("email", "")),
-        "deck_id": mapping.get("deckId", stored.get("deck_id", DEFAULT_CONFIG["deck_id"])),
+        "deck_id": deck_id,
         "local_deck": mapping.get("localDeck", stored.get("local_deck", "")),
         "conflict_policy": mapping.get("conflictPolicy", stored.get("conflict_policy", "detect")),
         "auto_sync_minutes": auto_sync_minutes,
@@ -282,6 +291,7 @@ def _flat_from_stored(stored: Dict[str, Any]) -> Dict[str, Any]:
         "create_missing_notes": stored.get("create_missing_notes", DEFAULT_CONFIG["create_missing_notes"]),
         "pull_overwrites_local": stored.get("pull_overwrites_local", DEFAULT_CONFIG["pull_overwrites_local"]),
         "pull_scheduling_on_sync": stored.get("pull_scheduling_on_sync", DEFAULT_CONFIG["pull_scheduling_on_sync"]),
+        "updates_checkpoint": checkpoints.get(deck_id, stored.get("updates_checkpoint", "")),
         "sync_on_profile_open": stored.get("sync_on_profile_open", DEFAULT_CONFIG["sync_on_profile_open"]),
         "sync_on_close": stored.get("sync_on_close", DEFAULT_CONFIG["sync_on_close"]),
     }
@@ -376,6 +386,68 @@ def platform_url(cfg: Dict[str, Any], path: str) -> str:
     return f"{normalize_platform_url(str(cfg['platform_url']))}{path}"
 
 
+def protocol_recovery_message(
+    *,
+    method: str = "",
+    path: str = "",
+    status: Optional[int] = None,
+    detail: str = "",
+    timeout: Optional[int] = None,
+) -> str:
+    context = f"{method} {path}".strip()
+    lower_detail = str(detail or "").lower()
+    if "media" in lower_detail and ("upload" in lower_detail or "target" in lower_detail or "storage" in lower_detail):
+        return (
+            f"DeckBridge media upload target failed{f' for {context}' if context else ''}: {detail}. "
+            "Retry media upload before card sync; cards can reference media only after the signed upload target succeeds."
+        )
+    if status in (401, 403) or "invalid token" in lower_detail or "unauthorized" in lower_detail:
+        return (
+            f"DeckBridge API {status or 'auth'}: {detail or 'invalid token'}. "
+            "Reconnect DeckBridge from the add-on settings to refresh the API token."
+        )
+    if "deck mapping" in lower_detail or "deckid" in lower_detail or "deck id" in lower_detail or "no deckbridge deck" in lower_detail:
+        return (
+            f"{detail or 'No DeckBridge deck mapping is configured.'} "
+            "Choose a local Anki deck and mapped DeckBridge deck in settings, then try again."
+        )
+    if status == 409 or "conflict" in lower_detail:
+        return (
+            f"DeckBridge detected a conflict while syncing{f' {context}' if context else ''}. "
+            "Review conflicts in DeckBridge before switching away from conflictPolicy=detect or overwriting platform cards."
+        )
+    if timeout is not None:
+        return (
+            f"DeckBridge timed out after {timeout} seconds while waiting for {context}. "
+            "The server may still be processing this deck chunk; wait a moment, then try the push again. "
+            "If it repeats, use a smaller batch size or increase the timeout in settings."
+        )
+    if "ssl" in lower_detail or "certificate" in lower_detail or "tls" in lower_detail:
+        return (
+            f"DeckBridge could not establish a secure HTTPS connection{f' for {context}' if context else ''}: {detail}. "
+            "Check SSL inspection, proxy, VPN, antivirus, or system certificate settings, then retry."
+        )
+    if "proxy" in lower_detail or "vpn" in lower_detail:
+        return (
+            f"DeckBridge network path failed{f' for {context}' if context else ''}: {detail}. "
+            "Check proxy or VPN settings and confirm Anki can reach the DeckBridge URL."
+        )
+    return (
+        f"DeckBridge is unreachable{f' while calling {context}' if context else ''}: {detail}. "
+        "Check your internet connection, VPN/proxy/antivirus rules, and the DeckBridge platform URL in settings."
+    )
+
+
+def _http_error_detail(error: urllib.error.HTTPError) -> str:
+    detail = error.read().decode("utf-8", errors="replace")
+    try:
+        parsed = json.loads(detail)
+        message = parsed.get("detail") or parsed.get("legacyError") or parsed.get("error", {}).get("message") or detail
+    except json.JSONDecodeError:
+        message = detail or str(error)
+    return str(message)
+
+
 def request_json(
     method: str,
     path: str,
@@ -398,20 +470,19 @@ def request_json(
             raw = response.read().decode("utf-8")
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        try:
-            parsed = json.loads(detail)
-            message = parsed.get("legacyError") or parsed.get("error", {}).get("message") or detail
-        except json.JSONDecodeError:
-            message = detail or str(error)
-        raise RuntimeError(f"DeckBridge API {error.code}: {message}") from error
+        message = _http_error_detail(error)
+        recovery = protocol_recovery_message(method=method, path=path, status=error.code, detail=message)
+        if recovery.startswith(f"DeckBridge API {error.code}:"):
+            raise RuntimeError(recovery) from error
+        raise RuntimeError(f"DeckBridge API {error.code}: {recovery}") from error
     except socket.timeout as error:
-        raise RuntimeError(
-            f"DeckBridge timed out after {timeout} seconds while waiting for {method} {path}. "
-            "The server may still be processing this deck chunk; wait a moment, then try the push again."
-        ) from error
+        raise RuntimeError(protocol_recovery_message(method=method, path=path, timeout=timeout)) from error
     except urllib.error.URLError as error:
-        raise RuntimeError(f"DeckBridge is unreachable: {error}") from error
+        reason = getattr(error, "reason", error)
+        detail = str(reason)
+        raise RuntimeError(protocol_recovery_message(method=method, path=path, detail=detail)) from error
+    except ssl.SSLError as error:
+        raise RuntimeError(protocol_recovery_message(method=method, path=path, detail=str(error))) from error
 
 
 def validate_token(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -625,10 +696,26 @@ def upload_media_file(upload_url: str, asset: Dict[str, Any]) -> None:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             response.read()
     except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"DeckBridge media upload failed for {asset['filename']}: {detail or error}") from error
-    except (urllib.error.URLError, socket.timeout) as error:
-        raise RuntimeError(f"DeckBridge media upload failed for {asset['filename']}: {error}") from error
+        detail = _http_error_detail(error)
+        raise RuntimeError(protocol_recovery_message(
+            method="PUT",
+            path=str(asset.get("filename") or "media upload"),
+            status=error.code,
+            detail=f"media upload target failed for {asset['filename']}: {detail}",
+        )) from error
+    except socket.timeout as error:
+        raise RuntimeError(protocol_recovery_message(
+            method="PUT",
+            path=str(asset.get("filename") or "media upload"),
+            timeout=timeout,
+        )) from error
+    except urllib.error.URLError as error:
+        reason = getattr(error, "reason", error)
+        raise RuntimeError(protocol_recovery_message(
+            method="PUT",
+            path=str(asset.get("filename") or "media upload"),
+            detail=f"media upload target failed for {asset['filename']}: {reason}",
+        )) from error
 
 
 def upload_large_media_assets(
@@ -663,7 +750,11 @@ def upload_large_media_assets(
         asset = assets.get(filename)
         upload_url = str(upload.get("uploadUrl") or "")
         if not asset or not upload_url:
-            continue
+            raise RuntimeError(protocol_recovery_message(
+                method="POST",
+                path=f"/api/decks/{deck_id}/media/uploads",
+                detail=f"media upload target missing for {filename or 'a requested file'}",
+            ))
         upload_media_file(upload_url, asset)
         uploaded[filename] = {
             "filename": filename,
@@ -674,6 +765,49 @@ def upload_large_media_assets(
             "storagePath": upload.get("storagePath") or "",
         }
     return uploaded
+
+
+def parse_deck_updates_response(response: Dict[str, Any]) -> Dict[str, Any]:
+    updates = response.get("updates")
+    if updates is None:
+        updates = response.get("changes", [])
+    if not isinstance(updates, list):
+        raise RuntimeError("DeckBridge updates response returned an invalid updates list.")
+    checkpoint = (
+        response.get("checkpoint")
+        or response.get("nextCheckpoint")
+        or response.get("cursor")
+        or (response.get("syncProof") or {}).get("timestamp")
+        or response.get("updatedAt")
+        or ""
+    )
+    return {"updates": updates, "checkpoint": str(checkpoint or "").strip()}
+
+
+def store_updates_checkpoint(deck_id: str, checkpoint: str) -> None:
+    clean_deck_id = str(deck_id or "").strip()
+    clean_checkpoint = str(checkpoint or "").strip()
+    if not clean_deck_id or not clean_checkpoint:
+        return
+    stored = _collection_config() or _stored_from_flat(config())
+    checkpoints = dict(stored.get("updateCheckpoints", {}) or {})
+    checkpoints[clean_deck_id] = clean_checkpoint
+    stored["updateCheckpoints"] = checkpoints
+    _write_config(stored)
+
+
+def fetch_deck_updates(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    cfg = cfg or config()
+    deck_id = str(cfg.get("deck_id", "") or "").strip()
+    if not deck_id:
+        raise RuntimeError(protocol_recovery_message(detail="No DeckBridge deck mapping is configured."))
+    checkpoint = str(cfg.get("updates_checkpoint", "") or "").strip()
+    path = f"/api/decks/{deck_id}/updates"
+    if checkpoint:
+        path += "?" + urllib.parse.urlencode({"since": checkpoint})
+    parsed = parse_deck_updates_response(request_json("GET", path, cfg=cfg))
+    store_updates_checkpoint(deck_id, parsed["checkpoint"])
+    return parsed
 
 
 def collect_media_payload(
@@ -987,7 +1121,7 @@ def post_cards(*, dry_run: bool = False) -> Dict[str, Any]:
         if not deck_id or deck_id not in _visible_deck_ids(me):
             return create_platform_deck_from_anki(cfg, cards)
     elif not deck_id:
-        raise RuntimeError("No DeckBridge deck is selected yet. Use Push Anki deck to DeckBridge to create one from Anki first.")
+        raise RuntimeError(protocol_recovery_message(detail="No DeckBridge deck mapping is configured."))
     responses = [
         request_json(
             "POST",

@@ -27,6 +27,26 @@ const DEFAULT_AI_SETTINGS = Object.freeze({
 
 const AI_ARTIFACT_STATUSES = new Set(['active', 'dismissed', 'accepted', 'rejected', 'stale']);
 
+function countReceivedMedia(syncInput = {}) {
+  return Object.keys(syncInput.media || {}).length;
+}
+
+function addMediaReceivedToSyncProof(syncInput, lastAddonSync, previousResult = null) {
+  const continuingBatch = syncInput.batch
+    && previousResult?.batch?.id === syncInput.batch.id
+    && syncInput.batch.index > 0;
+  const mediaReceived = (continuingBatch ? Number(previousResult.stats?.mediaReceived || 0) : 0)
+    + countReceivedMedia(syncInput);
+  return {
+    ...lastAddonSync,
+    stats: {
+      ...lastAddonSync.stats,
+      mediaReceived
+    },
+    mediaReceived
+  };
+}
+
 function normalizeAiSettings(settings = {}) {
   return {
     reviewBriefs: Boolean(settings.reviewBriefs),
@@ -1193,7 +1213,11 @@ export function createSupabaseRepository(options = {}) {
       if (deckError || !deckRow) fail(404, 'deck_not_found', 'Deck not found');
       const deck = toDeck(deckRow, candidateCards);
       const result = mergeAddonCards(deck, syncInput, user.name);
-      const lastAddonSync = buildAddonSyncResult(syncInput, result, deckRow.last_sync_result || null);
+      const lastAddonSync = addMediaReceivedToSyncProof(
+        syncInput,
+        buildAddonSyncResult(syncInput, result, deckRow.last_sync_result || null),
+        deckRow.last_sync_result || null
+      );
       const isFirstBatchChunk = !syncInput.batch || syncInput.batch.index === 0;
       const isFinalBatchChunk = !syncInput.batch || syncInput.batch.index + 1 >= syncInput.batch.total;
 
@@ -1250,7 +1274,8 @@ export function createSupabaseRepository(options = {}) {
           syncedAt: result.syncedAt,
           source: lastAddonSync.source,
           client: lastAddonSync.client,
-          stats: result.stats,
+          stats: lastAddonSync.stats,
+          proof: lastAddonSync,
           conflicts: result.conflicts
         }
       };

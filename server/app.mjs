@@ -76,6 +76,13 @@ function cleanIsoOrNull(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function cleanProtocolTimestamp(value) {
+  if (!value || typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(trimmed)) return null;
+  return cleanIsoOrNull(trimmed);
+}
+
 function encodeNotificationCursor(row) {
   return Buffer.from(JSON.stringify({ created_at: row.created_at, id: row.id })).toString('base64url');
 }
@@ -274,8 +281,11 @@ function buildAiQualityPulse(settings, artifacts) {
 
 function parseCompatSince(value) {
   if (value === undefined || value === null || value === '') return null;
-  const iso = cleanIsoOrNull(value);
-  if (!iso) fail(400, 'invalid_since', 'since must be a valid ISO timestamp');
+  const iso = cleanProtocolTimestamp(String(value));
+  if (!iso) fail(400, 'invalid_since', 'since must be a valid RFC 3339 UTC timestamp', {
+    parameter: 'since',
+    expected: 'YYYY-MM-DDTHH:mm:ss.sssZ'
+  });
   return iso;
 }
 
@@ -319,13 +329,48 @@ function toCompatDeck(deckOrSummary = {}) {
   };
 }
 
-function toCompatSubscription(summary, membership) {
+function protocolCapabilities() {
+  return {
+    subscriptions: true,
+    deltaUpdates: true,
+    cardSync: true,
+    returnStateFalse: true,
+    mediaUploadTargets: true,
+    schedulingPull: true,
+    suggestionReview: true,
+    syncProof: true,
+    problemDetails: true
+  };
+}
+
+function toCompatSubscription(summary, membership, deckState = {}) {
+  const sync = deckState.sync || {};
+  const lastSyncAt = latestTimestamp([
+    summary.lastSyncedAt,
+    sync.lastAddonSync?.syncedAt,
+    sync.lastPushAt,
+    sync.lastPullAt,
+    sync.lastCheckedAt
+  ]);
+  const pendingReviewCount = summary.pendingSuggestions ?? 0;
+  const unresolvedConflictCount = Array.isArray(sync.conflicts) ? sync.conflicts.length : 0;
+  const capabilities = protocolCapabilities();
   return {
     deck: toCompatDeck(summary),
+    deckMetadata: toCompatDeck(summary),
+    lastSyncAt,
     last_synced_at: summary.lastSyncedAt || null,
+    lastSyncedAt: lastSyncAt,
     subscribed_at: membership?.createdAt || summary.importedAt || null,
+    subscribedAt: membership?.createdAt || summary.importedAt || null,
     role: membership?.role || 'viewer',
-    pending_suggestions: summary.pendingSuggestions ?? 0
+    pendingReviewCount,
+    pending_suggestions: pendingReviewCount,
+    pendingSuggestions: pendingReviewCount,
+    unresolvedConflictCount,
+    unresolved_conflict_count: unresolvedConflictCount,
+    capabilities,
+    protocolCapabilityFlags: capabilities
   };
 }
 
@@ -364,6 +409,75 @@ function toCompatSuggestion(suggestion) {
   };
 }
 
+function changedAtForSuggestion(suggestion) {
+  return latestTimestamp([suggestion.reviewedAt, suggestion.createdAt]);
+}
+
+function toSuggestionStatusUpdate(suggestion) {
+  return {
+    id: suggestion.id,
+    deckId: suggestion.deckId,
+    cardId: suggestion.cardId,
+    status: suggestion.status || 'pending',
+    compatStatus: compatStatusFromSuggestion(suggestion.status),
+    updatedAt: changedAtForSuggestion(suggestion),
+    reviewedAt: suggestion.reviewedAt || null,
+    reviewedBy: suggestion.reviewedBy || null
+  };
+}
+
+function mediaDeltasForCards(deck, cards) {
+  const refs = [...new Set(cards.flatMap((card) => Array.isArray(card.mediaRefs) ? card.mediaRefs : []))];
+  return refs.map((filename) => ({
+    filename,
+    ...(deck.media?.[filename] || {})
+  }));
+}
+
+function templateDeltasForCards(cards) {
+  const byModel = new Map();
+  for (const card of cards) {
+    const hasTemplate = card.templateFront != null || card.templateBack != null || card.modelCss != null;
+    if (!hasTemplate) continue;
+    const modelName = card.modelName || card.type || 'Basic';
+    byModel.set(modelName, {
+      modelName,
+      templateFront: card.templateFront || '',
+      templateBack: card.templateBack || '',
+      modelCss: card.modelCss || '',
+      updatedAt: card.modifiedAt || null
+    });
+  }
+  return [...byModel.values()];
+}
+
+function schedulingDeltasForCards(cards) {
+  return cards
+    .filter((card) => card.due !== undefined || card.state !== undefined || card.suspended !== undefined)
+    .map((card) => ({
+      cardId: card.id,
+      ankiNoteId: card.ankiNoteId ?? null,
+      due: card.due ?? null,
+      state: card.state || null,
+      suspended: Boolean(card.suspended),
+      updatedAt: card.modifiedAt || null
+    }));
+}
+
+function syncProofForUpdates(sync = {}, sinceMs = 0) {
+  const proof = sync.lastAddonSync || null;
+  const proofMs = Date.parse(proof?.syncedAt || '');
+  if (!proof || !Number.isFinite(proofMs) || proofMs <= sinceMs) return null;
+  return {
+    syncedAt: proof.syncedAt,
+    source: proof.source || null,
+    client: proof.client || null,
+    stats: proof.stats || {},
+    batch: proof.batch || null,
+    mediaReceived: Number(proof.mediaReceived || proof.stats?.mediaReceived || 0)
+  };
+}
+
 function buildCompatUpdates(deckState, deckId, sinceIso) {
   const sinceMs = sinceIso ? Date.parse(sinceIso) : 0;
   const deck = deckState.decks.find((item) => item.id === deckId) || deckState.decks[0];
@@ -374,25 +488,43 @@ function buildCompatUpdates(deckState, deckId, sinceIso) {
   });
   const changedSuggestions = (deckState.suggestions || []).filter((suggestion) => {
     if (suggestion.deckId !== deck.id) return false;
-    const changedAt = latestTimestamp([suggestion.reviewedAt, suggestion.createdAt]);
+    const changedAt = changedAtForSuggestion(suggestion);
     const changedMs = Date.parse(changedAt || '');
     return Number.isFinite(changedMs) && changedMs > sinceMs;
   });
+  const syncProof = syncProofForUpdates(deckState.sync, sinceMs);
   const lastUpdated = latestTimestamp([
     deck.lastSyncedAt,
     deck.importedAt,
     ...changedCards.map((card) => card.modifiedAt),
-    ...changedSuggestions.map((suggestion) => suggestion.reviewedAt || suggestion.createdAt)
+    ...changedSuggestions.map((suggestion) => suggestion.reviewedAt || suggestion.createdAt),
+    syncProof?.syncedAt
   ]);
+  const notes = changedCards.map(toCompatNote);
+  const suggestions = changedSuggestions.map(toCompatSuggestion);
   return {
     deck: toCompatDeck(deck),
     since: sinceIso,
     last_updated: lastUpdated,
-    notes: changedCards.map(toCompatNote),
-    suggestions: changedSuggestions.map(toCompatSuggestion),
+    lastUpdated,
+    notes,
+    cards: notes,
+    deletedCards: [],
+    hiddenCards: [],
+    suggestions,
+    suggestionStatusUpdates: changedSuggestions.map(toSuggestionStatusUpdate),
+    media: mediaDeltasForCards(deck, changedCards),
+    templates: templateDeltasForCards(changedCards),
+    scheduling: schedulingDeltasForCards(changedCards),
+    syncProof,
     counts: {
       notes: changedCards.length,
-      suggestions: changedSuggestions.length
+      cards: changedCards.length,
+      suggestions: changedSuggestions.length,
+      suggestionStatusUpdates: changedSuggestions.length,
+      media: mediaDeltasForCards(deck, changedCards).length,
+      templates: templateDeltasForCards(changedCards).length,
+      scheduling: schedulingDeltasForCards(changedCards).length
     }
   };
 }
@@ -876,12 +1008,17 @@ export function createApp(options = {}) {
         repository.getMe(req.user)
       ]);
       const membershipsByDeck = new Map((me.memberships || []).map((membership) => [membership.deckId, membership]));
+      const states = await Promise.all(summaries.map((summary) => repository.getDeckState(req.user, summary.id)));
+      const statesByDeck = new Map(states.map((state, index) => [summaries[index].id, state]));
       res.json({
-        subscriptions: summaries.map((summary) => toCompatSubscription(summary, membershipsByDeck.get(summary.id))),
+        subscriptions: summaries.map((summary) => toCompatSubscription(summary, membershipsByDeck.get(summary.id), statesByDeck.get(summary.id))),
         api: {
           namespace: '/api',
           compatibility: 'ankihub-inspired',
-          confirmedFeatures: ['subscriptions', 'delta-updates', 'suggestion-review']
+          protocol: 'deckbridge',
+          protocolVersion: '2026-05-09',
+          capabilities: protocolCapabilities(),
+          confirmedFeatures: ['subscriptions', 'delta-updates', 'suggestion-review', 'sync-proof', 'media-upload-targets']
         }
       });
     } catch (error) {
@@ -2620,7 +2757,10 @@ export function createApp(options = {}) {
       try {
         syncInput = normalizeAddonSyncInput(req.body);
       } catch (error) {
-        fail(400, 'invalid_sync_payload', error.message);
+        fail(400, 'invalid_sync_payload', error.message, {
+          endpoint: 'sync_cards',
+          expected: 'cards array with at least one card containing fields'
+        });
       }
       if (!repository.syncCardsFromAddon) fail(501, 'sync_unavailable', 'Card sync is not available for this repository');
       res.json(await repository.syncCardsFromAddon(req.user, deckId, syncInput));

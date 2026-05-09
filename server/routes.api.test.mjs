@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -284,7 +285,14 @@ test('AnkiHub-style subscriptions list visible decks with sync metadata', async 
   assert.equal(response.body.subscriptions[0].deck.uuid, 'deck-demo-zanki');
   assert.equal(response.body.subscriptions[0].role, 'owner');
   assert.equal(response.body.subscriptions[0].pending_suggestions, 1);
+  assert.equal(response.body.subscriptions[0].pendingReviewCount, 1);
+  assert.equal(response.body.subscriptions[0].unresolvedConflictCount, 0);
+  assert.equal(response.body.subscriptions[0].capabilities.deltaUpdates, true);
+  assert.equal(response.body.subscriptions[0].capabilities.syncProof, true);
+  assert.ok(response.body.subscriptions[0].lastSyncAt);
+  assert.equal(response.body.subscriptions[0].deckMetadata.uuid, 'deck-demo-zanki');
   assert.equal(response.body.api.compatibility, 'ankihub-inspired');
+  assert.equal(response.body.api.capabilities.mediaUploadTargets, true);
   assert.ok(response.body.api.confirmedFeatures.includes('delta-updates'));
 });
 
@@ -302,7 +310,14 @@ test('AnkiHub-style updates return changed notes and suggestions since a checkpo
   assert.equal(initial.body.notes[0].note_type, 'Basic');
   assert.match(initial.body.notes[0].content_hash, /^[a-f0-9]{64}$/);
   assert.equal(initial.body.suggestions[0].status, 'pending');
-  assert.deepEqual(initial.body.counts, { notes: 4, suggestions: 1 });
+  assert.equal(initial.body.cards.length, 4);
+  assert.equal(initial.body.suggestionStatusUpdates[0].status, 'pending');
+  assert.ok(Array.isArray(initial.body.media));
+  assert.ok(Array.isArray(initial.body.templates));
+  assert.ok(Array.isArray(initial.body.scheduling));
+  assert.equal(initial.body.counts.notes, 4);
+  assert.equal(initial.body.counts.cards, 4);
+  assert.equal(initial.body.counts.suggestions, 1);
 
   const empty = await asUser(request(app)
     .get('/api/decks/deck-demo-zanki/updates')
@@ -311,9 +326,15 @@ test('AnkiHub-style updates return changed notes and suggestions since a checkpo
   assert.equal(empty.body.notes.length, 0);
   assert.equal(empty.body.suggestions.length, 0);
 
-  await asUser(request(app)
+  const malformed = await asUser(request(app)
     .get('/api/decks/deck-demo-zanki/updates')
     .query({ since: 'not-a-date' }), 'you', 'You').expect(400);
+  assert.match(malformed.headers['content-type'], /^application\/problem\+json/);
+  assert.equal(malformed.body.type, 'https://api.deckbridge.app/errors/invalid_since');
+  assert.equal(malformed.body.title, 'Invalid Since Parameter');
+  assert.equal(malformed.body.status, 400);
+  assert.equal(malformed.body.code, 'invalid_since');
+  assert.equal(malformed.body.details.parameter, 'since');
 });
 
 test('AnkiHub-style suggestion list, diff submit, and patch decision aliases work', async () => {
@@ -1532,6 +1553,8 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
   assert.equal(created.body.result.stats.created, 1);
   assert.equal(created.body.result.source, 'DeckBridge Sync test');
   assert.equal(created.body.result.client.name, 'DeckBridge Sync');
+  assert.equal(created.body.result.proof.client.version, '0.1.0');
+  assert.equal(created.body.result.proof.stats.created, 1);
   assert.equal(created.body.state.sync.lastAddonSync.stats.created, 1);
   assert.equal(created.body.state.sync.lastAddonSync.client.version, '0.1.0');
   assert.equal(created.body.state.decks[0].cards.some((card) => card.ankiNoteId === 9001), true);
@@ -1626,6 +1649,7 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
   assert.equal(batch.body.state.sync.lastAddonSync.stats.total, 2);
   assert.equal(batch.body.state.sync.lastAddonSync.stats.created, 2);
   assert.equal(batch.body.state.sync.lastAddonSync.batch.complete, true);
+  assert.equal(batch.body.result.proof.batch.complete, true);
 
   await asUser(request(app)
     .post('/api/decks/deck-demo-zanki/sync/cards')
@@ -1657,6 +1681,55 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
   assert.equal(conflictBatch.body.state.sync.lastAddonSync.stats.conflicts, 2);
 });
 
+test('Anki add-on sync rejects invalid payloads with RFC 7807 details', async () => {
+  const { app } = await createTestApp();
+
+  const response = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({ returnState: false, cards: [] }), 'you', 'You')
+    .expect(400);
+
+  assert.match(response.headers['content-type'], /^application\/problem\+json/);
+  assert.equal(response.body.type, 'https://api.deckbridge.app/errors/invalid_sync_payload');
+  assert.equal(response.body.title, 'Invalid Sync Payload');
+  assert.equal(response.body.status, 400);
+  assert.equal(response.body.code, 'invalid_sync_payload');
+  assert.equal(response.body.details.endpoint, 'sync_cards');
+  assert.equal(response.body.error.code, 'invalid_sync_payload');
+});
+
+test('Anki add-on sync preserves full decoded compressed field content', async () => {
+  const { app } = await createTestApp();
+  const fullBack = `High-yield explanation\n${Array.from({ length: 600 }, (_, index) => `preserved-content-${index}`).join('|')}`;
+  const compressed = deflateSync(Buffer.from(fullBack, 'utf8'));
+
+  const response = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'overwrite-platform',
+      source: 'DeckBridge Sync compressed test',
+      cards: [{
+        id: 'anki-compressed-1',
+        ankiNoteId: 9910,
+        fieldOrder: ['Front', 'Back'],
+        fields: { Front: 'Compressed payload card?' },
+        compressedFields: {
+          Back: {
+            encoding: 'zlib+base64',
+            data: compressed.toString('base64'),
+            originalBytes: Buffer.byteLength(fullBack, 'utf8'),
+            sha256: sha256(Buffer.from(fullBack, 'utf8'))
+          }
+        }
+      }]
+    }), 'you', 'You').expect(200);
+
+  const card = response.body.state.decks[0].cards.find((item) => item.id === 'anki-compressed-1');
+  assert.equal(card.fields.Back, fullBack);
+  assert.equal(card.fields.Back.length, fullBack.length);
+  assert.equal(response.body.result.proof.stats.created, 1);
+});
+
 test('Anki add-on sync persists media and serves it through authenticated route', async () => {
   const { app } = await createTestApp();
   const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
@@ -1683,6 +1756,9 @@ test('Anki add-on sync persists media and serves it through authenticated route'
     }), 'you', 'You').expect(200);
 
   assert.equal(synced.body.state.decks[0].media[filename].mimeType, 'image/png');
+  assert.equal(synced.body.result.stats.mediaReceived, 1);
+  assert.equal(synced.body.result.proof.stats.mediaReceived, 1);
+  assert.equal(synced.body.result.proof.mediaReceived, 1);
 
   const media = await asUser(request(app)
     .get(`/api/decks/deck-demo-zanki/media/${encodeURIComponent(filename)}`), 'you', 'You')
@@ -1760,6 +1836,29 @@ test('large media upload targets return signed storage metadata', async () => {
     .expect(201);
 
   assert.deepEqual(response.body.uploads, [upload]);
+  assert.equal(response.body.uploads[0].uploadUrl, upload.uploadUrl);
+  assert.equal(response.body.uploads[0].storageBucket, 'deckbridge-media');
+  assert.equal(response.body.uploads[0].storagePath, `deck-demo-zanki/${'d'.repeat(64)}/large.png`);
+});
+
+test('OpenAPI documents sync result fields and supported suggestion diff limits', async () => {
+  const openapi = await fs.readFile(path.resolve(process.cwd(), 'openapi.yaml'), 'utf8');
+  const addonSyncResult = openapi.slice(
+    openapi.indexOf('    AddonSyncResult:'),
+    openapi.indexOf('    # ─── Comments', openapi.indexOf('    AddonSyncResult:'))
+  );
+  const createSuggestion = openapi.slice(
+    openapi.indexOf('  /api/decks/{deckId}/suggestions:'),
+    openapi.indexOf('  /api/decks/{deckId}/suggestions/bulk-decision:')
+  );
+
+  for (const token of ['proof:', 'conflicts:', 'mediaReceived:', 'stats:', 'batch:']) {
+    assert.ok(addonSyncResult.includes(token), `AddonSyncResult must document ${token}`);
+  }
+  assert.ok(createSuggestion.includes('Only field and tag'));
+  assert.ok(createSuggestion.includes('diffs are accepted in this slice;'));
+  assert.ok(openapi.includes('invalid_sync_payload'));
+  assert.ok(openapi.includes('details:'));
 });
 
 test('storage-backed media route redirects through authenticated signed download', async () => {

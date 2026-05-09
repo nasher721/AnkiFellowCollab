@@ -69,15 +69,26 @@ function titleForCode(code) {
 }
 
 export class AppError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, details = {}) {
     super(message);
     this.status = status;
     this.code = code;
+    this.details = details && typeof details === 'object' && !Array.isArray(details) ? details : {};
   }
 }
 
-export function fail(status, code, message) {
-  throw new AppError(status, code, message);
+export function fail(status, code, message, details = {}) {
+  throw new AppError(status, code, message, details);
+}
+
+function boundedDetails(details = {}) {
+  const bounded = {};
+  for (const [key, value] of Object.entries(details || {}).slice(0, 12)) {
+    if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+      bounded[key] = typeof value === 'string' ? value.slice(0, 500) : value;
+    }
+  }
+  return bounded;
 }
 
 export function errorPayload(error, production = false) {
@@ -93,6 +104,7 @@ export function errorPayload(error, production = false) {
       status,
       detail,
       code,
+      details: boundedDetails(error.details),
       message: detail,
       error: { code, message: detail }
     }
