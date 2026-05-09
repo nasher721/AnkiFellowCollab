@@ -252,7 +252,7 @@ export function createLocalRepository() {
       };
     },
 
-    async uploadDeck(user, deck) {
+    async uploadDeck(user, deck, options = {}) {
       const state = await loadState();
       ensureCollections(state);
       const owner = state.collaborators.find((person) => person.id === user.id);
@@ -274,6 +274,7 @@ export function createLocalRepository() {
         at: nowIso()
       });
       await saveState(state);
+      if (options.returnState === false) return null;
       return this.getDeckState(user, deck.id);
     },
 

@@ -260,6 +260,146 @@ function buildAiQualityPulse(settings, artifacts) {
   };
 }
 
+function parseCompatSince(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const iso = cleanIsoOrNull(value);
+  if (!iso) fail(400, 'invalid_since', 'since must be a valid ISO timestamp');
+  return iso;
+}
+
+function compatStatusFromSuggestion(status) {
+  if (status === 'accepted') return 'approved';
+  if (status === 'revision') return 'needs_revision';
+  return status || 'pending';
+}
+
+function deckTagNames(deck = {}) {
+  return [...new Set((deck.cards || []).flatMap((card) => Array.isArray(card.tags) ? card.tags : []))].sort();
+}
+
+function latestTimestamp(values) {
+  const timestamps = values
+    .filter(Boolean)
+    .map((value) => Date.parse(value))
+    .filter((value) => Number.isFinite(value));
+  if (!timestamps.length) return null;
+  return new Date(Math.max(...timestamps)).toISOString();
+}
+
+function toCompatDeck(deckOrSummary = {}) {
+  return {
+    uuid: deckOrSummary.id,
+    id: deckOrSummary.id,
+    name: deckOrSummary.name,
+    description: deckOrSummary.description || '',
+    owner: deckOrSummary.owner || deckOrSummary.ownerName || '',
+    card_count: deckOrSummary.cardCount ?? deckOrSummary.cards?.length ?? 0,
+    note_count: deckOrSummary.noteCount ?? deckOrSummary.cards?.length ?? 0,
+    tag_count: deckOrSummary.tagCount ?? deckTagNames(deckOrSummary).length,
+    note_types: deckOrSummary.noteTypes || [...new Set((deckOrSummary.cards || []).map((card) => card.type).filter(Boolean))],
+    tags: deckTagNames(deckOrSummary),
+    last_updated: latestTimestamp([
+      deckOrSummary.lastSyncedAt,
+      deckOrSummary.importedAt,
+      ...(deckOrSummary.cards || []).map((card) => card.modifiedAt)
+    ]),
+    is_public: deckOrSummary.visibility === 'public'
+  };
+}
+
+function toCompatSubscription(summary, membership) {
+  return {
+    deck: toCompatDeck(summary),
+    last_synced_at: summary.lastSyncedAt || null,
+    subscribed_at: membership?.createdAt || summary.importedAt || null,
+    role: membership?.role || 'viewer',
+    pending_suggestions: summary.pendingSuggestions ?? 0
+  };
+}
+
+function toCompatNote(card) {
+  return {
+    guid: card.id,
+    anki_note_id: card.ankiNoteId ?? null,
+    note_type: card.modelName || card.type || 'Basic',
+    fields: card.fields || {},
+    tags: Array.isArray(card.tags) ? card.tags : [],
+    ankihub_id: card.id,
+    content_hash: canonicalCardInputHash(card),
+    updated_at: card.modifiedAt || null,
+    state: card.state || 'Unknown',
+    suspended: Boolean(card.suspended),
+    media_refs: card.mediaRefs || []
+  };
+}
+
+function toCompatSuggestion(suggestion) {
+  return {
+    id: suggestion.id,
+    deck_uuid: suggestion.deckId,
+    card_guid: suggestion.cardId,
+    author: suggestion.authorName,
+    status: compatStatusFromSuggestion(suggestion.status),
+    raw_status: suggestion.status,
+    created_at: suggestion.createdAt,
+    reviewed_at: suggestion.reviewedAt || null,
+    reviewed_by: suggestion.reviewedBy || null,
+    diff: {
+      reason: suggestion.reason || '',
+      proposed_fields: suggestion.proposedFields || {},
+      proposed_tags: suggestion.proposedTags || []
+    }
+  };
+}
+
+function buildCompatUpdates(deckState, deckId, sinceIso) {
+  const sinceMs = sinceIso ? Date.parse(sinceIso) : 0;
+  const deck = deckState.decks.find((item) => item.id === deckId) || deckState.decks[0];
+  if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+  const changedCards = (deck.cards || []).filter((card) => {
+    const modifiedMs = Date.parse(card.modifiedAt || '');
+    return Number.isFinite(modifiedMs) && modifiedMs > sinceMs;
+  });
+  const changedSuggestions = (deckState.suggestions || []).filter((suggestion) => {
+    if (suggestion.deckId !== deck.id) return false;
+    const changedAt = latestTimestamp([suggestion.reviewedAt, suggestion.createdAt]);
+    const changedMs = Date.parse(changedAt || '');
+    return Number.isFinite(changedMs) && changedMs > sinceMs;
+  });
+  const lastUpdated = latestTimestamp([
+    deck.lastSyncedAt,
+    deck.importedAt,
+    ...changedCards.map((card) => card.modifiedAt),
+    ...changedSuggestions.map((suggestion) => suggestion.reviewedAt || suggestion.createdAt)
+  ]);
+  return {
+    deck: toCompatDeck(deck),
+    since: sinceIso,
+    last_updated: lastUpdated,
+    notes: changedCards.map(toCompatNote),
+    suggestions: changedSuggestions.map(toCompatSuggestion),
+    counts: {
+      notes: changedCards.length,
+      suggestions: changedSuggestions.length
+    }
+  };
+}
+
+function normalizeCompatSuggestionDecision(status) {
+  const normalized = cleanShortText(status, '', 40).toLowerCase().replace('-', '_');
+  if (normalized === 'approved' || normalized === 'accepted') return 'accepted';
+  if (normalized === 'rejected') return 'rejected';
+  if (normalized === 'needs_revision' || normalized === 'revision') return 'revision';
+  fail(400, 'invalid_decision', 'status must be approved, rejected, or needs_revision');
+}
+
+function normalizeCompatSuggestionStatusFilter(status) {
+  const normalized = cleanShortText(status, '', 40).toLowerCase().replace('-', '_');
+  if (!normalized) return null;
+  if (normalized === 'pending') return 'pending';
+  return normalizeCompatSuggestionDecision(normalized);
+}
+
 function isRecoverableAiError(error) {
   return typeof error?.code === 'string' && error.code.startsWith('ai_');
 }
@@ -707,10 +847,41 @@ export function createApp(options = {}) {
     }
   });
 
+  app.get('/api/decks/subscriptions', auth.requireUser, async (req, res, next) => {
+    try {
+      const [summaries, me] = await Promise.all([
+        repository.listDecks(req.user),
+        repository.getMe(req.user)
+      ]);
+      const membershipsByDeck = new Map((me.memberships || []).map((membership) => [membership.deckId, membership]));
+      res.json({
+        subscriptions: summaries.map((summary) => toCompatSubscription(summary, membershipsByDeck.get(summary.id))),
+        api: {
+          namespace: '/api',
+          compatibility: 'ankihub-inspired',
+          confirmedFeatures: ['subscriptions', 'delta-updates', 'suggestion-review']
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get('/api/decks/:deckId', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
       const deckId = deckIdFromRequest(req);
       res.json(await repository.getDeckState(req.user, deckId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/decks/:deckId/updates', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      const since = parseCompatSince(req.query.since);
+      const deckState = await repository.getDeckState(req.user, deckId);
+      res.json(buildCompatUpdates(deckState, deckId, since));
     } catch (error) {
       next(error);
     }
@@ -1134,7 +1305,8 @@ export function createApp(options = {}) {
     try {
       if (!repository.uploadDeck) fail(501, 'deck_create_unavailable', 'Deck creation is not available for this repository');
       const { deck, result } = normalizeAddonDeckCreateInput(req.body, req.user);
-      const state = await repository.uploadDeck(req.user, deck);
+      const returnState = req.body?.returnState !== false;
+      const state = await repository.uploadDeck(req.user, deck, { returnState });
       const response = {
         deck: {
           id: deck.id,
@@ -1143,7 +1315,7 @@ export function createApp(options = {}) {
         },
         result
       };
-      if (req.body?.returnState !== false) response.state = state;
+      if (returnState) response.state = state;
       res.status(201).json(response);
     } catch (error) {
       next(error);
@@ -1155,9 +1327,20 @@ export function createApp(options = {}) {
       const deckId = deckIdFromRequest(req);
       const deckState = await repository.getDeckState(req.user, deckId);
       const deck = deckState.decks[0];
-      const card = deck.cards.find((item) => item.id === req.body.cardId);
+      const compatDiff = req.body?.diff && typeof req.body.diff === 'object' && !Array.isArray(req.body.diff)
+        ? req.body.diff
+        : null;
+      const body = compatDiff
+        ? {
+            cardId: req.body.cardId || req.body.card_guid || compatDiff.cardId || compatDiff.card_guid || compatDiff.guid,
+            reason: req.body.reason || compatDiff.reason,
+            proposedFields: req.body.proposedFields || compatDiff.proposed_fields || compatDiff.proposedFields || compatDiff.fields,
+            proposedTags: req.body.proposedTags || compatDiff.proposed_tags || compatDiff.proposedTags || compatDiff.tags
+          }
+        : req.body;
+      const card = deck.cards.find((item) => item.id === body.cardId);
       if (!card) fail(404, 'card_not_found', 'Card not found');
-      const input = normalizeSuggestionInput(req.body, card);
+      const input = normalizeSuggestionInput(body, card);
       res.status(201).json(await repository.createSuggestion(req.user, {
         deckId: deck.id,
         cardId: card.id,
@@ -1169,8 +1352,43 @@ export function createApp(options = {}) {
     }
   }
 
+  async function listSuggestions(req, res, next) {
+    try {
+      const deckIds = req.params.deckId
+        ? [deckIdFromRequest(req)]
+        : req.query.deckId || req.query.deck_uuid
+          ? [assertValidDeckId(req.query.deckId || req.query.deck_uuid)]
+          : (await repository.listDecks(req.user)).map((deck) => deck.id);
+      const requestedStatus = normalizeCompatSuggestionStatusFilter(req.query.status);
+      const suggestions = [];
+      for (const deckId of deckIds) {
+        const deckState = await repository.getDeckState(req.user, deckId);
+        suggestions.push(...(deckState.suggestions || []));
+      }
+      const filtered = requestedStatus
+        ? suggestions.filter((suggestion) => suggestion.status === requestedStatus)
+        : suggestions;
+      res.json({ suggestions: filtered.map(toCompatSuggestion) });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  app.get('/api/decks/:deckId/suggestions', validateDeckIdParam, auth.requireUser, listSuggestions);
+  app.get('/api/suggestions', auth.requireUser, listSuggestions);
   app.post('/api/decks/:deckId/suggestions', validateDeckIdParam, auth.requireUser, requireContributor(auth.supabase), createSuggestion);
   app.post('/api/suggestions', validateDeckIdParam, auth.requireUser, requireContributor(auth.supabase), createSuggestion);
+
+  app.patch('/api/suggestions/:id', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireReviewer(auth.supabase), async (req, res, next) => {
+    try {
+      const decision = normalizeCompatSuggestionDecision(req.body.status || req.body.decision);
+      const state = await repository.decideSuggestion(req.user, req.params.id, decision);
+      const suggestion = (state.suggestions || []).find((item) => item.id === req.params.id);
+      res.json({ suggestion: suggestion ? toCompatSuggestion(suggestion) : null, state });
+    } catch (error) {
+      next(error);
+    }
+  });
 
   app.post('/api/suggestions/:id/decision', auth.requireUser, resolveSuggestionDeck(auth.supabase), requireReviewer(auth.supabase), async (req, res, next) => {
     try {

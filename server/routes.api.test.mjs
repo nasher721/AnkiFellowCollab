@@ -275,6 +275,85 @@ test('authenticated API returns current user and visible decks', async () => {
   assert.equal(contributorSession.body.role, 'contributor');
 });
 
+test('AnkiHub-style subscriptions list visible decks with sync metadata', async () => {
+  const { app } = await createTestApp();
+
+  const response = await asUser(request(app).get('/api/decks/subscriptions'), 'you', 'You').expect(200);
+
+  assert.equal(response.body.subscriptions.length, 1);
+  assert.equal(response.body.subscriptions[0].deck.uuid, 'deck-demo-zanki');
+  assert.equal(response.body.subscriptions[0].role, 'owner');
+  assert.equal(response.body.subscriptions[0].pending_suggestions, 1);
+  assert.equal(response.body.api.compatibility, 'ankihub-inspired');
+  assert.ok(response.body.api.confirmedFeatures.includes('delta-updates'));
+});
+
+test('AnkiHub-style updates return changed notes and suggestions since a checkpoint', async () => {
+  const { app } = await createTestApp();
+
+  const initial = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/updates')
+    .query({ since: '1970-01-01T00:00:00.000Z' }), 'you', 'You').expect(200);
+
+  assert.equal(initial.body.deck.uuid, 'deck-demo-zanki');
+  assert.equal(initial.body.notes.length, 4);
+  assert.equal(initial.body.suggestions.length, 1);
+  assert.equal(initial.body.notes[0].guid, 'card-anca');
+  assert.equal(initial.body.notes[0].note_type, 'Basic');
+  assert.match(initial.body.notes[0].content_hash, /^[a-f0-9]{64}$/);
+  assert.equal(initial.body.suggestions[0].status, 'pending');
+  assert.deepEqual(initial.body.counts, { notes: 4, suggestions: 1 });
+
+  const empty = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/updates')
+    .query({ since: '2999-01-01T00:00:00.000Z' }), 'you', 'You').expect(200);
+
+  assert.equal(empty.body.notes.length, 0);
+  assert.equal(empty.body.suggestions.length, 0);
+
+  await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/updates')
+    .query({ since: 'not-a-date' }), 'you', 'You').expect(400);
+});
+
+test('AnkiHub-style suggestion list, diff submit, and patch decision aliases work', async () => {
+  const { app } = await createTestApp();
+
+  const created = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/suggestions')
+    .send({
+      card_guid: 'card-anca',
+      diff: {
+        reason: 'Use the formal antibody name.',
+        proposed_fields: {
+          Front: 'Microscopic polyangiitis is associated with which MPO antibody pattern?'
+        },
+        proposed_tags: ['Rheumatology', 'Vasculitis', 'Step2']
+      }
+    }), 'you', 'You').expect(201);
+
+  const suggestion = created.body.suggestions.find((item) => item.reason === 'Use the formal antibody name.');
+  assert.ok(suggestion);
+
+  const listed = await asUser(request(app)
+    .get('/api/suggestions')
+    .query({ status: 'pending' }), 'you', 'You').expect(200);
+  assert.ok(listed.body.suggestions.some((item) => item.id === suggestion.id));
+  assert.equal(listed.body.suggestions.find((item) => item.id === suggestion.id).diff.proposed_fields.Front, 'Microscopic polyangiitis is associated with which MPO antibody pattern?');
+
+  const deckListed = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/suggestions')
+    .query({ status: 'pending' }), 'you', 'You').expect(200);
+  assert.ok(deckListed.body.suggestions.every((item) => item.deck_uuid === 'deck-demo-zanki'));
+
+  const approved = await asUser(request(app)
+    .patch(`/api/suggestions/${suggestion.id}`)
+    .send({ status: 'approved' }), 'you', 'You').expect(200);
+
+  assert.equal(approved.body.suggestion.status, 'approved');
+  assert.equal(approved.body.state.suggestions.find((item) => item.id === suggestion.id).status, 'accepted');
+});
+
 test('rate limiting protects read and sync routes with configurable limits', async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deckbridge-api-'));
   process.env.DECKBRIDGE_DATA_DIR = dataDir;
@@ -1739,6 +1818,34 @@ test('Anki add-on can create the first DeckBridge workspace from a local deck', 
   assert.equal(created.body.state.decks[0].name, 'Neuro Boards');
   assert.equal(created.body.state.memberships[0].role, 'owner');
   assert.equal(created.body.state.decks[0].cards[0].ankiNoteId, 777);
+});
+
+test('Anki add-on first push can create a deck without echoing full state', async () => {
+  const { app } = await createTestApp();
+
+  const created = await asUser(request(app)
+    .post('/api/decks/sync/from-anki')
+    .send({
+      returnState: false,
+      deckName: 'Large Neuro Boards',
+      source: 'DeckBridge Sync lightweight create',
+      cards: [{
+        id: 'anki-778',
+        ankiNoteId: 778,
+        type: 'Cloze',
+        modelName: 'Cloze',
+        fieldOrder: ['Text', 'Extra'],
+        fields: { Text: '{{c1::Milrinone}} can support vasospasm rescue.', Extra: 'Keep the first-push response small.' },
+        tags: ['NeuroICU'],
+        state: 'Review',
+        suspended: false,
+        sourceDeckName: 'Large Neuro Boards'
+      }]
+    }), 'new-user', 'New User').expect(201);
+
+  assert.equal(created.body.deck.name, 'Large Neuro Boards');
+  assert.equal(created.body.result.stats.created, 1);
+  assert.equal('state' in created.body, false);
 });
 
 test('study session API persists and lists sessions without changing progress contract', async () => {

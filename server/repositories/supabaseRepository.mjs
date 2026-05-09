@@ -253,6 +253,87 @@ function assertDeckStoragePath(deckId, asset) {
   return storagePath;
 }
 
+const SYNC_CARD_LOOKUP_CHUNK_SIZE = 500;
+const SYNC_CARD_WRITE_CHUNK_SIZE = 500;
+
+function chunked(values, size) {
+  const chunks = [];
+  for (let i = 0; i < values.length; i += size) chunks.push(values.slice(i, i + size));
+  return chunks;
+}
+
+function uniqueValues(values) {
+  return [...new Set(values.filter((value) => value !== null && value !== undefined && value !== '').map(String))];
+}
+
+function uniqueNoteIds(cards) {
+  return [...new Set(
+    cards
+      .map((card) => Number(card.ankiNoteId))
+      .filter((id) => Number.isFinite(id))
+  )];
+}
+
+function cardRowForUpsert(deckId, card) {
+  return {
+    id: card.id,
+    deck_id: deckId,
+    anki_note_id: card.ankiNoteId,
+    note_type: card.type,
+    model_name: card.modelName || card.type,
+    field_order: card.fieldOrder || Object.keys(card.fields || {}),
+    fields: card.fields,
+    tags: card.tags,
+    due: card.due,
+    state: card.state,
+    modified_at: card.modifiedAt,
+    modified_by: card.modifiedBy,
+    suspended: card.suspended,
+    media_refs: card.mediaRefs || [],
+    source_deck_name: card.sourceDeckName,
+    source_deck_path: card.sourceDeckPath,
+    template_front: card.templateFront,
+    template_back: card.templateBack,
+    model_css: card.modelCss,
+    cloze_ord: card.clozeOrd
+  };
+}
+
+async function fetchCardRowsByColumn(supabase, deckId, column, values) {
+  const rows = [];
+  for (const chunk of chunked(values, SYNC_CARD_LOOKUP_CHUNK_SIZE)) {
+    const { data, error } = await supabase.from('cards').select('*').eq('deck_id', deckId).in(column, chunk);
+    if (error) throw error;
+    rows.push(...(data || []));
+  }
+  return rows;
+}
+
+async function fetchSyncCandidateCards(supabase, deckId, incomingCards) {
+  const idRows = await fetchCardRowsByColumn(supabase, deckId, 'id', uniqueValues(incomingCards.map((card) => card.id)));
+  const noteIds = uniqueNoteIds(incomingCards);
+  const noteRows = noteIds.length
+    ? await fetchCardRowsByColumn(supabase, deckId, 'anki_note_id', noteIds)
+    : [];
+  return [...new Map([...idRows, ...noteRows].map((row) => [row.id, row])).values()].map(toCard);
+}
+
+async function upsertSyncCards(supabase, deckId, cards) {
+  for (const chunk of chunked(cards, SYNC_CARD_WRITE_CHUNK_SIZE)) {
+    const { error } = await supabase.from('cards')
+      .upsert(chunk.map((card) => cardRowForUpsert(deckId, card)), { onConflict: 'id' });
+    if (error) throw error;
+  }
+}
+
+function isOptionalAiSchemaError(error) {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '');
+  return code === 'PGRST204'
+    || code === '42P01'
+    || /card_embeddings|ai_duplicate_links|ai_artifacts|schema cache/i.test(message);
+}
+
 function emptyState(user) {
   return {
     decks: [],
@@ -393,7 +474,7 @@ export function createSupabaseRepository(options = {}) {
       return getDeckRows(user, deckId);
     },
 
-    async uploadDeck(user, deck) {
+    async uploadDeck(user, deck, options = {}) {
       const importedAt = nowIso();
       await supabase.from('profiles').upsert({ id: user.id, email: user.email, name: user.name });
       const { error: deckError } = await supabase.from('decks').insert({
@@ -455,6 +536,7 @@ export function createSupabaseRepository(options = {}) {
         text: `${user.name} imported ${deck.name}`,
         created_at: importedAt
       });
+      if (options.returnState === false) return null;
       return getDeckRows(user, deck.id);
     },
 
@@ -603,8 +685,8 @@ export function createSupabaseRepository(options = {}) {
       return (data || []).map(toCardEmbedding);
     },
 
-    async markCardEmbeddingsStale(user, deckId, cardIds = []) {
-      await assertMembership(user.id, deckId, 'owner');
+    async markCardEmbeddingsStale(user, deckId, cardIds = [], minimumRole = 'owner') {
+      await assertMembership(user.id, deckId, minimumRole);
       const ids = (Array.isArray(cardIds) ? cardIds : [cardIds]).filter(Boolean).map(String);
       const now = nowIso();
       let embeddingQuery = supabase.from('card_embeddings')
@@ -1104,70 +1186,27 @@ export function createSupabaseRepository(options = {}) {
 
     async syncCardsFromAddon(user, deckId, syncInput) {
       await assertMembership(user.id, deckId, 'editor');
-      const state = await getDeckRows(user, deckId);
-      const deck = state.decks[0];
+      const [{ data: deckRow, error: deckError }, candidateCards] = await Promise.all([
+        supabase.from('decks').select('*').eq('id', deckId).single(),
+        fetchSyncCandidateCards(supabase, deckId, syncInput.cards)
+      ]);
+      if (deckError || !deckRow) fail(404, 'deck_not_found', 'Deck not found');
+      const deck = toDeck(deckRow, candidateCards);
       const result = mergeAddonCards(deck, syncInput, user.name);
-      const lastAddonSync = buildAddonSyncResult(syncInput, result, state.sync.lastAddonSync);
+      const lastAddonSync = buildAddonSyncResult(syncInput, result, deckRow.last_sync_result || null);
       const isFirstBatchChunk = !syncInput.batch || syncInput.batch.index === 0;
       const isFinalBatchChunk = !syncInput.batch || syncInput.batch.index + 1 >= syncInput.batch.total;
 
       if (!syncInput.dryRun) {
-        if (result.createdCards.length) {
-          const chunkSize = 2000;
-          for (let i = 0; i < result.createdCards.length; i += chunkSize) {
-            const chunk = result.createdCards.slice(i, i + chunkSize);
-            const { error } = await supabase.from('cards').insert(chunk.map((card) => ({
-              id: card.id,
-              deck_id: deck.id,
-              anki_note_id: card.ankiNoteId,
-              note_type: card.type,
-              model_name: card.modelName || card.type,
-              field_order: card.fieldOrder || Object.keys(card.fields || {}),
-              fields: card.fields,
-              tags: card.tags,
-              due: card.due,
-              state: card.state,
-              modified_at: card.modifiedAt,
-              modified_by: card.modifiedBy,
-              suspended: card.suspended,
-              media_refs: card.mediaRefs || [],
-              source_deck_name: card.sourceDeckName,
-              source_deck_path: card.sourceDeckPath,
-              template_front: card.templateFront,
-              template_back: card.templateBack,
-              model_css: card.modelCss,
-              cloze_ord: card.clozeOrd
-            })));
-            if (error) throw error;
+        const changedCards = [...result.createdCards, ...result.updatedCards];
+        if (changedCards.length) {
+          await upsertSyncCards(supabase, deck.id, changedCards);
+          try {
+            await this.markCardEmbeddingsStale(user, deck.id, changedCards.map((card) => card.id), 'editor');
+          } catch (error) {
+            if (!isOptionalAiSchemaError(error)) throw error;
           }
         }
-        for (const card of result.updatedCards) {
-          const { error } = await supabase.from('cards').update({
-            anki_note_id: card.ankiNoteId,
-            note_type: card.type,
-            model_name: card.modelName || card.type,
-            field_order: card.fieldOrder || Object.keys(card.fields || {}),
-            fields: card.fields,
-            tags: card.tags,
-            due: card.due,
-            state: card.state,
-            modified_at: card.modifiedAt,
-            modified_by: card.modifiedBy,
-            suspended: card.suspended,
-            media_refs: card.mediaRefs || [],
-            source_deck_name: card.sourceDeckName,
-            source_deck_path: card.sourceDeckPath,
-            template_front: card.templateFront,
-            template_back: card.templateBack,
-            model_css: card.modelCss,
-            cloze_ord: card.clozeOrd
-          }).eq('id', card.id).eq('deck_id', deck.id);
-          if (error) throw error;
-        }
-        await this.markCardEmbeddingsStale(user, deck.id, [
-          ...result.createdCards.map((card) => card.id),
-          ...result.updatedCards.map((card) => card.id)
-        ]);
         if (isFirstBatchChunk) {
           await supabase.from('sync_conflicts').delete().eq('deck_id', deck.id);
         }
