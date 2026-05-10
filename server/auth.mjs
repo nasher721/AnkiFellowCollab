@@ -28,6 +28,7 @@ export function createAuth(options = {}) {
       // Try DeckBridge API token first (db_ prefix)
       const tokenUser = await resolveTokenUser(supabase, token);
       if (tokenUser) return tokenUser;
+      if (token.startsWith('db_')) fail(401, 'unauthorized', 'Invalid or expired session');
       // Fall back to Supabase JWT
       const { data, error } = await supabase.auth.getUser(token);
       if (error || !data.user) fail(401, 'unauthorized', 'Invalid or expired session');

@@ -73,6 +73,28 @@ test('normalizeAddonSyncInput expands compressed fields without truncating', () 
   assert.equal(result.cards[0].fields.Text.length > 12000, true);
 });
 
+test('normalizeAddonSyncInput expands compressed rendered card text', () => {
+  const renderedBack = '<section>external ventricular drain guide</section>'.repeat(500);
+  const bytes = Buffer.from(renderedBack, 'utf8');
+  const result = normalizeAddonSyncInput({
+    cards: [{
+      fields: { Text: 'EVD' },
+      renderedBack: '',
+      compressedCardText: {
+        renderedBack: {
+          encoding: 'zlib+base64',
+          data: deflateSync(bytes).toString('base64'),
+          originalBytes: bytes.byteLength,
+          sha256: createHash('sha256').update(bytes).digest('hex')
+        }
+      }
+    }]
+  });
+
+  assert.equal(result.cards[0].renderedBack, renderedBack);
+  assert.equal(result.cards[0].fields.Text, 'EVD');
+});
+
 test('mergeAddonCards creates new cards', () => {
   const deck = { cards: [], lastSyncedAt: null };
   const result = mergeAddonCards(deck, {

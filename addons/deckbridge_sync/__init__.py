@@ -78,14 +78,19 @@ except ImportError:
 
 
 ADDON_NAME = "DeckBridge Sync"
-DEFAULT_ADDON_VERSION = "0.2.2"
+DEFAULT_ADDON_VERSION = "0.2.6"
 TRACKING_MODEL = "DeckBridge Sync"
 TRACKING_TAG_PREFIX = "deckbridge_card_"
 CONFIG_KEY = "deckbridge"
 DEFAULT_PLATFORM_URL = "https://anki-collab.vercel.app"
-MAX_SYNC_REQUEST_BYTES = 3_500_000
+MAX_SYNC_REQUEST_BYTES = 900_000
 MAX_INLINE_MEDIA_BYTES = 750_000
+SYNC_INLINE_MEDIA_BYTES = 0
+MEDIA_UPLOAD_TARGET_BATCH_SIZE = 25
+MEDIA_UPLOAD_MAX_ATTEMPTS = 4
+MEDIA_UPLOAD_RETRY_BASE_SECONDS = 1.5
 COMPRESS_FIELD_AFTER_BYTES = 64_000
+COMPRESS_CARD_TEXT_KEYS = ("templateFront", "templateBack", "modelCss", "renderedFront", "renderedBack")
 DEFAULT_TIMEOUT_SECONDS = 120
 MIN_REQUEST_TIMEOUT_SECONDS = 5
 MIN_SYNC_TIMEOUT_SECONDS = 120
@@ -396,6 +401,11 @@ def protocol_recovery_message(
 ) -> str:
     context = f"{method} {path}".strip()
     lower_detail = str(detail or "").lower()
+    if status == 413:
+        return (
+            f"DeckBridge request is too large{f' for {context}' if context else ''}: {detail}. "
+            "Update and restart the DeckBridge Sync add-on so large media uploads are split into smaller requests."
+        )
     if "media" in lower_detail and ("upload" in lower_detail or "target" in lower_detail or "storage" in lower_detail):
         return (
             f"DeckBridge media upload target failed{f' for {context}' if context else ''}: {detail}. "
@@ -452,6 +462,14 @@ def _http_error_detail(error: urllib.error.HTTPError) -> str:
     except json.JSONDecodeError:
         message = detail or str(error)
     return str(message)
+
+
+def _is_transient_status(status: int) -> bool:
+    return status == 429 or 500 <= status <= 599
+
+
+def _retry_delay(attempt: int) -> float:
+    return MEDIA_UPLOAD_RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1))
 
 
 def request_json(
@@ -641,6 +659,25 @@ def compress_large_card_fields(card: Dict[str, Any]) -> Dict[str, Any]:
     return {**card, "fields": next_fields, "compressedFields": compressed_fields}
 
 
+def compress_large_card_payload(card: Dict[str, Any]) -> Dict[str, Any]:
+    compressed = compress_large_card_fields(card)
+    compressed_text: Dict[str, Dict[str, Any]] = {}
+    next_card = {**compressed}
+    for key in COMPRESS_CARD_TEXT_KEYS:
+        if key not in next_card:
+            continue
+        payload = _compressed_field_payload(str(next_card.get(key) or ""))
+        if payload:
+            next_card[key] = ""
+            compressed_text[key] = payload
+    if compressed_text:
+        existing = next_card.get("compressedCardText")
+        if isinstance(existing, dict):
+            compressed_text = {**existing, **compressed_text}
+        next_card["compressedCardText"] = compressed_text
+    return next_card
+
+
 def media_dir() -> str:
     try:
         return str(mw.col.media.dir())
@@ -698,30 +735,74 @@ def upload_media_file(upload_url: str, asset: Dict[str, Any]) -> None:
         method="PUT",
     )
     timeout = max(MIN_MEDIA_UPLOAD_TIMEOUT_SECONDS, int(config().get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS))
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response.read()
-    except urllib.error.HTTPError as error:
-        detail = _http_error_detail(error)
-        raise RuntimeError(protocol_recovery_message(
-            method="PUT",
-            path=str(asset.get("filename") or "media upload"),
-            status=error.code,
-            detail=f"media upload target failed for {asset['filename']}: {detail}",
-        )) from error
-    except socket.timeout as error:
-        raise RuntimeError(protocol_recovery_message(
-            method="PUT",
-            path=str(asset.get("filename") or "media upload"),
-            timeout=timeout,
-        )) from error
-    except urllib.error.URLError as error:
-        reason = getattr(error, "reason", error)
-        raise RuntimeError(protocol_recovery_message(
-            method="PUT",
-            path=str(asset.get("filename") or "media upload"),
-            detail=f"media upload target failed for {asset['filename']}: {reason}",
-        )) from error
+    last_error: Optional[BaseException] = None
+    for attempt in range(1, MEDIA_UPLOAD_MAX_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                response.read()
+                return
+        except urllib.error.HTTPError as error:
+            last_error = error
+            if attempt < MEDIA_UPLOAD_MAX_ATTEMPTS and _is_transient_status(error.code):
+                time.sleep(_retry_delay(attempt))
+                continue
+            detail = _http_error_detail(error)
+            raise RuntimeError(protocol_recovery_message(
+                method="PUT",
+                path=str(asset.get("filename") or "media upload"),
+                status=error.code,
+                detail=f"media upload target failed for {asset['filename']}: {detail}",
+            )) from error
+        except socket.timeout as error:
+            last_error = error
+            if attempt < MEDIA_UPLOAD_MAX_ATTEMPTS:
+                time.sleep(_retry_delay(attempt))
+                continue
+            raise RuntimeError(protocol_recovery_message(
+                method="PUT",
+                path=str(asset.get("filename") or "media upload"),
+                timeout=timeout,
+            )) from error
+        except urllib.error.URLError as error:
+            last_error = error
+            if attempt < MEDIA_UPLOAD_MAX_ATTEMPTS:
+                time.sleep(_retry_delay(attempt))
+                continue
+            reason = getattr(error, "reason", error)
+            raise RuntimeError(protocol_recovery_message(
+                method="PUT",
+                path=str(asset.get("filename") or "media upload"),
+                detail=f"media upload target failed for {asset['filename']}: {reason}",
+            )) from error
+    if last_error:
+        raise RuntimeError(str(last_error))
+
+
+def request_media_upload_targets(
+    deck_id: str,
+    batch: List[Dict[str, Any]],
+    *,
+    cfg: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    path = f"/api/decks/{deck_id}/media/uploads"
+    for attempt in range(1, MEDIA_UPLOAD_MAX_ATTEMPTS + 1):
+        try:
+            response = request_json(
+                "POST",
+                path,
+                {"files": batch},
+                cfg=cfg,
+                timeout_floor=MIN_SYNC_TIMEOUT_SECONDS,
+            )
+            return response.get("uploads") or []
+        except RuntimeError as error:
+            message = str(error)
+            transient = any(f"DeckBridge API {status}" in message for status in (429, 500, 502, 503, 504))
+            if attempt < MEDIA_UPLOAD_MAX_ATTEMPTS and transient:
+                time.sleep(_retry_delay(attempt))
+                continue
+            raise
+    return []
 
 
 def upload_large_media_assets(
@@ -729,6 +810,7 @@ def upload_large_media_assets(
     *,
     cfg: Dict[str, Any],
     deck_id: str,
+    inline_limit_bytes: int = MAX_INLINE_MEDIA_BYTES,
 ) -> Dict[str, Dict[str, Any]]:
     large_assets = [
         {
@@ -738,18 +820,14 @@ def upload_large_media_assets(
             "sizeBytes": asset["sizeBytes"],
         }
         for asset in assets.values()
-        if int(asset.get("sizeBytes") or 0) > MAX_INLINE_MEDIA_BYTES
+        if int(asset.get("sizeBytes") or 0) > inline_limit_bytes
     ]
     if not large_assets or not deck_id:
         return {}
-    response = request_json(
-        "POST",
-        f"/api/decks/{deck_id}/media/uploads",
-        {"files": large_assets},
-        cfg=cfg,
-        timeout_floor=MIN_SYNC_TIMEOUT_SECONDS,
-    )
-    uploads = response.get("uploads") or []
+    uploads: List[Dict[str, Any]] = []
+    for start in range(0, len(large_assets), MEDIA_UPLOAD_TARGET_BATCH_SIZE):
+        batch = large_assets[start:start + MEDIA_UPLOAD_TARGET_BATCH_SIZE]
+        uploads.extend(request_media_upload_targets(deck_id, batch, cfg=cfg))
     uploaded: Dict[str, Dict[str, Any]] = {}
     for upload in uploads:
         filename = str(upload.get("filename") or "")
@@ -827,8 +905,10 @@ def collect_media_payload(
 ) -> Dict[str, Dict[str, Any]]:
     payload: Dict[str, Dict[str, Any]] = {}
     assets = local_media_assets(cards)
+    storage_upload_enabled = bool(upload_large and not dry_run and cfg and deck_id)
+    inline_limit_bytes = SYNC_INLINE_MEDIA_BYTES if storage_upload_enabled else MAX_INLINE_MEDIA_BYTES
     for filename, asset in assets.items():
-        if not include_inline or int(asset.get("sizeBytes") or 0) > MAX_INLINE_MEDIA_BYTES:
+        if not include_inline or int(asset.get("sizeBytes") or 0) > inline_limit_bytes:
             continue
         try:
             with open(str(asset["path"]), "rb") as media_file:
@@ -842,8 +922,13 @@ def collect_media_payload(
             "sizeBytes": asset["sizeBytes"],
             "dataBase64": base64.b64encode(data).decode("ascii"),
         }
-    if upload_large and not dry_run and cfg and deck_id:
-        payload.update(upload_large_media_assets(assets, cfg=cfg, deck_id=deck_id))
+    if storage_upload_enabled:
+        payload.update(upload_large_media_assets(
+            assets,
+            cfg=cfg,
+            deck_id=deck_id,
+            inline_limit_bytes=inline_limit_bytes,
+        ))
     return payload
 
 
@@ -952,7 +1037,7 @@ def sync_payload(
     cfg = config()
     deck_name = active_local_deck()
     payload = {
-        "cards": [compress_large_card_fields(card) for card in (collect_cards() if cards is None else cards)],
+        "cards": [compress_large_card_payload(card) for card in (collect_cards() if cards is None else cards)],
         "deckName": deck_name,
         "deckPath": deck_name,
         "dryRun": dry_run,

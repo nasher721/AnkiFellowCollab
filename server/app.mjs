@@ -21,6 +21,8 @@ import { assertValidDeckId, assertValidEmail, assertValidSessionRole, deckIdFrom
 
 const ADDON_PACKAGE_FILENAME = 'deckbridge-sync.ankiaddon';
 const ADDON_MANIFEST_PATH = path.resolve(process.cwd(), 'addons', 'deckbridge_sync', 'manifest.json');
+const DEFAULT_MEDIA_UPLOAD_TARGETS_PER_REQUEST = 75;
+const DEFAULT_SYNC_CARDS_REQUEST_BYTES = 1_500_000;
 
 function resolveManifestMinVersion(manifest) {
   if (manifest.min_version || manifest.minVersion) return manifest.min_version || manifest.minVersion;
@@ -63,6 +65,22 @@ function toBoundedInt(value, fallback = 0, max = 100000) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.min(Math.max(Math.trunc(number), 0), max);
+}
+
+function mediaUploadTargetsPerRequest() {
+  return Math.max(1, toBoundedInt(
+    process.env.MEDIA_UPLOAD_TARGETS_PER_REQUEST,
+    DEFAULT_MEDIA_UPLOAD_TARGETS_PER_REQUEST,
+    300
+  ));
+}
+
+function syncCardsRequestBytes() {
+  return Math.max(100_000, toBoundedInt(
+    process.env.SYNC_CARDS_REQUEST_BYTES,
+    DEFAULT_SYNC_CARDS_REQUEST_BYTES,
+    5_000_000
+  ));
 }
 
 function cleanShortText(value, fallback, maxLength = 120) {
@@ -2020,7 +2038,10 @@ export function createApp(options = {}) {
       }
       const deckState = await repository.getDeckState(req.user, deckId);
       const deck = deckState.decks[0];
-      const asset = deck?.media?.[filename];
+      let asset = deck?.media?.[filename];
+      if (!asset?.dataBase64 && !asset?.storagePath && repository.getManagedMediaAsset) {
+        asset = await repository.getManagedMediaAsset(req.user, deckId, filename);
+      }
       if (!asset?.dataBase64 && !asset?.storagePath) fail(404, 'media_not_found', 'Media asset not found');
       const mimeType = safeMediaMimeType(asset.mimeType);
       if (asset.storagePath) {
@@ -2052,6 +2073,10 @@ export function createApp(options = {}) {
       }
       const files = normalizeMediaUploadFiles(req.body.files);
       if (!files.length) fail(400, 'invalid_media_upload', 'At least one valid media file is required');
+      const maxTargets = mediaUploadTargetsPerRequest();
+      if (files.length > maxTargets) {
+        fail(413, 'too_many_media_upload_targets', `Request up to ${maxTargets} media upload targets at a time.`);
+      }
       res.status(201).json({
         uploads: await repository.createMediaUploadTargets(req.user, deckId, files)
       });
@@ -2763,6 +2788,14 @@ export function createApp(options = {}) {
   app.post('/api/decks/:deckId/sync/cards', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
       const deckId = deckIdFromRequest(req);
+      const requestBytes = Buffer.byteLength(JSON.stringify(req.body || {}), 'utf8');
+      const maxBytes = syncCardsRequestBytes();
+      if (requestBytes > maxBytes) {
+        fail(413, 'sync_cards_request_too_large', 'Sync card request is too large; update DeckBridge Sync and retry with smaller chunks.', {
+          maxBytes,
+          receivedBytes: requestBytes
+        });
+      }
       let syncInput;
       try {
         syncInput = normalizeAddonSyncInput(req.body);

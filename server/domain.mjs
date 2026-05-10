@@ -218,6 +218,17 @@ function expandedAddonFields(card = {}) {
   return fields;
 }
 
+function expandedAddonCardText(card = {}, key) {
+  const compressedText = card.compressedCardText && typeof card.compressedCardText === 'object' && !Array.isArray(card.compressedCardText)
+    ? card.compressedCardText
+    : {};
+  if (compressedText[key]) {
+    const decoded = decodeCompressedField(key, compressedText[key]);
+    if (decoded !== null) return decoded;
+  }
+  return card[key];
+}
+
 function isSafeMediaFilename(value) {
   return Boolean(
     value
@@ -342,11 +353,11 @@ function normalizeAddonCard(card, index) {
     mediaRefs: Array.isArray(card.mediaRefs) ? card.mediaRefs.map((ref) => cleanText(ref, '', 500)).filter(Boolean) : [],
     sourceDeckName: cleanText(card.sourceDeckName || card.deckName, '', 240) || null,
     sourceDeckPath: cleanText(card.sourceDeckPath || card.deckPath, '', 500) || null,
-    ...(card.templateFront != null ? { templateFront: cleanText(card.templateFront, '', 120000) } : {}),
-    ...(card.templateBack != null ? { templateBack: cleanText(card.templateBack, '', 120000) } : {}),
-    ...(card.modelCss != null ? { modelCss: cleanText(card.modelCss, '', 120000) } : {}),
-    ...(card.renderedFront != null ? { renderedFront: cleanText(card.renderedFront, '', 240000) } : {}),
-    ...(card.renderedBack != null ? { renderedBack: cleanText(card.renderedBack, '', 240000) } : {}),
+    ...(expandedAddonCardText(card, 'templateFront') != null ? { templateFront: cleanText(expandedAddonCardText(card, 'templateFront'), '', 120000) } : {}),
+    ...(expandedAddonCardText(card, 'templateBack') != null ? { templateBack: cleanText(expandedAddonCardText(card, 'templateBack'), '', 120000) } : {}),
+    ...(expandedAddonCardText(card, 'modelCss') != null ? { modelCss: cleanText(expandedAddonCardText(card, 'modelCss'), '', 120000) } : {}),
+    ...(expandedAddonCardText(card, 'renderedFront') != null ? { renderedFront: cleanText(expandedAddonCardText(card, 'renderedFront'), '', 240000) } : {}),
+    ...(expandedAddonCardText(card, 'renderedBack') != null ? { renderedBack: cleanText(expandedAddonCardText(card, 'renderedBack'), '', 240000) } : {}),
     ...(clozeOrd !== undefined ? { clozeOrd } : {})
   };
 }

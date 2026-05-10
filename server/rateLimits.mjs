@@ -2,7 +2,7 @@ import rateLimit from 'express-rate-limit';
 
 const DEFAULT_WINDOW_MS = 60_000;
 const DEFAULT_LIMITS = {
-  uploadLimit: 5,
+  uploadLimit: 60,
   syncLimit: 30,
   analyticsLimit: 60,
   readLimit: 200

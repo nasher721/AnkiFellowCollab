@@ -29,6 +29,8 @@ from deckbridge_sync import (
     create_platform_deck_from_anki,
     collect_media_payload,
     DEFAULT_CONFIG,
+    MAX_SYNC_REQUEST_BYTES,
+    MEDIA_UPLOAD_TARGET_BATCH_SIZE,
     CONFIG_KEY,
     last_autoconfig_error,
     login_to_account,
@@ -52,6 +54,9 @@ from deckbridge_sync import (
     sync_payload_chunks,
     tracking_tag,
     note_query,
+    upload_large_media_assets,
+    upload_media_file,
+    request_media_upload_targets,
     validate_token,
     TRACKING_TAG_PREFIX,
     _flat_from_stored,
@@ -263,7 +268,7 @@ class TestApplyAutoconfig(unittest.TestCase):
 
 class TestVersion(unittest.TestCase):
     def test_manifest_is_version_source(self):
-        self.assertEqual(addon_manifest()['version'], '0.2.2')
+        self.assertEqual(addon_manifest()['version'], '0.2.6')
         self.assertEqual(ADDON_VERSION, addon_manifest()['version'])
 
 
@@ -462,6 +467,118 @@ class TestMediaSync(unittest.TestCase):
         self.assertEqual(payload['large.png']['storagePath'], f'deck-1/{expected_sha}/large.png')
         self.assertNotIn('dataBase64', payload['large.png'])
 
+    @patch('deckbridge_sync.upload_media_file')
+    @patch('deckbridge_sync.request_json')
+    @patch('deckbridge_sync.media_dir')
+    def test_collect_media_payload_uses_storage_for_real_sync_media(self, mock_media_dir, mock_request, mock_upload):
+        with tempfile.TemporaryDirectory() as media_root:
+            mock_media_dir.return_value = media_root
+            image_path = os.path.join(media_root, 'small.png')
+            with open(image_path, 'wb') as image_file:
+                image_file.write(b'png-bytes')
+
+            expected_sha = 'ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56'
+            mock_request.return_value = {
+                'uploads': [{
+                    'filename': 'small.png',
+                    'mimeType': 'image/png',
+                    'sha256': expected_sha,
+                    'sizeBytes': 9,
+                    'storageBucket': 'deckbridge-media',
+                    'storagePath': f'deck-1/{expected_sha}/small.png',
+                    'uploadUrl': 'https://storage.example/upload/sign/small.png?token=signed',
+                }]
+            }
+
+            payload = collect_media_payload(
+                [{'id': 'anki-1', 'mediaRefs': ['small.png']}],
+                cfg={**DEFAULT_CONFIG, 'deck_id': 'deck-1'},
+                deck_id='deck-1',
+                dry_run=False,
+            )
+
+        mock_request.assert_called_once()
+        mock_upload.assert_called_once()
+        self.assertEqual(payload['small.png']['storageBucket'], 'deckbridge-media')
+        self.assertEqual(payload['small.png']['storagePath'], f'deck-1/{expected_sha}/small.png')
+        self.assertNotIn('dataBase64', payload['small.png'])
+
+    @patch('deckbridge_sync.upload_media_file')
+    @patch('deckbridge_sync.request_json')
+    def test_upload_large_media_assets_splits_target_requests(self, mock_request, mock_upload):
+        assets = {}
+        for index in range(76):
+            filename = f'large-{index}.png'
+            sha = f'{index + 1:064x}'
+            assets[filename] = {
+                'filename': filename,
+                'mimeType': 'image/png',
+                'sha256': sha,
+                'sizeBytes': 800_000,
+                'path': f'/media/{filename}',
+            }
+
+        def sign_batch(_method, _path, payload, **_kwargs):
+            return {
+                'uploads': [
+                    {
+                        **file,
+                        'storageBucket': 'deckbridge-media',
+                        'storagePath': f"deck-1/{file['sha256']}/{file['filename']}",
+                        'uploadUrl': f"https://storage.example/{file['filename']}?token=signed",
+                    }
+                    for file in payload['files']
+                ]
+            }
+
+        mock_request.side_effect = sign_batch
+
+        uploaded = upload_large_media_assets(assets, cfg={**DEFAULT_CONFIG, 'deck_id': 'deck-1'}, deck_id='deck-1')
+
+        self.assertEqual(mock_request.call_count, 4)
+        self.assertEqual(len(mock_request.call_args_list[0][0][2]['files']), MEDIA_UPLOAD_TARGET_BATCH_SIZE)
+        self.assertEqual(len(mock_request.call_args_list[-1][0][2]['files']), 1)
+        self.assertEqual(mock_upload.call_count, 76)
+        self.assertEqual(len(uploaded), 76)
+
+    @patch('deckbridge_sync.time.sleep')
+    @patch('deckbridge_sync.urllib.request.urlopen')
+    def test_upload_media_file_retries_transient_storage_errors(self, mock_urlopen, mock_sleep):
+        mock_urlopen.side_effect = [
+            http_error(502, {'detail': 'Bad Gateway'}),
+            FakeResponse({'ok': True}),
+        ]
+        with tempfile.NamedTemporaryFile() as media_file:
+            media_file.write(b'png-bytes')
+            media_file.flush()
+
+            upload_media_file('https://storage.example/signed-upload', {
+                'filename': 'large.png',
+                'mimeType': 'image/png',
+                'path': media_file.name,
+            })
+
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once()
+
+    @patch('deckbridge_sync.time.sleep')
+    @patch('deckbridge_sync.request_json')
+    def test_media_upload_target_request_retries_transient_api_errors(self, mock_request, mock_sleep):
+        mock_request.side_effect = [
+            RuntimeError('DeckBridge API 502: DeckBridge platform error while calling POST /api/decks/deck-1/media/uploads'),
+            {'uploads': [{'filename': 'large.png', 'uploadUrl': 'https://storage.example/signed-upload'}]},
+        ]
+
+        uploads = request_media_upload_targets(
+            'deck-1',
+            [{'filename': 'large.png', 'mimeType': 'image/png', 'sha256': 'a', 'sizeBytes': 800_000}],
+            cfg={**DEFAULT_CONFIG, 'deck_id': 'deck-1'},
+        )
+
+        self.assertEqual(uploads[0]['filename'], 'large.png')
+        self.assertEqual(mock_request.call_count, 2)
+        mock_sleep.assert_called_once()
+
     @patch('deckbridge_sync.media_dir', side_effect=RuntimeError('media unavailable'))
     def test_collect_media_payload_skips_inaccessible_media_dir(self, _mock_media_dir):
         self.assertEqual(collect_media_payload([{'id': 'anki-1', 'mediaRefs': ['image.png']}]), {})
@@ -573,6 +690,12 @@ class TestProtocolRecoveryMessages(unittest.TestCase):
 
         self.assertIn('media upload target failed', message)
         self.assertIn('Retry media upload before card sync', message)
+
+    def test_request_too_large_message_names_addon_update(self):
+        message = protocol_recovery_message(method='POST', path='/api/decks/deck-1/media/uploads', status=413, detail='Request up to 75 media upload targets at a time.')
+
+        self.assertIn('request is too large', message)
+        self.assertIn('Update and restart', message)
 
     def test_ssl_message_names_proxy_vpn_antivirus(self):
         message = protocol_recovery_message(method='GET', path='/api/me', detail='CERTIFICATE_VERIFY_FAILED')
@@ -927,7 +1050,7 @@ class TestTokenValidation(unittest.TestCase):
         self.assertGreater(len(payloads), 1)
         self.assertEqual(sum(len(payload['cards']) for payload in payloads), 80)
         for payload in payloads:
-            self.assertLessEqual(len(json.dumps(payload, separators=(',', ':')).encode('utf-8')), 3_500_000)
+            self.assertLessEqual(len(json.dumps(payload, separators=(',', ':')).encode('utf-8')), MAX_SYNC_REQUEST_BYTES)
 
     @patch('deckbridge_sync.config')
     def test_sync_payload_chunks_compresses_oversized_single_note_fields(self, mock_config):
@@ -946,7 +1069,23 @@ class TestTokenValidation(unittest.TestCase):
         decoded = zlib.decompress(base64.b64decode(compressed['data'])).decode('utf-8')
         self.assertEqual(decoded, large_field)
         self.assertFalse(payloads[0]['returnState'])
-        self.assertLess(len(json.dumps(payloads[0], separators=(',', ':')).encode('utf-8')), 3_500_000)
+        self.assertLess(len(json.dumps(payloads[0], separators=(',', ':')).encode('utf-8')), MAX_SYNC_REQUEST_BYTES)
+
+    @patch('deckbridge_sync.config')
+    def test_sync_payload_chunks_compresses_oversized_rendered_card_html(self, mock_config):
+        cfg = {**DEFAULT_CONFIG, 'local_deck': 'Local Deck', 'batch_size': 5000}
+        mock_config.return_value = cfg
+        rendered = '<div class="card">external ventricular drain guide</div>' * 80_000
+        cards = [{'id': 'anki-large-rendered', 'fields': {'Text': 'keep me'}, 'renderedBack': rendered}]
+
+        payloads = sync_payload_chunks(cards, dry_run=False, cfg=cfg)
+
+        card = payloads[0]['cards'][0]
+        self.assertEqual(card['renderedBack'], '')
+        compressed = card['compressedCardText']['renderedBack']
+        decoded = zlib.decompress(base64.b64decode(compressed['data'])).decode('utf-8')
+        self.assertEqual(decoded, rendered)
+        self.assertLess(len(json.dumps(payloads[0], separators=(',', ':')).encode('utf-8')), MAX_SYNC_REQUEST_BYTES)
 
     @patch('deckbridge_sync.request_json')
     @patch('deckbridge_sync.validate_token')

@@ -324,6 +324,30 @@ export function managedMediaRows(deckId, media = {}, userId = null, status = 'av
     }));
 }
 
+function inlineDeckMedia(media = {}) {
+  return Object.fromEntries(
+    Object.entries(media || {}).filter(([, asset]) => asset?.dataBase64 && !asset?.storagePath)
+  );
+}
+
+function storageDeckMedia(media = {}) {
+  return Object.fromEntries(
+    Object.entries(media || {}).filter(([, asset]) => asset?.storagePath)
+  );
+}
+
+function mediaAssetFromFileRow(row) {
+  if (!row) return null;
+  return {
+    filename: row.filename,
+    storageBucket: row.storage_bucket,
+    storagePath: row.storage_path,
+    sha256: row.sha256 || undefined,
+    sizeBytes: Number(row.size_bytes || 0),
+    mimeType: row.mime_type || 'application/octet-stream'
+  };
+}
+
 async function hashFile(filePath) {
   const stat = await fs.stat(filePath);
   const hash = createHash('sha256');
@@ -348,6 +372,18 @@ const SYNC_CARD_LOOKUP_CHUNK_SIZE = 500;
 const SYNC_CARD_WRITE_CHUNK_SIZE = 500;
 const MEDIA_UPLOAD_TARGET_CONCURRENCY = 12;
 const MEMBERSHIP_COLUMNS = 'deck_id,user_id,role,created_at';
+const DECK_SYNC_COLUMNS = [
+  'id',
+  'name',
+  'description',
+  'owner_name',
+  'imported_at',
+  'last_synced_at',
+  'last_sync_result',
+  'source',
+  'models',
+  'ai_settings'
+].join(',');
 const CARD_COLUMNS = [
   'id',
   'anki_note_id',
@@ -1253,6 +1289,20 @@ export function createSupabaseRepository(options = {}) {
       };
     },
 
+    async getManagedMediaAsset(user, deckId, filename) {
+      await assertMembership(user.id, deckId, 'viewer');
+      const { data, error } = await supabase.from('deck_files')
+        .select('filename,storage_bucket,storage_path,sha256,size_bytes,mime_type,status')
+        .eq('deck_id', deckId)
+        .eq('file_kind', 'media')
+        .eq('filename', filename)
+        .eq('status', 'available')
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return mediaAssetFromFileRow(data);
+    },
+
     async recordExport(user, deckId, download) {
       await assertMembership(user.id, deckId);
       await supabase.from('activity').insert({
@@ -1386,7 +1436,7 @@ export function createSupabaseRepository(options = {}) {
     async syncCardsFromAddon(user, deckId, syncInput) {
       await assertMembership(user.id, deckId, 'editor');
       const [{ data: deckRow, error: deckError }, candidateCards] = await Promise.all([
-        supabase.from('decks').select('*').eq('id', deckId).single(),
+        supabase.from('decks').select(DECK_SYNC_COLUMNS).eq('id', deckId).single(),
         fetchSyncCandidateCards(supabase, deckId, syncInput.cards)
       ]);
       if (deckError || !deckRow) fail(404, 'deck_not_found', 'Deck not found');
@@ -1425,18 +1475,17 @@ export function createSupabaseRepository(options = {}) {
           })));
           if (error) throw error;
         }
-        const { error: deckError } = await supabase.from('decks').update({
+        const deckUpdate = {
           last_synced_at: result.syncedAt,
-          last_sync_result: lastAddonSync,
-          media: deck.media || {}
-        }).eq('id', deck.id);
+          last_sync_result: lastAddonSync
+        };
+        const inlineMedia = inlineDeckMedia(syncInput.media || {});
+        const appliedStorageMedia = storageDeckMedia(syncInput.media || {});
+        if (Object.keys(inlineMedia).length || Object.keys(appliedStorageMedia).length) {
+          deckUpdate.media = inlineMedia;
+        }
+        const { error: deckError } = await supabase.from('decks').update(deckUpdate).eq('id', deck.id);
         if (deckError) throw deckError;
-        const appliedStorageMedia = Object.fromEntries(
-          Object.entries(syncInput.media || {}).filter(([filename, asset]) => {
-            const current = deck.media?.[filename];
-            return asset?.storagePath && current?.storagePath === asset.storagePath;
-          })
-        );
         await upsertManagedFileRows(supabase, managedMediaRows(deck.id, appliedStorageMedia, user.id, 'available'));
         if (isFinalBatchChunk) {
           await supabase.from('activity').insert({

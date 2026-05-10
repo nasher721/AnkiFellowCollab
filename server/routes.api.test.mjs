@@ -1701,6 +1701,33 @@ test('Anki add-on sync endpoint creates cards and records safe conflicts', async
   assert.equal(conflictBatch.body.state.sync.lastAddonSync.stats.conflicts, 2);
 });
 
+test('Anki add-on sync endpoint rejects oversized card sync requests before repository work', async () => {
+  let called = false;
+  const { app } = await createTestApp({
+    repository: {
+      async syncCardsFromAddon() {
+        called = true;
+        throw new Error('repository should not receive oversized sync card payloads');
+      }
+    }
+  });
+
+  const response = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/sync/cards')
+    .send({
+      conflictPolicy: 'overwrite-platform',
+      source: 'DeckBridge Sync oversized request',
+      cards: [{
+        id: 'anki-oversized',
+        ankiNoteId: 9999,
+        fields: { Front: 'A'.repeat(1_600_000), Back: 'oversized' }
+      }]
+    }), 'you', 'You').expect(413);
+
+  assert.equal(response.body.error.code, 'sync_cards_request_too_large');
+  assert.equal(called, false);
+});
+
 test('Anki add-on sync rejects invalid payloads with RFC 7807 details', async () => {
   const { app } = await createTestApp();
 
@@ -1861,6 +1888,29 @@ test('large media upload targets return signed storage metadata', async () => {
   assert.equal(response.body.uploads[0].storagePath, `deck-demo-zanki/${'d'.repeat(64)}/large.png`);
 });
 
+test('large media upload target requests are bounded before signing', async () => {
+  const repository = {
+    async createMediaUploadTargets() {
+      throw new Error('should not create upload targets for oversized target batches');
+    }
+  };
+  const { app } = await createTestApp({ repository });
+  const files = Array.from({ length: 76 }, (_, index) => ({
+    filename: `large-${index}.png`,
+    mimeType: 'image/png',
+    sha256: `${index + 1}`.padStart(64, 'a').slice(-64),
+    sizeBytes: 12_000_000
+  }));
+
+  const response = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/media/uploads')
+    .send({ files }), 'you', 'You')
+    .expect(413);
+
+  assert.equal(response.body.error.code, 'too_many_media_upload_targets');
+  assert.match(response.body.error.message, /75 media upload targets/);
+});
+
 test('OpenAPI documents sync result fields and supported suggestion diff limits', async () => {
   const openapi = await fs.readFile(path.resolve(process.cwd(), 'openapi.yaml'), 'utf8');
   const addonSyncResult = openapi.slice(
@@ -1894,6 +1944,40 @@ test('storage-backed media route redirects through authenticated signed download
     async getDeckState(_user, deckId) {
       assert.equal(deckId, 'deck-demo-zanki');
       return { decks: [{ id: deckId, media: { 'large.png': asset } }] };
+    },
+    async createMediaDownload(_user, deckId, mediaAsset) {
+      assert.equal(deckId, 'deck-demo-zanki');
+      assert.deepEqual(mediaAsset, asset);
+      return { url: 'https://storage.example/signed/large.png' };
+    }
+  };
+  const { app } = await createTestApp({ repository });
+
+  const response = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/media/large.png'), 'you', 'You')
+    .expect(302);
+
+  assert.equal(response.headers.location, 'https://storage.example/signed/large.png');
+});
+
+test('storage-backed media route falls back to managed file rows', async () => {
+  const asset = {
+    filename: 'large.png',
+    mimeType: 'image/png',
+    sha256: 'd'.repeat(64),
+    sizeBytes: 12_000_000,
+    storageBucket: 'deckbridge-media',
+    storagePath: `deck-demo-zanki/${'d'.repeat(64)}/large.png`
+  };
+  const repository = {
+    async getDeckState(_user, deckId) {
+      assert.equal(deckId, 'deck-demo-zanki');
+      return { decks: [{ id: deckId, media: {} }] };
+    },
+    async getManagedMediaAsset(_user, deckId, filename) {
+      assert.equal(deckId, 'deck-demo-zanki');
+      assert.equal(filename, 'large.png');
+      return asset;
     },
     async createMediaDownload(_user, deckId, mediaAsset) {
       assert.equal(deckId, 'deck-demo-zanki');
