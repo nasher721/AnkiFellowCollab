@@ -433,6 +433,38 @@ paths:
                 $ref: "#/components/schemas/AppState"
         "404":
           $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Remove a deck from DeckBridge only
+      description: Deletes the DeckBridge workspace copy and collaboration state. This does not modify the user's local Anki collection.
+      operationId: deleteDeck
+      tags: [Decks]
+      security: [{ BearerAuth: [] }, { DevAuth: [] }]
+      parameters:
+        - name: deckId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: DeckBridge deck removed and replacement workspace state returned
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, state]
+                properties:
+                  deleted:
+                    type: object
+                    required: [id, name]
+                    properties:
+                      id: { type: string }
+                      name: { type: string }
+                  state:
+                    $ref: "#/components/schemas/AppState"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /api/decks/{deckId}/updates:
     get:

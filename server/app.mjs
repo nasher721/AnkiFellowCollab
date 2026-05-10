@@ -1035,6 +1035,16 @@ export function createApp(options = {}) {
     }
   });
 
+  app.delete('/api/decks/:deckId', validateDeckIdParam, auth.requireUser, requireOwner(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      if (!repository.deleteDeck) fail(501, 'deck_delete_unavailable', 'Deck removal is unavailable for this repository');
+      res.json(await repository.deleteDeck(req.user, deckId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get('/api/decks/:deckId/updates', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
     try {
       const deckId = deckIdFromRequest(req);

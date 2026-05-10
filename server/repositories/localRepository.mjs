@@ -263,6 +263,13 @@ export function createLocalRepository() {
       const state = await loadState();
       ensureCollections(state);
       const targetId = deckId || state.activeDeckId || state.decks[0]?.id;
+      if (!targetId) {
+        return {
+          ...publicState(state, null),
+          user,
+          memberships: []
+        };
+      }
       const { deck } = getMembership(state, user.id, targetId);
       const deckSuggestions = state.suggestions.filter((item) => item.deckId === deck.id);
       return {
@@ -900,6 +907,28 @@ export function createLocalRepository() {
       const deleted = before - deck.cards.length;
       await saveState(state);
       return { deleted };
+    },
+
+    async deleteDeck(user, deckId) {
+      const state = await loadState();
+      ensureCollections(state);
+      const { deck } = requireRole(state, user.id, deckId, 'owner');
+      state.decks = state.decks.filter((item) => item.id !== deckId);
+      state.suggestions = (state.suggestions || []).filter((item) => item.deckId !== deckId);
+      state.comments = (state.comments || []).filter((item) => item.deckId !== deckId);
+      state.shareLinks = (state.shareLinks || []).filter((item) => item.deckId !== deckId);
+      state.invites = (state.invites || []).filter((item) => item.deckId !== deckId);
+      state.aiArtifacts = (state.aiArtifacts || []).filter((item) => item.deckId !== deckId);
+      state.cardEmbeddings = (state.cardEmbeddings || []).filter((item) => item.deckId !== deckId);
+      state.aiDuplicateLinks = (state.aiDuplicateLinks || []).filter((item) => item.deckId !== deckId);
+      state.studySessions = (state.studySessions || []).filter((item) => item.deckId !== deckId);
+      state.sync.conflicts = (state.sync.conflicts || []).filter((item) => item.deckId !== deckId);
+      if (state.activeDeckId === deckId) state.activeDeckId = state.decks[0]?.id || null;
+      await saveState(state);
+      return {
+        deleted: { id: deck.id, name: deck.name },
+        state: await this.getDeckState(user, state.activeDeckId)
+      };
     },
 
     async createInvite(user, deckId, { email, role }) {

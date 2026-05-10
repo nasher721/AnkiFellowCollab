@@ -347,6 +347,33 @@ function assertDeckStoragePath(deckId, asset) {
 const SYNC_CARD_LOOKUP_CHUNK_SIZE = 500;
 const SYNC_CARD_WRITE_CHUNK_SIZE = 500;
 const MEDIA_UPLOAD_TARGET_CONCURRENCY = 12;
+const MEMBERSHIP_COLUMNS = 'deck_id,user_id,role,created_at';
+const CARD_COLUMNS = [
+  'id',
+  'anki_note_id',
+  'note_type',
+  'model_name',
+  'field_order',
+  'fields',
+  'tags',
+  'due',
+  'state',
+  'modified_at',
+  'modified_by',
+  'suspended',
+  'media_refs',
+  'source_deck_name',
+  'source_deck_path',
+  'template_front',
+  'template_back',
+  'model_css',
+  'rendered_front',
+  'rendered_back',
+  'cloze_ord',
+  'created_at'
+].join(',');
+const ACTIVITY_COLUMNS = 'id,kind,text,created_at';
+const CONFLICT_COLUMNS = 'id,deck_id,card_id,source,detected_at,incoming_fields,local_fields';
 
 function chunked(values, size) {
   const chunks = [];
@@ -366,7 +393,7 @@ function uniqueNoteIds(cards) {
   )];
 }
 
-function cardRowForUpsert(deckId, card) {
+export function cardRowForUpsert(deckId, card) {
   return {
     id: card.id,
     deck_id: deckId,
@@ -396,7 +423,7 @@ function cardRowForUpsert(deckId, card) {
 async function fetchCardRowsByColumn(supabase, deckId, column, values) {
   const rows = [];
   for (const chunk of chunked(values, SYNC_CARD_LOOKUP_CHUNK_SIZE)) {
-    const { data, error } = await supabase.from('cards').select('*').eq('deck_id', deckId).in(column, chunk);
+    const { data, error } = await supabase.from('cards').select(CARD_COLUMNS).eq('deck_id', deckId).in(column, chunk);
     if (error) throw error;
     rows.push(...(data || []));
   }
@@ -533,7 +560,7 @@ export function createSupabaseRepository(options = {}) {
   async function assertMembership(userId, deckId, minimumRole = 'viewer') {
     const { data, error } = await supabase
       .from('deck_members')
-      .select('deck_id,user_id,role,created_at')
+      .select(MEMBERSHIP_COLUMNS)
       .eq('deck_id', deckId)
       .eq('user_id', userId)
       .maybeSingle();
@@ -549,14 +576,13 @@ export function createSupabaseRepository(options = {}) {
   }
 
   async function getDeckRows(user, deckId) {
-    await assertMembership(user.id, deckId);
     const membership = await assertMembership(user.id, deckId);
     const [{ data: deck, error: deckError }, { data: cards, error: cardsError }, { data: suggestions, error: suggestionsError }, { data: activity, error: activityError }, { data: conflicts, error: conflictsError }] = await Promise.all([
       supabase.from('decks').select('*').eq('id', deckId).single(),
-      supabase.from('cards').select('*').eq('deck_id', deckId).order('created_at'),
+      supabase.from('cards').select(CARD_COLUMNS).eq('deck_id', deckId).order('created_at'),
       supabase.from('suggestions').select('*').eq('deck_id', deckId).order('created_at', { ascending: false }),
-      supabase.from('activity').select('*').eq('deck_id', deckId).order('created_at', { ascending: false }).limit(100),
-      supabase.from('sync_conflicts').select('*').eq('deck_id', deckId).order('detected_at', { ascending: false })
+      supabase.from('activity').select(ACTIVITY_COLUMNS).eq('deck_id', deckId).order('created_at', { ascending: false }).limit(100),
+      supabase.from('sync_conflicts').select(CONFLICT_COLUMNS).eq('deck_id', deckId).order('detected_at', { ascending: false })
     ]);
     if (deckError) throw deckError;
     if (cardsError) throw cardsError;
@@ -601,7 +627,7 @@ export function createSupabaseRepository(options = {}) {
       await supabase.from('profiles').upsert({ id: user.id, email: user.email, name: user.name });
       const { data, error } = await supabase
         .from('deck_members')
-        .select('deck_id,user_id,role,created_at')
+        .select(MEMBERSHIP_COLUMNS)
         .eq('user_id', user.id);
       if (error) throw error;
       return {
@@ -623,6 +649,18 @@ export function createSupabaseRepository(options = {}) {
       const { data: decks, error: deckError } = await supabase.from('decks').select('*').in('id', ids);
       if (deckError) throw deckError;
       return (decks || []).map((deck) => summarizeDeck(toDeck(deck), []));
+    },
+
+    async deleteDeck(user, deckId) {
+      await assertMembership(user.id, deckId, 'owner');
+      const { data: deck, error: deckError } = await supabase.from('decks').select('id,name').eq('id', deckId).single();
+      if (deckError || !deck) fail(404, 'deck_not_found', 'Deck not found');
+      const { error } = await supabase.from('decks').delete().eq('id', deckId);
+      if (error) throw error;
+      return {
+        deleted: { id: deck.id, name: deck.name },
+        state: await this.getDeckState(user)
+      };
     },
 
     async getDeckState(user, deckId) {
@@ -671,30 +709,7 @@ export function createSupabaseRepository(options = {}) {
         const chunkSize = 2000;
         for (let i = 0; i < deck.cards.length; i += chunkSize) {
           const chunk = deck.cards.slice(i, i + chunkSize);
-          const { error: cardError } = await supabase.from('cards').insert(chunk.map((card) => ({
-            id: card.id,
-            deck_id: deck.id,
-            anki_note_id: card.ankiNoteId,
-            note_type: card.type,
-            model_name: card.modelName || card.type,
-            field_order: card.fieldOrder || Object.keys(card.fields || {}),
-            fields: card.fields,
-            tags: card.tags,
-            due: card.due,
-            state: card.state,
-            modified_at: card.modifiedAt,
-            modified_by: card.modifiedBy,
-            suspended: card.suspended,
-            media_refs: card.mediaRefs || [],
-            source_deck_name: card.sourceDeckName,
-            source_deck_path: card.sourceDeckPath,
-            template_front: card.templateFront,
-            template_back: card.templateBack,
-            model_css: card.modelCss,
-            rendered_front: card.renderedFront,
-            rendered_back: card.renderedBack,
-            cloze_ord: card.clozeOrd
-          })));
+          const { error: cardError } = await supabase.from('cards').insert(chunk.map((card) => cardRowForUpsert(deck.id, card)));
           if (cardError) throw cardError;
         }
       }
@@ -941,7 +956,7 @@ export function createSupabaseRepository(options = {}) {
 
     async createSuggestion(user, payload) {
       await assertMembership(user.id, payload.deckId, 'contributor');
-      const { data: card, error: cardError } = await supabase.from('cards').select('*').eq('id', payload.cardId).eq('deck_id', payload.deckId).single();
+      const { data: card, error: cardError } = await supabase.from('cards').select('id').eq('id', payload.cardId).eq('deck_id', payload.deckId).single();
       if (cardError || !card) fail(404, 'card_not_found', 'Card not found');
       const createdAt = nowIso();
       const suggestion = {
@@ -1007,7 +1022,7 @@ export function createSupabaseRepository(options = {}) {
       if (suggestion.status !== 'pending') fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');
       await assertMembership(user.id, suggestion.deck_id, 'reviewer');
       if (decision === 'accepted') {
-        const { data: card, error: cardError } = await supabase.from('cards').select('*').eq('id', suggestion.card_id).single();
+        const { data: card, error: cardError } = await supabase.from('cards').select(CARD_COLUMNS).eq('id', suggestion.card_id).single();
         if (cardError || !card) fail(404, 'card_not_found', 'Card not found');
         const nextCard = applySuggestion(toDeck({ id: suggestion.deck_id, name: '', imported_at: nowIso() }, [toCard(card)]), toSuggestion(suggestion), user.name);
         const { error: updateCardError } = await supabase.from('cards').update({

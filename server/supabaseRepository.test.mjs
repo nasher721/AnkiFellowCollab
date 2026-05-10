@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  cardRowForUpsert,
   createSignedMediaUploadTargets,
   managedFileRow,
   managedMediaRows,
@@ -117,4 +118,55 @@ test('signed media upload targets are created with bounded concurrency', async (
   assert.equal(fileRows.length, files.length);
   assert.equal(fileRows[0].status, 'pending_upload');
   assert.deepEqual(requestedPaths, files.map((file) => `deck-1/${file.sha256}/${file.filename}`));
+});
+
+test('card row mapping preserves Anki render and scheduling metadata', () => {
+  const row = cardRowForUpsert('deck-1', {
+    id: 'card-1',
+    ankiNoteId: 42,
+    type: 'Cloze',
+    modelName: 'Enhanced Cloze 2.1',
+    fieldOrder: ['Text', 'Extra'],
+    fields: { Text: '{{c1::AVM}} rupture', Extra: 'lobar hemorrhage' },
+    tags: ['vascular'],
+    due: '2026-05-09',
+    state: 'Review',
+    modifiedAt: '2026-05-09T12:00:00.000Z',
+    modifiedBy: 'Owner',
+    suspended: false,
+    mediaRefs: ['scan.png'],
+    sourceDeckName: 'Neuro ICU',
+    sourceDeckPath: 'Neuro ICU::Vascular',
+    templateFront: '{{cloze:Text}}',
+    templateBack: '{{cloze:Text}}<hr>{{Extra}}',
+    modelCss: '.card { font-family: arial; }',
+    renderedFront: '<span class="cloze">[...]</span> rupture',
+    renderedBack: '<span class="cloze">AVM</span> rupture<hr>lobar hemorrhage',
+    clozeOrd: 0
+  });
+
+  assert.deepEqual(row, {
+    id: 'card-1',
+    deck_id: 'deck-1',
+    anki_note_id: 42,
+    note_type: 'Cloze',
+    model_name: 'Enhanced Cloze 2.1',
+    field_order: ['Text', 'Extra'],
+    fields: { Text: '{{c1::AVM}} rupture', Extra: 'lobar hemorrhage' },
+    tags: ['vascular'],
+    due: '2026-05-09',
+    state: 'Review',
+    modified_at: '2026-05-09T12:00:00.000Z',
+    modified_by: 'Owner',
+    suspended: false,
+    media_refs: ['scan.png'],
+    source_deck_name: 'Neuro ICU',
+    source_deck_path: 'Neuro ICU::Vascular',
+    template_front: '{{cloze:Text}}',
+    template_back: '{{cloze:Text}}<hr>{{Extra}}',
+    model_css: '.card { font-family: arial; }',
+    rendered_front: '<span class="cloze">[...]</span> rupture',
+    rendered_back: '<span class="cloze">AVM</span> rupture<hr>lobar hemorrhage',
+    cloze_ord: 0
+  });
 });

@@ -225,6 +225,11 @@
   border-color: var(--border);
 }
 
+[data-theme="dark"] .danger-zone {
+  background: rgba(127, 29, 29, 0.22) !important;
+  border-color: rgba(248, 113, 113, 0.32) !important;
+}
+
 [data-theme="dark"] .toggle-row {
   background: var(--bg-card);
   border-color: var(--border);
@@ -1076,6 +1081,7 @@ button:disabled {
 }
 
 .settings-field select,
+.settings-field input,
 .copy-row input,
 .settings-view textarea {
   width: 100%;
@@ -1108,6 +1114,24 @@ button:disabled {
 
 .settings-note.error {
   color: var(--red);
+}
+
+.danger-zone {
+  border-color: rgba(185, 28, 28, 0.22) !important;
+  background: #fff7f7 !important;
+}
+
+.remove-deck-confirm {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
 .inline-link-button {

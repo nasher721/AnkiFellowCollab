@@ -276,6 +276,26 @@ test('authenticated API returns current user and visible decks', async () => {
   assert.equal(contributorSession.body.role, 'contributor');
 });
 
+test('owner can remove a DeckBridge deck without touching Anki', async () => {
+  const { app, dataDir } = await createTestApp();
+
+  await asUser(request(app).delete('/api/decks/deck-demo-zanki'), 'maya', 'Maya Patel').expect(403);
+
+  const removed = await asUser(request(app).delete('/api/decks/deck-demo-zanki'), 'you', 'You').expect(200);
+  assert.deepEqual(removed.body.deleted, { id: 'deck-demo-zanki', name: 'Zanki Step 2 CK' });
+  assert.equal(removed.body.state.decks.length, 0);
+  assert.equal(removed.body.state.activeDeckId, null);
+  assert.equal(removed.body.state.memberships.length, 0);
+
+  const listed = await asUser(request(app).get('/api/decks'), 'you', 'You').expect(200);
+  assert.deepEqual(listed.body.decks, []);
+
+  await asUser(request(app).get('/api/decks/deck-demo-zanki'), 'you', 'You').expect(404);
+  const saved = JSON.parse(await fs.readFile(path.join(dataDir, 'state.json'), 'utf8'));
+  assert.equal(saved.decks.length, 0);
+  assert.equal(saved.suggestions.some((item) => item.deckId === 'deck-demo-zanki'), false);
+});
+
 test('AnkiHub-style subscriptions list visible decks with sync metadata', async () => {
   const { app } = await createTestApp();
 

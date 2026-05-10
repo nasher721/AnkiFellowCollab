@@ -10,6 +10,7 @@ export interface DeckSettingsViewProps {
   copiedShare: string;
   onCopied: (value: string) => void;
   onSetVisibility: (value: 'public' | 'private' | 'unlisted') => void;
+  onRemoveDeck: () => Promise<void>;
 }
 
 function shareLinkUrl(token: string) {
@@ -46,7 +47,8 @@ export function DeckSettingsView({
   embedCode,
   copiedShare,
   onCopied,
-  onSetVisibility
+  onSetVisibility,
+  onRemoveDeck
 }: DeckSettingsViewProps) {
   const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
   const [shareLoading, setShareLoading] = useState(false);
@@ -60,9 +62,14 @@ export function DeckSettingsView({
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSaving, setAiSaving] = useState(false);
   const [aiError, setAiError] = useState('');
+  const [removeOpen, setRemoveOpen] = useState(false);
+  const [removeName, setRemoveName] = useState('');
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState('');
   const activeShareRequestRef = useRef(0);
   const primaryShareLink = shareLinks.find((link) => !link.disabledAt) || shareLinks[0] || null;
   const primaryShareUrl = primaryShareLink ? shareLinkUrl(primaryShareLink.token) : '';
+  const removeConfirmed = removeName.trim() === deck.name;
 
   const loadShareLinks = useCallback(async (signal?: AbortSignal) => {
     const requestId = activeShareRequestRef.current + 1;
@@ -114,6 +121,9 @@ export function DeckSettingsView({
   useEffect(() => {
     setAiSettings({ ...DEFAULT_AI_SETTINGS, ...deck.aiSettings });
     setAiError('');
+    setRemoveOpen(false);
+    setRemoveName('');
+    setRemoveError('');
     if (!canReview) return;
     let mounted = true;
     setAiLoading(true);
@@ -190,6 +200,18 @@ export function DeckSettingsView({
       setShareError(err instanceof Error ? err.message : 'Unable to create share link');
     } finally {
       setShareLoading(false);
+    }
+  }
+
+  async function confirmRemoveDeck() {
+    if (!canReview || !removeConfirmed || removeBusy) return;
+    setRemoveBusy(true);
+    setRemoveError('');
+    try {
+      await onRemoveDeck();
+    } catch (err) {
+      setRemoveError(err instanceof Error ? err.message : 'Unable to remove deck');
+      setRemoveBusy(false);
     }
   }
 
@@ -337,6 +359,38 @@ export function DeckSettingsView({
             )}
           </section>
         )}
+        <section className="danger-zone">
+          <h3>Remove DeckBridge copy</h3>
+          <p>Remove this deck from DeckBridge collaboration only. The original deck in Anki is not changed.</p>
+          {!removeOpen ? (
+            <button className="button danger-outline" type="button" onClick={() => setRemoveOpen(true)} disabled={!canReview}>
+              Remove from DeckBridge
+            </button>
+          ) : (
+            <div className="remove-deck-confirm">
+              <label className="settings-field">
+                <span>Type deck name to confirm</span>
+                <input
+                  value={removeName}
+                  onChange={(event) => setRemoveName(event.target.value)}
+                  placeholder={deck.name}
+                  disabled={removeBusy}
+                  aria-label="Confirm deck name before removing from DeckBridge"
+                />
+              </label>
+              <div className="confirm-actions">
+                <button className="button danger" type="button" onClick={confirmRemoveDeck} disabled={!removeConfirmed || removeBusy}>
+                  {removeBusy ? 'Removing...' : 'Remove DeckBridge copy'}
+                </button>
+                <button className="button secondary" type="button" onClick={() => { setRemoveOpen(false); setRemoveName(''); setRemoveError(''); }} disabled={removeBusy}>
+                  Cancel
+                </button>
+              </div>
+              {removeError ? <p className="settings-note error">{removeError}</p> : null}
+            </div>
+          )}
+          {!canReview ? <p className="settings-note">Owner access is required to remove a DeckBridge deck.</p> : null}
+        </section>
       </div>
       {copiedShare ? <div className="inline-notice">{copiedShare}</div> : null}
     </div>

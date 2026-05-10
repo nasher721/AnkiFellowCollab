@@ -316,6 +316,10 @@ export const api = {
     }),
   decks: () => jsonRequest<{ decks: DeckSummary[] }>('/api/decks'),
   deck: (deckId: string) => jsonRequest<AppState>(`/api/decks/${deckId}`),
+  removeDeck: (deckId: string) =>
+    jsonRequest<{ deleted: { id: string; name: string }; state: AppState }>(`/api/decks/${deckId}`, {
+      method: 'DELETE'
+    }),
   deckAiSettings: {
     get: (deckId: string) =>
       jsonRequest<{ settings: DeckAiSettings }>(`/api/decks/${deckId}/ai/settings`),

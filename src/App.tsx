@@ -1225,6 +1225,27 @@ export default function App() {
     refreshWith(api.session({ activeDeckId: deckId }), 'Deck switched');
   }
 
+  async function removeActiveDeckFromDeckBridge(deckId: string, deckName: string) {
+    setBusy(true);
+    try {
+      const result = await api.removeDeck(deckId);
+      setSelectedSuggestionId(null);
+      setSelectedCardId(null);
+      setSelectedSuggestionIds(new Set());
+      setSelectedCardIds(new Set());
+      retainConflictReviewSnapshot.current = false;
+      setConflictReviewSnapshot([]);
+      setActiveTab('overview');
+      applyAuthoritativeState(result.state);
+      pushToast(`Removed ${deckName} from DeckBridge. Your Anki deck was not changed.`, 'success');
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to remove deck', 'error');
+      throw error;
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function switchRole(role: AppState['role']) {
     if (!isDevDemo) return;
     refreshWith(api.session({ role }), ['owner', 'editor', 'reviewer'].includes(role) ? 'Review controls updated' : 'Contributor suggestion mode enabled');
@@ -1871,6 +1892,7 @@ export default function App() {
                     return state;
                   });
                 }}
+                onRemoveDeck={() => removeActiveDeckFromDeckBridge(activeDeck.id, activeDeck.name)}
               />
             ) : null}
 
