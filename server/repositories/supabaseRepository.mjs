@@ -346,6 +346,7 @@ function assertDeckStoragePath(deckId, asset) {
 
 const SYNC_CARD_LOOKUP_CHUNK_SIZE = 500;
 const SYNC_CARD_WRITE_CHUNK_SIZE = 500;
+const MEDIA_UPLOAD_TARGET_CONCURRENCY = 12;
 
 function chunked(values, size) {
   const chunks = [];
@@ -425,6 +426,72 @@ async function upsertManagedFileRows(supabase, rows) {
     .from('deck_files')
     .upsert(rows, { onConflict: 'storage_bucket,storage_path' });
   if (error) throw error;
+}
+
+function boundedPositiveInteger(value, fallback, minimum = 1, maximum = 100) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.trunc(parsed)));
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(items.length, Math.max(1, concurrency));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }));
+  return results;
+}
+
+export async function createSignedMediaUploadTargets({
+  supabase,
+  bucket,
+  deckId,
+  files,
+  userId,
+  now = nowIso(),
+  concurrency = MEDIA_UPLOAD_TARGET_CONCURRENCY,
+  expiresIn = 7200
+}) {
+  const storage = supabase.storage.from(bucket);
+  const signedTargets = await mapWithConcurrency(files, concurrency, async (file) => {
+    const storagePath = storagePathForMedia(deckId, file);
+    const { data, error } = await storage.createSignedUploadUrl(storagePath, { upsert: true });
+    if (error) throw error;
+    return { file, storagePath, uploadUrl: data.signedUrl };
+  });
+  const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+  return {
+    uploads: signedTargets.map(({ file, storagePath, uploadUrl }) => ({
+      filename: file.filename,
+      mimeType: file.mimeType,
+      sha256: file.sha256,
+      sizeBytes: file.sizeBytes,
+      storageBucket: bucket,
+      storagePath,
+      uploadUrl,
+      expiresAt
+    })),
+    fileRows: signedTargets.map(({ file, storagePath }) => managedFileRow({
+      deckId,
+      kind: 'media',
+      filename: file.filename,
+      bucket,
+      storagePath,
+      sha256: file.sha256,
+      sizeBytes: file.sizeBytes,
+      mimeType: file.mimeType,
+      status: 'pending_upload',
+      userId,
+      metadata: { source: 'signed-upload-target' },
+      now
+    }))
+  };
 }
 
 function isOptionalAiSchemaError(error) {
@@ -1142,41 +1209,14 @@ export function createSupabaseRepository(options = {}) {
     async createMediaUploadTargets(user, deckId, files) {
       await assertMembership(user.id, deckId, 'editor');
       const bucket = mediaBucket();
-      const expiresIn = 7200;
-      const uploads = [];
-      const fileRows = [];
-      const now = nowIso();
-      for (const file of files) {
-        const storagePath = storagePathForMedia(deckId, file);
-        const { data, error } = await supabase.storage
-          .from(bucket)
-          .createSignedUploadUrl(storagePath, { upsert: true });
-        if (error) throw error;
-        fileRows.push(managedFileRow({
-          deckId,
-          kind: 'media',
-          filename: file.filename,
-          bucket,
-          storagePath,
-          sha256: file.sha256,
-          sizeBytes: file.sizeBytes,
-          mimeType: file.mimeType,
-          status: 'pending_upload',
-          userId: user.id,
-          metadata: { source: 'signed-upload-target' },
-          now
-        }));
-        uploads.push({
-          filename: file.filename,
-          mimeType: file.mimeType,
-          sha256: file.sha256,
-          sizeBytes: file.sizeBytes,
-          storageBucket: bucket,
-          storagePath,
-          uploadUrl: data.signedUrl,
-          expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString()
-        });
-      }
+      const { uploads, fileRows } = await createSignedMediaUploadTargets({
+        supabase,
+        bucket,
+        deckId,
+        files,
+        userId: user.id,
+        concurrency: boundedPositiveInteger(process.env.MEDIA_UPLOAD_TARGET_CONCURRENCY, MEDIA_UPLOAD_TARGET_CONCURRENCY)
+      });
       await upsertManagedFileRows(supabase, fileRows);
       return uploads;
     },

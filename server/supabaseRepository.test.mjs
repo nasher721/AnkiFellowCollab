@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { managedFileRow, managedMediaRows, roleMeetsMinimum } from './repositories/supabaseRepository.mjs';
+import {
+  createSignedMediaUploadTargets,
+  managedFileRow,
+  managedMediaRows,
+  roleMeetsMinimum
+} from './repositories/supabaseRepository.mjs';
 
 test('Supabase repository role ladder includes collaboration roles', () => {
   assert.equal(roleMeetsMinimum('owner', 'editor'), true);
@@ -66,4 +71,50 @@ test('managed media rows mark storage-backed assets available without inline blo
   assert.equal(rows[0].status, 'available');
   assert.equal(rows[0].uploaded_at, rows[0].updated_at);
   assert.equal(rows[0].metadata && Object.keys(rows[0].metadata).length, 0);
+});
+
+test('signed media upload targets are created with bounded concurrency', async () => {
+  const files = Array.from({ length: 6 }, (_, index) => ({
+    filename: `large-${index}.png`,
+    mimeType: 'image/png',
+    sha256: String(index).repeat(64),
+    sizeBytes: 12_000_000 + index
+  }));
+  let active = 0;
+  let maxActive = 0;
+  const requestedPaths = [];
+  const supabase = {
+    storage: {
+      from(bucket) {
+        assert.equal(bucket, 'deckbridge-media');
+        return {
+          async createSignedUploadUrl(storagePath) {
+            requestedPaths.push(storagePath);
+            active += 1;
+            maxActive = Math.max(maxActive, active);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            active -= 1;
+            return { data: { signedUrl: `https://storage.example/${storagePath}` }, error: null };
+          }
+        };
+      }
+    }
+  };
+
+  const { uploads, fileRows } = await createSignedMediaUploadTargets({
+    supabase,
+    bucket: 'deckbridge-media',
+    deckId: 'deck-1',
+    files,
+    userId: 'user-1',
+    now: '2026-05-09T12:00:00.000Z',
+    concurrency: 3,
+    expiresIn: 7200
+  });
+
+  assert.equal(maxActive, 3);
+  assert.deepEqual(uploads.map((upload) => upload.filename), files.map((file) => file.filename));
+  assert.equal(fileRows.length, files.length);
+  assert.equal(fileRows[0].status, 'pending_upload');
+  assert.deepEqual(requestedPaths, files.map((file) => `deck-1/${file.sha256}/${file.filename}`));
 });
