@@ -105,6 +105,29 @@ function toDeck(row, cards = []) {
   };
 }
 
+async function countRows(supabase, table, deckId, apply = (query) => query) {
+  const query = supabase
+    .from(table)
+    .select('id', { count: 'exact', head: true })
+    .eq('deck_id', deckId);
+  const { count, error } = await apply(query);
+  if (error) throw error;
+  return count || 0;
+}
+
+async function summarizeDeckRow(supabase, deck) {
+  const [cardCount, pendingSuggestions] = await Promise.all([
+    countRows(supabase, 'cards', deck.id),
+    countRows(supabase, 'suggestions', deck.id, (query) => query.eq('status', 'pending'))
+  ]);
+  return {
+    ...summarizeDeck(toDeck(deck), []),
+    cardCount,
+    noteCount: cardCount,
+    pendingSuggestions
+  };
+}
+
 function toCard(row) {
   return {
     id: row.id,
@@ -684,7 +707,7 @@ export function createSupabaseRepository(options = {}) {
       if (!ids.length) return [];
       const { data: decks, error: deckError } = await supabase.from('decks').select('*').in('id', ids);
       if (deckError) throw deckError;
-      return (decks || []).map((deck) => summarizeDeck(toDeck(deck), []));
+      return Promise.all((decks || []).map((deck) => summarizeDeckRow(supabase, deck)));
     },
 
     async deleteDeck(user, deckId) {

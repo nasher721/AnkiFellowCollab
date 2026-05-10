@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { authMessage, deriveOwnerReviewQueue, deriveSyncHealth, withAuthTimeout } from './App';
+import { authMessage, deriveOwnerReviewQueue, deriveSyncHealth, mergeHydratedDeckState, stateFromMeResponse, withAuthTimeout } from './App';
 import type { AiQualityPulse, AppState, Suggestion } from './types';
 
 const NOW = new Date('2026-05-09T12:00:00.000Z').getTime();
@@ -132,6 +132,114 @@ describe('auth helpers', () => {
     await vi.advanceTimersByTimeAsync(1000);
 
     await assertion;
+  });
+});
+
+describe('authenticated boot helpers', () => {
+  it('builds a lightweight workspace shell from /api/me without requiring card payloads', () => {
+    const state = stateFromMeResponse({
+      user: { id: 'you', email: 'you@example.com', name: 'You' },
+      memberships: [{ deckId: 'deck-2', userId: 'you', role: 'owner', createdAt: '2026-05-09T10:00:00.000Z' }],
+      decks: [
+        {
+          id: 'deck-1',
+          name: 'Small deck',
+          description: 'Quick deck',
+          cardCount: 12,
+          noteCount: 12,
+          tagCount: 2,
+          noteTypes: ['Basic'],
+          pendingSuggestions: 0,
+          lastSyncedAt: null,
+          importedAt: '2026-05-09T10:00:00.000Z'
+        },
+        {
+          id: 'deck-2',
+          name: 'Neuro ICU',
+          description: 'Large deck',
+          cardCount: 4200,
+          noteCount: 4200,
+          tagCount: 120,
+          noteTypes: ['Enhanced Cloze'],
+          pendingSuggestions: 3,
+          lastSyncedAt: '2026-05-09T11:00:00.000Z',
+          importedAt: '2026-05-09T10:00:00.000Z'
+        }
+      ]
+    }, 'deck-2');
+
+    expect(state.activeDeckId).toBe('deck-2');
+    expect(state.role).toBe('owner');
+    expect(state.summaries).toHaveLength(2);
+    expect(state.decks.find((deck) => deck.id === 'deck-2')?.cards).toEqual([]);
+  });
+
+  it('merges hydrated active deck details without dropping summary-only decks', () => {
+    const shell = stateFromMeResponse({
+      user: { id: 'you', email: 'you@example.com', name: 'You' },
+      memberships: [
+        { deckId: 'deck-1', userId: 'you', role: 'reviewer', createdAt: '2026-05-09T10:00:00.000Z' },
+        { deckId: 'deck-2', userId: 'you', role: 'owner', createdAt: '2026-05-09T10:00:00.000Z' }
+      ],
+      decks: [
+        {
+          id: 'deck-1',
+          name: 'Small deck',
+          description: 'Quick deck',
+          cardCount: 12,
+          noteCount: 12,
+          tagCount: 2,
+          noteTypes: ['Basic'],
+          pendingSuggestions: 0,
+          lastSyncedAt: null,
+          importedAt: '2026-05-09T10:00:00.000Z'
+        },
+        {
+          id: 'deck-2',
+          name: 'Neuro ICU',
+          description: 'Large deck',
+          cardCount: 4200,
+          noteCount: 4200,
+          tagCount: 120,
+          noteTypes: ['Enhanced Cloze'],
+          pendingSuggestions: 3,
+          lastSyncedAt: '2026-05-09T11:00:00.000Z',
+          importedAt: '2026-05-09T10:00:00.000Z'
+        }
+      ]
+    }, 'deck-2');
+
+    const hydrated = mergeHydratedDeckState(shell, {
+      ...shell,
+      activeDeckId: 'deck-2',
+      decks: [{
+        ...shell.decks[1],
+        cards: [{
+          id: 'card-1',
+          ankiNoteId: 1,
+          type: 'Enhanced Cloze',
+          fields: { Text: 'Question' },
+          tags: ['ncc'],
+          due: null,
+          state: 'Review',
+          modifiedAt: '2026-05-09T11:00:00.000Z',
+          modifiedBy: 'Anki',
+          suspended: false
+        }],
+        media: {}
+      }],
+      summaries: [{
+        ...shell.summaries[1],
+        cardCount: 4201
+      }],
+      memberships: [shell.memberships![1]]
+    });
+
+    expect(hydrated.summaries.map((summary) => summary.id)).toEqual(['deck-1', 'deck-2']);
+    expect(hydrated.decks.find((deck) => deck.id === 'deck-1')).toBeDefined();
+    expect(hydrated.decks.find((deck) => deck.id === 'deck-2')?.cards).toHaveLength(1);
+    expect(hydrated.summaries.find((summary) => summary.id === 'deck-2')?.cardCount).toBe(4201);
+    expect(hydrated.role).toBe('owner');
   });
 });
 

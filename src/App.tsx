@@ -1,7 +1,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Session } from '@supabase/supabase-js';
-import { api, setApiAuthToken, type AddonDownloadAvailability, type AddonVersion } from './api';
-import type { AddonSyncResult, AiArtifact, AiDuplicateLink, AiQualityPulse, AppState, Deck, DeckCard, Suggestion } from './types';
+import { api, setApiAuthToken, type AddonDownloadAvailability, type AddonVersion, type MeResponse } from './api';
+import type { AddonSyncResult, AiArtifact, AiDuplicateLink, AiQualityPulse, AppState, Deck, DeckCard, DeckMember, DeckSummary, Suggestion } from './types';
 import { useRealtime } from './useRealtime';
 import { ConnectAnkiWizard } from './ConnectAnkiWizard';
 import { CardEditor } from './CardEditor';
@@ -99,6 +99,16 @@ const supabase = supabaseUrl && supabaseAnonKey
   ? createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true } })
   : null;
 export const AUTH_REQUEST_TIMEOUT_MS = 20000;
+
+const DEFAULT_AI_SETTINGS = Object.freeze({
+  reviewBriefs: false,
+  embeddings: false,
+  conflictSummaries: false,
+  diagnostics: false,
+  qualityPulse: false,
+  updatedAt: null,
+  updatedBy: null
+});
 
 const statusColors: Record<string, string> = {
   New: 'blue',
@@ -575,6 +585,82 @@ export function authMessage(message: string, mode: 'sign-in' | 'sign-up') {
   return message;
 }
 
+function emptySyncState(): AppState['sync'] {
+  return {
+    ankiConnectUrl: '',
+    connected: false,
+    lastCheckedAt: null,
+    lastPullAt: null,
+    lastPushAt: null,
+    lastAddonSync: null,
+    conflicts: []
+  };
+}
+
+function deckShellFromSummary(summary: DeckSummary): Deck {
+  return {
+    id: summary.id,
+    name: summary.name,
+    description: summary.description,
+    owner: 'Owner',
+    importedAt: summary.importedAt,
+    lastSyncedAt: summary.lastSyncedAt,
+    cards: [],
+    media: {},
+    models: [],
+    aiSettings: { ...DEFAULT_AI_SETTINGS },
+    source: {
+      filename: 'deckbridge.apkg',
+      format: 'summary'
+    }
+  };
+}
+
+function roleForDeck(memberships: DeckMember[] = [], deckId: string | null): AppState['role'] {
+  const role = memberships.find((membership) => membership.deckId === deckId)?.role || memberships[0]?.role;
+  return role || 'contributor';
+}
+
+export function stateFromMeResponse(me: MeResponse, preferredDeckId?: string | null): AppState {
+  const decks = (me.decks || []).map(deckShellFromSummary);
+  const activeDeckId = decks.some((deck) => deck.id === preferredDeckId)
+    ? preferredDeckId || null
+    : decks[0]?.id || null;
+  return {
+    user: me.user,
+    memberships: me.memberships,
+    decks,
+    summaries: me.decks || [],
+    activeDeckId,
+    role: roleForDeck(me.memberships, activeDeckId),
+    collaborators: [],
+    suggestions: [],
+    activity: [],
+    sync: emptySyncState()
+  };
+}
+
+export function mergeHydratedDeckState(previous: AppState | null, next: AppState): AppState {
+  if (!previous) return next;
+
+  const decksById = new Map(previous.decks.map((deck) => [deck.id, deck]));
+  for (const deck of next.decks) decksById.set(deck.id, deck);
+
+  const summariesById = new Map(previous.summaries.map((summary) => [summary.id, summary]));
+  for (const summary of next.summaries) summariesById.set(summary.id, summary);
+
+  const membershipsByDeck = new Map((previous.memberships || []).map((membership) => [membership.deckId, membership]));
+  for (const membership of next.memberships || []) membershipsByDeck.set(membership.deckId, membership);
+
+  return {
+    ...next,
+    decks: Array.from(decksById.values()),
+    summaries: Array.from(summariesById.values()),
+    memberships: Array.from(membershipsByDeck.values()),
+    role: roleForDeck(Array.from(membershipsByDeck.values()), next.activeDeckId)
+  };
+}
+
 function Icon({ name }: { name: 'upload' | 'download' | 'sync' | 'search' | 'filter' | 'cards' | 'users' | 'check' | 'x' | 'spark' | 'moon' | 'sun' }) {
   const paths = {
     upload: 'M12 3v12m0-12 4 4m-4-4-4 4M4 17v3h16v-3',
@@ -907,6 +993,7 @@ export default function App() {
   const [apiHealth, setApiHealth] = useState<'checking' | 'ok' | 'down'>('checking');
   const [authReady, setAuthReady] = useState(!supabase);
   const [session, setSession] = useState<Session | null>(null);
+  const [deckLoading, setDeckLoading] = useState(false);
   const [authMode, setAuthMode] = useState<'sign-in' | 'sign-up'>('sign-in');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
@@ -951,6 +1038,11 @@ export default function App() {
     setState(next);
   }
 
+  function applyHydratedDeckState(next: AppState) {
+    retainConflictReviewSnapshot.current = false;
+    setState((previous) => mergeHydratedDeckState(previous, next));
+  }
+
   useEffect(() => {
     if (!supabase) return;
     let mounted = true;
@@ -974,26 +1066,72 @@ export default function App() {
 
   useEffect(() => {
     if (!authReady || (supabase && !session)) return;
-    Promise.all([api.state(), api.health()])
-      .then(([next]) => {
+    let cancelled = false;
+
+    async function loadDemoState() {
+      try {
+        const [next] = await Promise.all([api.state(), api.health()]);
+        if (cancelled) return;
         applyAuthoritativeState(next);
         setApiHealth('ok');
         const nextActiveDeck = next.decks.find((deck) => deck.id === next.activeDeckId);
         setSelectedCardId(nextActiveDeck?.cards[0]?.id || null);
         setSelectedSuggestionId(next.suggestions.find((item) => item.status === 'pending')?.id || null);
-      }).catch((error) => {
+      } catch (error) {
+        if (cancelled) return;
         setApiHealth('down');
-        pushToast(error.message, 'error');
-      });
-  }, [authReady, session]);
+        pushToast(error instanceof Error ? error.message : 'Unable to load DeckBridge workspace', 'error');
+      }
+    }
+
+    async function loadAuthenticatedState() {
+      try {
+        const [me, healthOk] = await Promise.all([
+          api.me(),
+          api.health().then(() => true).catch(() => false)
+        ]);
+        if (cancelled) return;
+
+        const shell = stateFromMeResponse(me, state?.activeDeckId);
+        applyAuthoritativeState(shell);
+        setApiHealth(healthOk ? 'ok' : 'down');
+
+        if (!shell.activeDeckId) return;
+        setDeckLoading(true);
+        const next = await api.deck(shell.activeDeckId);
+        if (cancelled) return;
+        applyHydratedDeckState(next);
+        const nextActiveDeck = next.decks.find((deck) => deck.id === next.activeDeckId);
+        setSelectedCardId(nextActiveDeck?.cards[0]?.id || null);
+        setSelectedSuggestionId(next.suggestions.find((item) => item.status === 'pending')?.id || null);
+      } catch (error) {
+        if (cancelled) return;
+        setApiHealth('down');
+        pushToast(error instanceof Error ? error.message : 'Unable to load DeckBridge workspace', 'error');
+      } finally {
+        if (!cancelled) setDeckLoading(false);
+      }
+    }
+
+    if (supabase) void loadAuthenticatedState();
+    else void loadDemoState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, session?.access_token]);
 
   useEffect(() => {
     if (supabase && !session) return undefined;
+    if (!state?.activeDeckId) return undefined;
     const timer = window.setInterval(() => {
-      api.ankiStatus().then(() => api.state()).then(applyAuthoritativeState).catch(() => undefined);
+      api.ankiStatus()
+        .then(() => api.deck(state.activeDeckId!))
+        .then(applyHydratedDeckState)
+        .catch(() => undefined);
     }, 15000);
     return () => window.clearInterval(timer);
-  }, [session]);
+  }, [session?.access_token, state?.activeDeckId]);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
@@ -1043,14 +1181,20 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }
 
+  const refreshActiveDeckState = useCallback(() => {
+    const deckId = state?.activeDeckId;
+    const task = deckId ? api.deck(deckId).then(applyHydratedDeckState) : api.state().then(applyAuthoritativeState);
+    return task.catch(() => undefined);
+  }, [state?.activeDeckId]);
+
   const handleSuggestionChange = useCallback(() => {
-    api.state().then(applyAuthoritativeState).catch(() => undefined);
-  }, []);
+    void refreshActiveDeckState();
+  }, [refreshActiveDeckState]);
 
   const handleCommentChange = useCallback(() => {
     setCommentsVersion((version) => version + 1);
-    api.state().then(applyAuthoritativeState).catch(() => undefined);
-  }, []);
+    void refreshActiveDeckState();
+  }, [refreshActiveDeckState]);
 
   useRealtime({
     supabase,
@@ -1299,8 +1443,8 @@ export default function App() {
   }
 
   async function refreshState() {
-    const next = await api.state();
-    applyAuthoritativeState(next);
+    const next = state?.activeDeckId ? await api.deck(state.activeDeckId) : await api.state();
+    applyHydratedDeckState(next);
     return next;
   }
 
@@ -1362,7 +1506,18 @@ export default function App() {
     setSelectedSuggestionIds(new Set());
     retainConflictReviewSnapshot.current = false;
     setConflictReviewSnapshot([]);
-    refreshWith(api.session({ activeDeckId: deckId }), 'Deck switched');
+    setDeckLoading(true);
+    api.deck(deckId)
+      .then((next) => {
+        applyHydratedDeckState(next);
+        const nextActiveDeck = next.decks.find((deck) => deck.id === next.activeDeckId);
+        setSelectedCardId(nextActiveDeck?.cards[0]?.id || null);
+        pushToast('Deck switched', 'success');
+      })
+      .catch((error) => {
+        pushToast(error instanceof Error ? error.message : 'Deck switch failed', 'error');
+      })
+      .finally(() => setDeckLoading(false));
   }
 
   async function removeActiveDeckFromDeckBridge(deckId: string, deckName: string) {
@@ -1939,6 +2094,12 @@ export default function App() {
                 </span>
               )}
             </div>
+
+            {deckLoading && activeDeck.cards.length === 0 && (activeSummary?.cardCount || 0) > 0 ? (
+              <div className="inline-notice">
+                Loading {activeSummary?.cardCount.toLocaleString()} cards for {activeDeck.name}. The workspace is ready while card details hydrate.
+              </div>
+            ) : null}
 
             {activeTab === 'study' && activeDeck ? (
               <StudyPrepView
