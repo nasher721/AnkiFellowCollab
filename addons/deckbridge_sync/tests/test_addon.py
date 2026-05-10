@@ -263,7 +263,7 @@ class TestApplyAutoconfig(unittest.TestCase):
 
 class TestVersion(unittest.TestCase):
     def test_manifest_is_version_source(self):
-        self.assertEqual(addon_manifest()['version'], '0.2.1')
+        self.assertEqual(addon_manifest()['version'], '0.2.2')
         self.assertEqual(ADDON_VERSION, addon_manifest()['version'])
 
 
@@ -531,6 +531,19 @@ class TestRequestTimeouts(unittest.TestCase):
                 '/api/decks/deck-1/sync/cards',
                 {'cards': [{'id': 'anki-1'}]},
                 cfg={**DEFAULT_CONFIG, 'api_token': '', 'timeout_seconds': 30},
+                timeout_floor=120,
+            )
+
+    @patch('deckbridge_sync.urllib.request.urlopen')
+    def test_request_json_platform_500_does_not_report_unreachable(self, mock_urlopen):
+        mock_urlopen.side_effect = http_error(500, {'detail': 'Unexpected server error'})
+
+        with self.assertRaisesRegex(RuntimeError, r'DeckBridge API 500: DeckBridge platform error.*database migrations'):
+            request_json(
+                'POST',
+                '/api/decks/sync/from-anki',
+                {'cards': [{'id': 'anki-1', 'fields': {'Front': 'A'}}]},
+                cfg={**DEFAULT_CONFIG, 'platform_url': 'https://deckbridge.example', 'api_token': 'db_token'},
                 timeout_floor=120,
             )
 

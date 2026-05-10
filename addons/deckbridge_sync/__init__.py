@@ -78,7 +78,7 @@ except ImportError:
 
 
 ADDON_NAME = "DeckBridge Sync"
-DEFAULT_ADDON_VERSION = "0.2.1"
+DEFAULT_ADDON_VERSION = "0.2.2"
 TRACKING_MODEL = "DeckBridge Sync"
 TRACKING_TAG_PREFIX = "deckbridge_card_"
 CONFIG_KEY = "deckbridge"
@@ -415,6 +415,12 @@ def protocol_recovery_message(
         return (
             f"DeckBridge detected a conflict while syncing{f' {context}' if context else ''}. "
             "Review conflicts in DeckBridge before switching away from conflictPolicy=detect or overwriting platform cards."
+        )
+    if status is not None and status >= 500:
+        return (
+            f"DeckBridge platform error{f' while calling {context}' if context else ''}: {detail or 'Unexpected server error'}. "
+            "The platform accepted the request but could not complete it. Retry after a moment; "
+            "if it repeats, verify the DeckBridge deployment and database migrations."
         )
     if timeout is not None:
         return (

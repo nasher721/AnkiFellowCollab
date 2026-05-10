@@ -93,7 +93,7 @@ describe('deriveSyncHealth', () => {
       },
       addonPackage: {
         loading: false,
-        version: { version: '0.2.1', minVersion: '0.2.0', downloadUrl: '/downloads/deckbridge-sync.ankiaddon' },
+        version: { version: '0.2.2', minVersion: '0.2.0', downloadUrl: '/downloads/deckbridge-sync.ankiaddon' },
         availability: { available: true, status: 200, message: 'Ready' },
         error: ''
       },
@@ -110,7 +110,7 @@ describe('deriveSyncHealth', () => {
     });
 
     expect(health.state).toBe('conflicts');
-    expect(health.packageLabel).toBe('Add-on v0.2.1');
+    expect(health.packageLabel).toBe('Add-on v0.2.2');
     expect(health.deckLabel).toBe('Neuro ICU');
     expect(health.localDeckLabel).toBe('Boards::Neuro ICU');
     expect(health.lastCheckedLabel).toBe('15m ago');
