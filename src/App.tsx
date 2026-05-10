@@ -98,6 +98,7 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undef
 const supabase = supabaseUrl && supabaseAnonKey
   ? createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true } })
   : null;
+export const AUTH_REQUEST_TIMEOUT_MS = 20000;
 
 const statusColors: Record<string, string> = {
   New: 'blue',
@@ -535,8 +536,25 @@ function deriveOwnerAttentionItems({
   return [...items, ...pulseItems].slice(0, 5);
 }
 
-function authMessage(message: string, mode: 'sign-in' | 'sign-up') {
+export async function withAuthTimeout<T>(request: Promise<T>, timeoutMs = AUTH_REQUEST_TIMEOUT_MS): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error('DeckBridge auth request timed out'));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+export function authMessage(message: string, mode: 'sign-in' | 'sign-up') {
   const lower = message.toLowerCase();
+  if (lower.includes('timed out') || lower.includes('failed to fetch') || lower.includes('networkerror')) {
+    return 'DeckBridge could not reach the auth provider. The Supabase project may be paused or temporarily unavailable; try again in a moment.';
+  }
   if (lower.includes('invalid login credentials')) {
     return 'That email and password did not match a DeckBridge account. Create an account here, or check the password and try again.';
   }
@@ -687,7 +705,7 @@ function AuthScreen({
         <button className="auth-switch" type="button" onClick={onToggleMode}>
           {isSignIn ? 'Create a new DeckBridge account' : 'Use an existing DeckBridge account'}
         </button>
-        {authNotice ? <p className="auth-notice">{authNotice}</p> : null}
+        {authNotice ? <p className="auth-notice" role="alert">{authNotice}</p> : null}
       </section>
     </div>
   );
@@ -1318,16 +1336,24 @@ export default function App() {
     if (!supabase) return;
     setAuthBusy(true);
     setAuthNotice('');
-    const credentials = { email: authEmail, password: authPassword };
-    const { error } = authMode === 'sign-in'
-      ? await supabase.auth.signInWithPassword(credentials)
-      : await supabase.auth.signUp({ ...credentials, options: { data: { name: authEmail } } });
-    if (error) {
-      setAuthNotice(authMessage(error.message, authMode));
-    } else if (authMode === 'sign-up') {
-      setAuthNotice('Account created. DeckBridge will sign you in automatically.');
+    try {
+      const credentials = { email: authEmail, password: authPassword };
+      const { error } = await withAuthTimeout(
+        authMode === 'sign-in'
+          ? supabase.auth.signInWithPassword(credentials)
+          : supabase.auth.signUp({ ...credentials, options: { data: { name: authEmail } } })
+      );
+      if (error) {
+        setAuthNotice(authMessage(error.message, authMode));
+      } else if (authMode === 'sign-up') {
+        setAuthNotice('Account created. DeckBridge will sign you in automatically.');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to fetch';
+      setAuthNotice(authMessage(message, authMode));
+    } finally {
+      setAuthBusy(false);
     }
-    setAuthBusy(false);
   }
 
   function switchDeck(deckId: string) {

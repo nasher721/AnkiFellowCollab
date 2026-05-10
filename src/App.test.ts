@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { deriveOwnerReviewQueue, deriveSyncHealth } from './App';
+import { authMessage, deriveOwnerReviewQueue, deriveSyncHealth, withAuthTimeout } from './App';
 import type { AiQualityPulse, AppState, Suggestion } from './types';
 
 const NOW = new Date('2026-05-09T12:00:00.000Z').getTime();
@@ -116,6 +116,22 @@ describe('deriveSyncHealth', () => {
     expect(health.lastCheckedLabel).toBe('15m ago');
     expect(health.conflictLabel).toBe('1 conflict');
     expect(health.primaryAction).toBe('conflicts');
+  });
+});
+
+describe('auth helpers', () => {
+  it('turns network failures into a recoverable auth notice', () => {
+    expect(authMessage('Failed to fetch', 'sign-in')).toContain('could not reach the auth provider');
+  });
+
+  it('rejects auth requests that hang beyond the timeout', async () => {
+    vi.useFakeTimers();
+    const request = withAuthTimeout(new Promise(() => undefined), 1000);
+    const assertion = expect(request).rejects.toThrow('DeckBridge auth request timed out');
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await assertion;
   });
 });
 
