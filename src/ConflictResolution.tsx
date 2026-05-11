@@ -145,6 +145,30 @@ function clearStoredDecisions(storageKey: string) {
   }
 }
 
+function saveConflictDecision(conflicts: Conflict[], selectedConflict: Conflict, resolution: Resolution, decidedAt = new Date().toISOString()) {
+  const storageKey = getStorageKey(conflicts);
+  const decisions = readStoredDecisions(storageKey, conflicts);
+  const nextDecisions = {
+    ...decisions,
+    [selectedConflict.id]: {
+      resolution,
+      decidedAt,
+      deckId: selectedConflict.deckId,
+      cardId: selectedConflict.cardId,
+      source: selectedConflict.source,
+      detectedAt: selectedConflict.detectedAt,
+      fingerprint: getConflictFingerprint(selectedConflict)
+    }
+  };
+
+  writeStoredDecisions(storageKey, nextDecisions);
+  return nextDecisions;
+}
+
+function readSavedConflictDecisions(conflicts: Conflict[]) {
+  return readStoredDecisions(getStorageKey(conflicts), conflicts);
+}
+
 function highlightDiff(local: string, incoming: string, side: 'local' | 'incoming') {
   if (local === incoming) return <>{side === 'local' ? local : incoming}</>;
 
@@ -238,21 +262,9 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
 
   const recordDecision = (selectedConflict: Conflict, resolution: Resolution) => {
     const isPending = pendingIds.has(selectedConflict.id);
-    const nextDecisions = {
-      ...decisions,
-      [selectedConflict.id]: {
-        resolution,
-        decidedAt: new Date().toISOString(),
-        deckId: selectedConflict.deckId,
-        cardId: selectedConflict.cardId,
-        source: selectedConflict.source,
-        detectedAt: selectedConflict.detectedAt,
-        fingerprint: getConflictFingerprint(selectedConflict)
-      }
-    };
+    const nextDecisions = saveConflictDecision(conflicts, selectedConflict, resolution);
 
     setDecisions(nextDecisions);
-    writeStoredDecisions(storageKey, nextDecisions);
     if (isPending) {
       replayedRef.current.add(selectedConflict.id);
       onResolve(selectedConflict.id, resolution);
@@ -458,5 +470,5 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
   );
 }
 
-export { ConflictResolution };
-export type { Conflict, Props };
+export { ConflictResolution, readSavedConflictDecisions, saveConflictDecision };
+export type { Conflict, Props, Resolution };

@@ -67,7 +67,7 @@ test.describe('Workspace', () => {
   test('loads the app with demo deck', async ({ page }) => {
     await expect(page.getByText('DeckBridge')).toBeVisible();
     await expect(page.getByRole('button', { name: /Zanki Step 2 CK/ })).toBeVisible();
-    await expect(page.getByText('Review Queue')).toBeVisible();
+    await expect(page.getByText('Quality Review')).toBeVisible();
   });
 
   test('displays cards in the table', async ({ page }) => {
@@ -99,21 +99,24 @@ test.describe('Workspace', () => {
 test.describe('Review Queue', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
+    await page.getByRole('button', { name: 'Review', exact: true }).click();
   });
 
   test('shows pending suggestions', async ({ page }) => {
     await expect(page.getByText('1 pending')).toBeVisible();
-    await expect(page.getByRole('button', { name: /Maya Patel.*pending/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Pending suggestion.*Maya Patel.*pending/i })).toBeVisible();
+    await expect(page.getByText('Quality Review Workspace')).toBeVisible();
+    await expect(page.locator('.review-quality-summary').getByRole('button', { name: /Answer changed/ })).toBeVisible();
   });
 
   test('filters the review queue by status and author', async ({ page }) => {
     await expect(page.getByLabel('Filter review queue by status')).toHaveValue('pending');
     await page.getByLabel('Filter review queue by author').selectOption('Maya Patel');
-    await expect(page.getByRole('button', { name: /Maya Patel.*pending/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Pending suggestion.*Maya Patel.*pending/i })).toBeVisible();
     await page.getByLabel('Filter review queue by status').selectOption('accepted');
-    await expect(page.getByText('No owner review items match the queue filters.')).toBeVisible();
-    await page.getByRole('button', { name: 'Reset' }).click();
-    await expect(page.getByRole('button', { name: /Maya Patel.*pending/ })).toBeVisible();
+    await expect(page.getByText('No quality review items match the current filters.')).toBeVisible();
+    await page.getByRole('button', { name: /Reset review filters/ }).click();
+    await expect(page.getByRole('button', { name: /Pending suggestion.*Maya Patel.*pending/i })).toBeVisible();
   });
 
   test('displays suggestion diff', async ({ page }) => {
@@ -140,6 +143,327 @@ test.describe('Review Queue', () => {
     await page.getByRole('button', { name: 'Contributor' }).click();
     await page.getByRole('button', { name: /Suggest edit/ }).click();
     await expect(page.getByText(/Suggestion added/)).toBeVisible();
+  });
+
+  test('supports the review path on mobile', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator('.review-quality-summary').getByRole('button', { name: /Answer changed/ }).click();
+    await page.locator('.quality-queue-main').first().click();
+    await expect(page.getByRole('heading', { name: /Microscopic polyangiitis/ })).toBeVisible();
+    await expect(page.getByText('Rendered HTML missing', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Mark checked' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Accept/ })).toBeVisible();
+  });
+
+  test('keeps source-check marks visible in the queue and inspection panel', async ({ page }) => {
+    await page.locator('.review-quality-summary').getByRole('button', { name: /Answer changed/ }).click();
+    await page.locator('.quality-queue-main').first().click();
+
+    await expect(page.locator('.quality-queue-item.active').getByText('Needs source check')).toBeVisible();
+    await expect(page.locator('.review-inspection-panel').getByText('Needs source check')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Mark checked' }).click();
+    await expect(page.locator('.quality-queue-item.active').getByText('Source checked this session')).toBeVisible();
+    await expect(page.getByText('Source check marked checked in this review session.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Mark needs source check' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Mark needs source check' }).click();
+    await expect(page.locator('.quality-queue-item.active').getByText('Needs source check this session')).toBeVisible();
+    await expect(page.locator('.review-inspection-panel').getByText('Needs source check')).toBeVisible();
+  });
+});
+
+test.describe('Review Queue conflict inspection', () => {
+  test('filters sync conflicts and shows conflict-specific raw diffs with push blocked rationale', async ({ page }) => {
+    const detectedAt = '2026-05-08T12:00:00.000Z';
+    const buildState = () => ({
+      user: { id: 'you', email: 'you@example.com', name: 'You' },
+      memberships: [{ deckId: 'deck-review-conflict', userId: 'you', role: 'owner', createdAt: detectedAt }],
+      decks: [{
+        id: 'deck-review-conflict',
+        name: 'Conflict Review Deck',
+        description: 'Conflict review deck',
+        owner: 'You',
+        importedAt: detectedAt,
+        lastSyncedAt: detectedAt,
+        cards: [
+          {
+            id: 'card-stale-suggestion',
+            ankiNoteId: null,
+            type: 'Basic',
+            modelName: 'Basic',
+            fieldOrder: ['Front', 'Back'],
+            fields: { Front: 'Stale suggestion prompt', Back: 'Stale suggestion answer' },
+            tags: ['Suggestion'],
+            due: null,
+            state: 'Review',
+            modifiedAt: detectedAt,
+            modifiedBy: 'Maya Patel',
+            suspended: false,
+            mediaRefs: []
+          },
+          {
+            id: 'card-review-conflict',
+            ankiNoteId: null,
+            type: 'Basic',
+            modelName: 'Basic',
+            fieldOrder: ['Front', 'Back'],
+            fields: { Front: 'Conflict card prompt about cerebral salt wasting?', Back: 'Original platform answer' },
+            tags: ['Neuro', 'Conflict'],
+            due: null,
+            state: 'Review',
+            modifiedAt: detectedAt,
+            modifiedBy: 'Anki',
+            suspended: false,
+            mediaRefs: []
+          }
+        ],
+        media: {},
+        source: { filename: 'anki', format: 'anki-addon', deckName: 'Conflict Review Deck', deckPath: 'Conflict Review Deck' }
+      }],
+      summaries: [{
+        id: 'deck-review-conflict',
+        name: 'Conflict Review Deck',
+        description: 'Conflict review deck',
+        cardCount: 2,
+        noteCount: 2,
+        tagCount: 3,
+        noteTypes: ['Basic'],
+        pendingSuggestions: 1,
+        lastSyncedAt: detectedAt,
+        importedAt: detectedAt
+      }],
+      activeDeckId: 'deck-review-conflict',
+      role: 'owner',
+      collaborators: [
+        { id: 'you', name: 'You', email: 'you@example.com', role: 'owner', accepted: 0 },
+        { id: 'maya', name: 'Maya Patel', email: 'maya@example.com', role: 'collaborator', accepted: 0 }
+      ],
+      suggestions: [{
+        id: 'stale-selected-suggestion',
+        deckId: 'deck-review-conflict',
+        cardId: 'card-stale-suggestion',
+        authorId: 'maya',
+        authorName: 'Maya Patel',
+        status: 'pending',
+        reason: 'This suggestion must not leak into conflict inspection.',
+        createdAt: detectedAt,
+        proposedFields: { Back: 'Stale proposed suggestion answer' },
+        proposedTags: ['Suggestion']
+      }],
+      activity: [],
+      sync: {
+        ankiConnectUrl: null,
+        connected: false,
+        lastCheckedAt: detectedAt,
+        lastPullAt: null,
+        lastPushAt: detectedAt,
+        lastAddonSync: {
+          syncedAt: detectedAt,
+          source: 'DeckBridge Sync',
+          client: { name: 'DeckBridge Sync', version: '0.1.0', fingerprint: 'test-host' },
+          stats: { total: 2, created: 0, updated: 0, skipped: 1, conflicts: 1, dryRun: false }
+        },
+        conflicts: [{
+          id: 'review-conflict-1',
+          deckId: 'deck-review-conflict',
+          cardId: 'card-review-conflict',
+          source: 'DeckBridge Sync',
+          detectedAt,
+          localFields: {
+            Front: 'Conflict card prompt about cerebral salt wasting?',
+            Back: 'Local Anki says hypertonic saline plus volume repletion.'
+          },
+          incomingFields: {
+            Front: 'Conflict card prompt about cerebral salt wasting?',
+            Back: 'DeckBridge incoming says fluid restriction, which may be unsafe.'
+          }
+        }]
+      }
+    });
+
+    await page.route('**/api/state', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(buildState())
+      });
+    });
+    await page.route('**/api/addon/version', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          name: 'DeckBridge Sync',
+          version: '0.1.0',
+          minVersion: '23.10.0',
+          package: 'deckbridge_sync',
+          downloadUrl: '/api/addon/download'
+        })
+      });
+    });
+    await page.route('**/api/addon/download', async (route) => {
+      if (route.request().method() === 'HEAD') {
+        await route.fulfill({ status: 200 });
+        return;
+      }
+      await route.fallback();
+    });
+    await page.route('**/api/anki/status', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ connected: false })
+      });
+    });
+
+    await page.goto('/');
+    await page.locator('button').filter({ hasText: /^Review$/ }).click();
+    await page.locator('.review-quality-summary').getByRole('button', { name: /Sync conflict/ }).click();
+    await expect(page.getByRole('button', { name: /Conflict card prompt about cerebral salt wasting.*Sync conflict/i })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Conflict card prompt about cerebral salt wasting/ })).toBeVisible();
+    await expect(page.getByText('Which source of truth should win?')).toBeVisible();
+    await expect(page.getByText('- Local Anki says hypertonic saline plus volume repletion.')).toBeVisible();
+    await expect(page.getByText('+ DeckBridge incoming says fluid restriction, which may be unsafe.')).toBeVisible();
+    await expect(page.getByText(/Push to Anki is blocked because unresolved sync conflicts/)).toBeVisible();
+    await expect(page.getByRole('button', { name: /Push to Anki blocked/ })).toBeDisabled();
+    await expect(page.getByText('Stale proposed suggestion answer')).toHaveCount(0);
+  });
+
+  test('saves ReviewWorkspace conflict decisions and replays them after rehydration', async ({ page }) => {
+    const detectedAt = '2026-05-08T12:00:00.000Z';
+    const syncConflict = {
+      id: 'review-workspace-conflict-1',
+      deckId: 'deck-review-workspace-conflict',
+      cardId: 'card-review-workspace-conflict',
+      source: 'DeckBridge Sync',
+      detectedAt,
+      localFields: {
+        Front: 'Conflict prompt from local Anki?',
+        Back: 'Local Anki answer remains source-backed.'
+      },
+      incomingFields: {
+        Front: 'Conflict prompt from local Anki?',
+        Back: 'DeckBridge answer is different and needs owner decision.'
+      }
+    };
+    const buildState = () => ({
+      user: { id: 'you', email: 'you@example.com', name: 'You' },
+      memberships: [{ deckId: 'deck-review-workspace-conflict', userId: 'you', role: 'owner', createdAt: detectedAt }],
+      decks: [{
+        id: 'deck-review-workspace-conflict',
+        name: 'Review Workspace Conflict Deck',
+        description: 'Conflict review deck',
+        owner: 'You',
+        importedAt: detectedAt,
+        lastSyncedAt: detectedAt,
+        cards: [{
+          id: 'card-review-workspace-conflict',
+          ankiNoteId: null,
+          type: 'Basic',
+          modelName: 'Basic',
+          fieldOrder: ['Front', 'Back'],
+          fields: { Front: 'Conflict prompt from local Anki?', Back: 'Original platform answer' },
+          tags: ['Neuro', 'Conflict'],
+          due: null,
+          state: 'Review',
+          modifiedAt: detectedAt,
+          modifiedBy: 'Anki',
+          suspended: false,
+          mediaRefs: []
+        }],
+        media: {},
+        source: { filename: 'anki', format: 'anki-addon', deckName: 'Review Workspace Conflict Deck', deckPath: 'Review Workspace Conflict Deck' }
+      }],
+      summaries: [{
+        id: 'deck-review-workspace-conflict',
+        name: 'Review Workspace Conflict Deck',
+        description: 'Conflict review deck',
+        cardCount: 1,
+        noteCount: 1,
+        tagCount: 2,
+        noteTypes: ['Basic'],
+        pendingSuggestions: 0,
+        lastSyncedAt: detectedAt,
+        importedAt: detectedAt
+      }],
+      activeDeckId: 'deck-review-workspace-conflict',
+      role: 'owner',
+      collaborators: [{ id: 'you', name: 'You', email: 'you@example.com', role: 'owner', accepted: 0 }],
+      suggestions: [],
+      activity: [],
+      sync: {
+        ankiConnectUrl: null,
+        connected: false,
+        lastCheckedAt: detectedAt,
+        lastPullAt: null,
+        lastPushAt: detectedAt,
+        lastAddonSync: {
+          syncedAt: detectedAt,
+          source: 'DeckBridge Sync',
+          client: { name: 'DeckBridge Sync', version: '0.1.0', fingerprint: 'test-host' },
+          stats: { total: 1, created: 0, updated: 0, skipped: 1, conflicts: 1, dryRun: false }
+        },
+        conflicts: [syncConflict]
+      }
+    });
+    let stateRequests = 0;
+
+    await page.route('**/api/state', async (route) => {
+      stateRequests += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(buildState())
+      });
+    });
+    await page.route('**/api/addon/version', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          name: 'DeckBridge Sync',
+          version: '0.1.0',
+          minVersion: '23.10.0',
+          package: 'deckbridge_sync',
+          downloadUrl: '/api/addon/download'
+        })
+      });
+    });
+    await page.route('**/api/addon/download', async (route) => {
+      if (route.request().method() === 'HEAD') {
+        await route.fulfill({ status: 200 });
+        return;
+      }
+      await route.fallback();
+    });
+    await page.route('**/api/anki/status', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ connected: false })
+      });
+    });
+
+    await page.goto('/');
+    await page.locator('button').filter({ hasText: /^Review$/ }).click();
+    await page.locator('.review-quality-summary').getByRole('button', { name: /Sync conflict/ }).click();
+    await expect(page.getByRole('button', { name: /Conflict prompt from local Anki.*Sync conflict/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Push to Anki blocked/ })).toBeDisabled();
+
+    await page.getByRole('button', { name: 'Keep local Anki' }).click();
+    await expect(page.locator('.review-quality-summary').getByRole('button', { name: /Sync conflict 0/ })).toBeVisible();
+    await expect(page.getByText(/Push to Anki is blocked because unresolved sync conflicts/)).toHaveCount(0);
+    const savedDecision = await page.evaluate(() => (
+      Object.keys(window.localStorage).some((key) => key.startsWith('deckbridge-conflict-decisions'))
+    ));
+    expect(savedDecision).toBe(true);
+
+    const requestsAfterDecision = stateRequests;
+    await page.locator('button[title="Check"]').click();
+    await expect.poll(() => stateRequests, { timeout: 20_000 }).toBeGreaterThan(requestsAfterDecision);
+    await expect(page.locator('.review-quality-summary').getByRole('button', { name: /Sync conflict 0/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Conflict prompt from local Anki.*Sync conflict/i })).toHaveCount(0);
   });
 });
 
@@ -246,6 +570,7 @@ test.describe('Conflict Resolution', () => {
     await expect(page.getByText('No unresolved conflicts in this saved review.')).toBeVisible();
 
     const requestsAfterDecision = stateRequests;
+    await page.locator('button[title="Check"]').click();
     await expect.poll(() => stateRequests, { timeout: 20_000 }).toBeGreaterThan(requestsAfterDecision);
     await expect(page.getByText('Conflicts need review')).toHaveCount(0);
     await expect(page.getByText('No unresolved conflicts in this saved review.')).toBeVisible();
@@ -498,7 +823,7 @@ test.describe('Navigation', () => {
   test('returns to Workspace from Discover', async ({ page }) => {
     await page.getByRole('button', { name: /Discover/ }).click();
     await page.getByRole('button', { name: /Workspace/ }).click();
-    await expect(page.getByText('Review Queue')).toBeVisible();
+    await expect(page.getByText('Quality Review')).toBeVisible();
   });
 });
 

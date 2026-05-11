@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { authMessage, deriveOwnerReviewQueue, deriveSyncHealth, mergeHydratedDeckState, stateFromMeResponse, withAuthTimeout } from './App';
-import type { AiQualityPulse, AppState, Suggestion } from './types';
+import { authMessage, deriveOwnerReviewQueue, deriveReviewBucketCounts, deriveSyncHealth, mergeHydratedDeckState, reviewItemMatchesBucket, selectCardForReview, selectSuggestionForReview, stateFromMeResponse, withAuthTimeout } from './App';
+import type { AiQualityPulse, AppState, DeckCard, Suggestion } from './types';
 
 const NOW = new Date('2026-05-09T12:00:00.000Z').getTime();
 
@@ -33,6 +33,23 @@ function conflict(overrides: Partial<AppState['sync']['conflicts'][number]> = {}
     detectedAt: '2026-05-09T11:00:00.000Z',
     incomingFields: { Front: 'Incoming' },
     localFields: { Front: 'Local' },
+    ...overrides
+  };
+}
+
+function card(overrides: Partial<DeckCard> = {}): DeckCard {
+  return {
+    id: 'card-1',
+    ankiNoteId: 1,
+    type: 'Basic',
+    modelName: 'Basic',
+    fields: { Front: 'Original front', Back: 'Original answer' },
+    tags: ['review'],
+    due: null,
+    state: 'Review',
+    modifiedAt: '2026-05-09T09:00:00.000Z',
+    modifiedBy: 'Anki',
+    suspended: false,
     ...overrides
   };
 }
@@ -249,6 +266,7 @@ describe('deriveOwnerReviewQueue', () => {
       now: NOW,
       conflicts: [conflict()],
       pulse: pulse(),
+      cards: [card()],
       suggestions: [
         suggestion({ id: 'suggestion-1', cardId: 'card-1', createdAt: '2026-05-09T10:30:00.000Z' }),
         suggestion({
@@ -281,6 +299,7 @@ describe('deriveOwnerReviewQueue', () => {
       now: NOW,
       conflicts: [],
       pulse: pulse(),
+      cards: [card()],
       suggestions: [
         suggestion({ id: 'suggestion-1', cardId: 'card-1' }),
         suggestion({
@@ -296,5 +315,145 @@ describe('deriveOwnerReviewQueue', () => {
     expect(queue.some((item) => item.id === 'ai:artifact-suggestion-1')).toBe(false);
     expect(queue.some((item) => item.id === 'recent:old-accepted')).toBe(false);
     expect(queue.map((item) => item.id)).toEqual(['suggestion:suggestion-1', 'ai:artifact-quality']);
+  });
+
+  it('derives deterministic risk labels, bucket counts, and push blockers from existing deck data', () => {
+    const queue = deriveOwnerReviewQueue({
+      now: NOW,
+      conflicts: [conflict({ id: 'conflict-2', cardId: 'card-2' })],
+      pulse: null,
+      cards: [
+        card(),
+        card({ id: 'card-tags', fields: { Front: 'Stable', Back: 'Stable answer' }, tags: ['old'] })
+      ],
+      suggestions: [
+        suggestion({
+          id: 'answer-change',
+          proposedFields: { Back: 'Updated answer' },
+          proposedTags: ['review'],
+          reason: 'Factual correction from source'
+        }),
+        suggestion({
+          id: 'tag-only',
+          cardId: 'card-tags',
+          proposedFields: {},
+          proposedTags: ['old', 'cleanup'],
+          reason: 'Tag cleanup'
+        })
+      ]
+    });
+
+    const answerItem = queue.find((item) => item.id === 'suggestion:answer-change');
+    const tagItem = queue.find((item) => item.id === 'suggestion:tag-only');
+    const conflictItem = queue.find((item) => item.id === 'conflict:conflict-2');
+    expect(answerItem).toMatchObject({
+      changedFields: ['Back'],
+      labels: ['Answer changed', 'Source check'],
+      needsSourceCheck: true,
+      risk: 'high',
+      blocksPush: false
+    });
+    expect(tagItem).toMatchObject({
+      changedFields: [],
+      changedTags: true,
+      labels: ['Tag-only'],
+      risk: 'low'
+    });
+    expect(conflictItem).toMatchObject({
+      blocksPush: true,
+      labels: ['Sync conflict', 'Source check']
+    });
+
+    const counts = deriveReviewBucketCounts(queue);
+    expect(counts.answer).toBe(1);
+    expect(counts.tag).toBe(1);
+    expect(counts.conflict).toBe(1);
+    expect(reviewItemMatchesBucket(conflictItem!, 'source')).toBe(true);
+  });
+
+  it('keeps conflict inspection isolated from stale selected suggestions', () => {
+    const cards = [
+      card({ id: 'card-suggestion', fields: { Front: 'Suggestion prompt', Back: 'Suggestion answer' } }),
+      card({ id: 'card-conflict', fields: { Front: 'Conflict prompt', Back: 'Conflict answer' } })
+    ];
+    const suggestions = [
+      suggestion({ id: 'stale-suggestion', cardId: 'card-suggestion', proposedFields: { Back: 'Updated stale answer' } })
+    ];
+    const queue = deriveOwnerReviewQueue({
+      now: NOW,
+      conflicts: [conflict({
+        id: 'conflict-stale-proof',
+        cardId: 'card-conflict',
+        localFields: { Front: 'Local conflict prompt', Back: 'Local conflict answer' },
+        incomingFields: { Front: 'Incoming conflict prompt', Back: 'Incoming conflict answer' }
+      })],
+      pulse: null,
+      cards,
+      suggestions
+    });
+    const conflictItem = queue.find((item) => item.id === 'conflict:conflict-stale-proof');
+
+    const selectedSuggestion = selectSuggestionForReview(conflictItem, suggestions, 'stale-suggestion');
+    const selectedCard = selectCardForReview(conflictItem, selectedSuggestion, cards, 'card-suggestion');
+
+    expect(selectedSuggestion).toBeUndefined();
+    expect(selectedCard.id).toBe('card-conflict');
+    expect(conflictItem).toMatchObject({
+      changedFields: ['Back', 'Front'],
+      blocksPush: true
+    });
+  });
+
+  it('covers answer, tag-only, conflict, and render-risk review fixtures', () => {
+    const cards = [
+      card({ id: 'answer-card', fields: { Front: 'Answer prompt', Back: 'Old answer' }, tags: ['review'] }),
+      card({ id: 'tag-card', fields: { Front: 'Tag prompt', Back: 'Stable answer' }, tags: ['old'] }),
+      card({ id: 'render-card', fields: { Front: 'Render prompt', Back: 'Stable answer' }, tags: ['format'] })
+    ];
+    const queue = deriveOwnerReviewQueue({
+      now: NOW,
+      conflicts: [conflict({ id: 'conflict-fixture', cardId: 'answer-card' })],
+      pulse: null,
+      cards,
+      suggestions: [
+        suggestion({
+          id: 'answer-fixture',
+          cardId: 'answer-card',
+          proposedFields: { Back: 'Corrected answer' },
+          proposedTags: ['review'],
+          reason: 'Factual correction from source'
+        }),
+        suggestion({
+          id: 'tag-fixture',
+          cardId: 'tag-card',
+          proposedFields: {},
+          proposedTags: ['old', 'cleanup'],
+          reason: 'Tag cleanup'
+        }),
+        suggestion({
+          id: 'render-fixture',
+          cardId: 'render-card',
+          proposedFields: { Front: '<div>{{Front}}</div>' },
+          proposedTags: ['format'],
+          reason: 'Template formatting repair'
+        })
+      ]
+    });
+
+    expect(queue.find((item) => item.id === 'suggestion:answer-fixture')).toMatchObject({
+      labels: ['Answer changed', 'Source check'],
+      risk: 'high',
+      actionLabel: 'Decide'
+    });
+    expect(queue.find((item) => item.id === 'suggestion:tag-fixture')).toMatchObject({
+      labels: ['Tag-only'],
+      risk: 'low',
+      changedTags: true
+    });
+    expect(queue.find((item) => item.id === 'suggestion:render-fixture')?.labels).toContain('Formatting/render');
+    expect(queue.find((item) => item.id === 'conflict:conflict-fixture')).toMatchObject({
+      labels: ['Sync conflict', 'Source check'],
+      blocksPush: true
+    });
   });
 });

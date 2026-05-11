@@ -12,11 +12,22 @@ import { DiscoverView } from './DiscoverView';
 import { AnalyticsDashboard } from './AnalyticsDashboard';
 import { ActivityTimeline } from './ActivityTimeline';
 import { TemplateGallery } from './TemplateGallery';
-import { ConflictResolution, type Conflict } from './ConflictResolution';
+import { ConflictResolution, readSavedConflictDecisions, saveConflictDecision, type Conflict } from './ConflictResolution';
 import { DeckSettingsView } from './views/DeckSettingsView';
 import { DeckStatsView } from './views/DeckStatsView';
 import { StudyPrepView } from './views/StudyPrepView';
 import { AnkiCardRenderer, renderCardHtml } from './AnkiCardRenderer';
+import {
+  deriveOwnerReviewQueue,
+  deriveReviewBucketCounts,
+  reviewItemMatchesBucket,
+  selectCardForReview,
+  selectSuggestionForReview,
+  type QualityReviewItem,
+  type ReviewBucket,
+  type ReviewRiskLabel
+} from './reviewModel';
+export { deriveOwnerReviewQueue, deriveReviewBucketCounts, reviewItemMatchesBucket, selectCardForReview, selectSuggestionForReview } from './reviewModel';
 
 interface Toast {
   id: string;
@@ -58,25 +69,7 @@ export interface OwnerAttentionItem {
   subjectId?: string;
 }
 
-export interface OwnerReviewQueueItem {
-  id: string;
-  kind: 'conflict' | 'suggestion' | 'ai' | 'recent-change';
-  source: string;
-  label: string;
-  detail: string;
-  status: 'pending' | 'revision' | 'accepted' | 'rejected';
-  tone: 'neutral' | 'info' | 'success' | 'warning' | 'danger';
-  risk: 'low' | 'medium' | 'high';
-  actionLabel: string;
-  affectsNextPull: boolean;
-  sortAt: string;
-  priority: number;
-  cardId?: string;
-  suggestionId?: string;
-  conflictId?: string;
-  artifactId?: string;
-  authorName?: string;
-}
+export type OwnerReviewQueueItem = QualityReviewItem;
 
 const TOAST_ICONS: Record<Toast['type'], string> = {
   success: '✓',
@@ -305,142 +298,6 @@ export function deriveSyncHealth({
     primaryAction: 'setup',
     primaryLabel: 'Start setup'
   };
-}
-
-function severityRisk(severity: AiQualityPulse['items'][number]['severity']): OwnerReviewQueueItem['risk'] {
-  if (severity === 'high') return 'high';
-  if (severity === 'medium') return 'medium';
-  return 'low';
-}
-
-function severityTone(severity: AiQualityPulse['items'][number]['severity']): OwnerReviewQueueItem['tone'] {
-  if (severity === 'high') return 'danger';
-  if (severity === 'medium') return 'warning';
-  return 'info';
-}
-
-function recentSuggestionCutoff(nowMs: number) {
-  return nowMs - 7 * 24 * 60 * 60 * 1000;
-}
-
-export function deriveOwnerReviewQueue({
-  suggestions,
-  conflicts,
-  pulse,
-  now = Date.now()
-}: {
-  suggestions: Suggestion[];
-  conflicts: AppState['sync']['conflicts'];
-  pulse: AiQualityPulse | null;
-  now?: number;
-}): OwnerReviewQueueItem[] {
-  const items = new Map<string, OwnerReviewQueueItem>();
-  const addItem = (item: OwnerReviewQueueItem) => {
-    const existing = items.get(item.id);
-    if (!existing || item.priority < existing.priority || (item.priority === existing.priority && item.sortAt > existing.sortAt)) {
-      items.set(item.id, item);
-    }
-  };
-
-  for (const conflict of conflicts) {
-    addItem({
-      id: `conflict:${conflict.id}`,
-      kind: 'conflict',
-      source: conflict.source || 'Sync conflict',
-      label: 'Sync conflict',
-      detail: `Resolve field differences before accepted changes can push back to Anki.`,
-      status: 'pending',
-      tone: 'danger',
-      risk: 'high',
-      actionLabel: 'Resolve',
-      affectsNextPull: true,
-      sortAt: conflict.detectedAt,
-      priority: 10,
-      cardId: conflict.cardId,
-      conflictId: conflict.id
-    });
-  }
-
-  const recentCutoff = recentSuggestionCutoff(now);
-  for (const suggestion of suggestions) {
-    const sortAt = suggestion.reviewedAt || suggestion.createdAt;
-    if (suggestion.status === 'pending' || suggestion.status === 'revision') {
-      addItem({
-        id: `suggestion:${suggestion.id}`,
-        kind: 'suggestion',
-        source: suggestion.authorName,
-        label: suggestion.status === 'revision' ? 'Revision requested' : 'Pending suggestion',
-        detail: suggestion.reason || 'Review proposed card changes.',
-        status: suggestion.status,
-        tone: suggestion.status === 'revision' ? 'info' : 'warning',
-        risk: 'medium',
-        actionLabel: suggestion.status === 'revision' ? 'Review' : 'Decide',
-        affectsNextPull: suggestion.status === 'pending',
-        sortAt,
-        priority: suggestion.status === 'pending' ? 20 : 35,
-        cardId: suggestion.cardId,
-        suggestionId: suggestion.id,
-        authorName: suggestion.authorName
-      });
-      continue;
-    }
-
-    if (new Date(sortAt).getTime() >= recentCutoff) {
-      addItem({
-        id: `recent:${suggestion.id}`,
-        kind: 'recent-change',
-        source: suggestion.authorName,
-        label: suggestion.status === 'accepted' ? 'Recently accepted' : 'Recently rejected',
-        detail: suggestion.reason || 'Recent owner decision.',
-        status: suggestion.status,
-        tone: suggestion.status === 'accepted' ? 'success' : 'neutral',
-        risk: 'low',
-        actionLabel: 'Inspect',
-        affectsNextPull: suggestion.status === 'accepted',
-        sortAt,
-        priority: suggestion.status === 'accepted' ? 55 : 60,
-        cardId: suggestion.cardId,
-        suggestionId: suggestion.id,
-        authorName: suggestion.authorName
-      });
-    }
-  }
-
-  if (pulse?.enabled && pulse.status === 'attention') {
-    for (const pulseItem of pulse.items) {
-      const subjectKey = pulseItem.subjectId || pulseItem.artifactId;
-      const duplicateKey = pulseItem.subjectType === 'suggestion'
-        ? `suggestion:${pulseItem.subjectId}`
-        : pulseItem.subjectType === 'conflict'
-          ? `conflict:${pulseItem.subjectId}`
-          : '';
-      if (duplicateKey && items.has(duplicateKey)) continue;
-
-      const staleQualityFinding = pulseItem.kind === 'quality-issue' && pulseItem.staleness !== 'fresh';
-      addItem({
-        id: `ai:${pulseItem.artifactId || subjectKey}`,
-        kind: 'ai',
-        source: pulseItem.kind === 'review-brief' ? 'AI review brief' : staleQualityFinding ? 'Stale quality finding' : 'AI pulse',
-        label: pulseItem.label,
-        detail: `${pulseItem.severity} risk · ${pulseItem.staleness} · ${pulseItem.detail}`,
-        status: 'pending',
-        tone: severityTone(pulseItem.severity),
-        risk: severityRisk(pulseItem.severity),
-        actionLabel: pulseItem.action === 'conflict' ? 'Resolve' : pulseItem.action === 'setup' ? 'Repair' : 'Inspect',
-        affectsNextPull: pulseItem.action === 'suggestion' || pulseItem.action === 'conflict' || staleQualityFinding,
-        sortAt: pulseItem.createdAt,
-        priority: pulseItem.severity === 'high' ? 25 : pulseItem.severity === 'medium' ? 40 : 50,
-        cardId: pulseItem.subjectType === 'card' ? pulseItem.subjectId : undefined,
-        suggestionId: pulseItem.subjectType === 'suggestion' ? pulseItem.subjectId : undefined,
-        conflictId: pulseItem.subjectType === 'conflict' ? pulseItem.subjectId : undefined,
-        artifactId: pulseItem.artifactId
-      });
-    }
-  }
-
-  return Array.from(items.values()).sort((left, right) => (
-    left.priority - right.priority || new Date(right.sortAt).getTime() - new Date(left.sortAt).getTime() || left.id.localeCompare(right.id)
-  ));
 }
 
 function deriveOwnerAttentionItems({
@@ -891,6 +748,712 @@ function OwnerAttentionPanel({
   );
 }
 
+const REVIEW_BUCKETS: Array<{ key: ReviewBucket; label: string; detail: string }> = [
+  { key: 'all', label: 'All review', detail: 'Every item' },
+  { key: 'answer', label: 'Answer changed', detail: 'Check facts' },
+  { key: 'source', label: 'Source check', detail: 'Needs evidence' },
+  { key: 'tag', label: 'Tag-only', detail: 'Cleanup' },
+  { key: 'render', label: 'Formatting/render', detail: 'Preview risk' },
+  { key: 'conflict', label: 'Sync conflict', detail: 'Blocks push' }
+];
+
+function ReviewRiskBadge({ label }: { label: ReviewRiskLabel }) {
+  const className = label.toLowerCase().replace(/[^a-z]+/g, '-').replace(/-$/, '');
+  return <span className={`review-risk-badge review-risk-badge--${className}`}>{label}</span>;
+}
+
+function ReviewQualitySummary({
+  activeBucket,
+  counts,
+  onBucketChange
+}: {
+  activeBucket: ReviewBucket;
+  counts: Record<ReviewBucket, number>;
+  onBucketChange: (bucket: ReviewBucket) => void;
+}) {
+  return (
+    <div className="review-quality-summary" aria-label="Quality review buckets">
+      {REVIEW_BUCKETS.map((bucket) => (
+        <button
+          key={bucket.key}
+          type="button"
+          className={`review-bucket ${activeBucket === bucket.key ? 'active' : ''}`}
+          onClick={() => onBucketChange(bucket.key)}
+          aria-pressed={activeBucket === bucket.key}
+        >
+          <span>{bucket.label}</span>
+          <strong>{counts[bucket.key]}</strong>
+          <small>{bucket.detail}</small>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ReviewQueueList({
+  items,
+  selectedItem,
+  suggestions,
+  cards,
+  sourceCheckByReviewItem,
+  canReview,
+  selectedSuggestionIds,
+  onSelect,
+  onToggleSuggestion
+}: {
+  items: QualityReviewItem[];
+  selectedItem?: QualityReviewItem;
+  suggestions: Suggestion[];
+  cards: DeckCard[];
+  sourceCheckByReviewItem: Record<string, 'needs' | 'checked'>;
+  canReview: boolean;
+  selectedSuggestionIds: Set<string>;
+  onSelect: (item: QualityReviewItem) => void;
+  onToggleSuggestion: (suggestionId: string) => void;
+}) {
+  if (!items.length) {
+    return <EmptyState message="No quality review items match the current filters." />;
+  }
+
+  return (
+    <div className="quality-queue-list" aria-label="Quality review queue">
+      {items.map((item) => {
+        const suggestion = item.suggestionId ? suggestions.find((candidate) => candidate.id === item.suggestionId) : undefined;
+        const card = item.cardId ? cards.find((candidate) => candidate.id === item.cardId) : undefined;
+        const prompt = reviewCardPrompt(card);
+        const affected = affectedFieldsLabel(item);
+        const sourceStatus = sourceCheckLabel(item, sourceCheckByReviewItem[item.id]);
+        return (
+          <div className={`quality-queue-item ${item.id === selectedItem?.id ? 'active' : ''}`} key={item.id}>
+            {canReview && suggestion?.status === 'pending' ? (
+              <input
+                type="checkbox"
+                className="queue-select"
+                checked={selectedSuggestionIds.has(suggestion.id)}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => {
+                  event.stopPropagation();
+                  onToggleSuggestion(suggestion.id);
+                }}
+                aria-label={`${selectedSuggestionIds.has(suggestion.id) ? 'Deselect' : 'Select'} ${suggestion.authorName}'s suggestion`}
+              />
+            ) : <span className="queue-select-spacer" aria-hidden="true" />}
+            <button type="button" className="quality-queue-main" onClick={() => onSelect(item)}>
+              <span className={`risk-dot risk-dot--${item.risk}`} aria-hidden="true" />
+              <span className="quality-queue-copy">
+                <strong>{prompt}</strong>
+                <small>{item.label} · {item.source} · {relativeTime(item.sortAt)}</small>
+                <small className="quality-queue-affected">Affected: {affected}</small>
+                <small className={`quality-queue-source quality-queue-source--${sourceCheckByReviewItem[item.id] || (item.needsSourceCheck ? 'needs' : 'checked')}`}>
+                  {sourceStatus}
+                </small>
+                <span className="quality-queue-labels">
+                  {item.labels.slice(0, 3).map((label) => <ReviewRiskBadge key={label} label={label} />)}
+                </span>
+              </span>
+              <b className={`queue-status ${item.status}`}>{item.status}</b>
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatFieldValue(value?: string) {
+  const trimmed = (value || '').trim();
+  return trimmed || 'Empty';
+}
+
+function reviewCardPrompt(card?: DeckCard) {
+  if (!card) return 'Card not found';
+  return fieldValue(card, 'Front') || Object.values(card.fields)[0] || card.id;
+}
+
+function affectedFieldsLabel(item: QualityReviewItem) {
+  const fields = [...item.changedFields];
+  if (item.changedTags) fields.push('Tags');
+  return fields.length ? fields.join(', ') : 'Card context';
+}
+
+function hasRenderFallback(card: DeckCard, side: 'front' | 'back') {
+  const rendered = side === 'front' ? card.renderedFront : card.renderedBack;
+  const template = side === 'front' ? card.templateFront : card.templateBack;
+  return !rendered?.trim() && !template?.trim();
+}
+
+function sourceCheckLabel(item: QualityReviewItem, sourceCheckState?: 'needs' | 'checked') {
+  if (sourceCheckState === 'checked') return 'Source checked this session';
+  if (sourceCheckState === 'needs') return 'Needs source check this session';
+  if (item.needsSourceCheck) return 'Needs source check';
+  return 'Source checked';
+}
+
+function ChangedFieldRows({ currentCard, suggestion, conflict }: {
+  currentCard?: DeckCard;
+  suggestion?: Suggestion;
+  conflict?: AppState['sync']['conflicts'][number];
+}) {
+  const fields = suggestion
+    ? Object.keys(suggestion.proposedFields || {}).filter((field) => (currentCard?.fields[field] || '') !== (suggestion.proposedFields[field] || ''))
+    : conflict
+      ? Array.from(new Set([...Object.keys(conflict.localFields || {}), ...Object.keys(conflict.incomingFields || {})])).sort()
+      : [];
+
+  if (!fields.length) {
+    return <EmptyState message="No raw field changes are available for this item." />;
+  }
+
+  return (
+    <div className="raw-change-list">
+      {fields.map((field) => {
+        const before = conflict ? conflict.localFields[field] : currentCard?.fields[field];
+        const after = conflict ? conflict.incomingFields[field] : suggestion?.proposedFields[field];
+        return <DiffBlock key={field} label={field} before={formatFieldValue(before)} after={formatFieldValue(after)} />;
+      })}
+    </div>
+  );
+}
+
+function ReviewDecisionBar({
+  item,
+  canReview,
+  busy,
+  hasSuggestion,
+  hasConflicts,
+  renderFallback,
+  canSuggest,
+  sourceCheckState,
+  onDecideSuggestion,
+  onResolveConflict,
+  onMarkNeedsSourceCheck,
+  onMarkSourceChecked,
+  onCreateSuggestion,
+  onPushToAnki
+}: {
+  item?: QualityReviewItem;
+  canReview: boolean;
+  busy: boolean;
+  hasSuggestion: boolean;
+  hasConflicts: boolean;
+  renderFallback: boolean;
+  canSuggest: boolean;
+  sourceCheckState: 'needs' | 'checked' | undefined;
+  onDecideSuggestion: (decision: 'accepted' | 'rejected' | 'revision') => void;
+  onResolveConflict: (resolution: 'local' | 'incoming' | 'skip') => void;
+  onMarkNeedsSourceCheck: () => void;
+  onMarkSourceChecked: () => void;
+  onCreateSuggestion: () => void;
+  onPushToAnki: () => void;
+}) {
+  if (item?.kind === 'conflict') {
+    return (
+      <div className="review-decision-bar review-decision-bar--conflict">
+        <span>
+          <strong>Source-of-truth decision</strong>
+          <small>Push to Anki stays blocked until this conflict is resolved.</small>
+        </span>
+        <button className="button secondary" onClick={() => onResolveConflict('skip')} disabled={busy}>Skip for now</button>
+        <button className="button secondary" onClick={() => onResolveConflict('local')} disabled={busy}>Keep local Anki</button>
+        <button className="button primary" onClick={() => onResolveConflict('incoming')} disabled={busy}>Use DeckBridge</button>
+        <button
+          className="button secondary"
+          disabled
+          title="Push blocked: resolve sync conflicts before writing accepted changes back to Anki."
+        >
+          <Icon name="sync" /> Push to Anki blocked
+        </button>
+      </div>
+    );
+  }
+
+  if (canReview && hasSuggestion) {
+    const cautious = item?.needsSourceCheck || item?.risk === 'high' || renderFallback;
+    return (
+      <div className={`review-decision-bar ${cautious ? 'review-decision-bar--cautious' : ''}`}>
+        <span>
+          <strong>{cautious ? 'Check source before accepting' : 'Suggestion decision'}</strong>
+          <small>{renderFallback ? 'Rendered HTML is missing; compare the field-rendered preview with raw diffs before accepting.' : cautious ? 'Request revision is the safer action until the evidence is checked.' : 'Approved changes become canonical for the deck.'}</small>
+        </span>
+        <button className="button secondary" onClick={() => onDecideSuggestion('rejected')} disabled={busy}><Icon name="x" /> Reject</button>
+        <button className={cautious ? 'button primary' : 'button secondary'} onClick={() => onDecideSuggestion('revision')} disabled={busy}>Request revision</button>
+        {sourceCheckState === 'checked' ? (
+          <button className="button secondary" onClick={onMarkNeedsSourceCheck} disabled={busy}>Mark needs source check</button>
+        ) : (
+          <button className={cautious ? 'button primary' : 'button secondary'} onClick={onMarkSourceChecked} disabled={busy}>Mark checked</button>
+        )}
+        <button className={cautious ? 'button secondary' : 'button primary'} onClick={() => onDecideSuggestion('accepted')} disabled={busy}><Icon name="check" /> Accept</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="review-decision-bar">
+      <span>
+        <strong>Card actions</strong>
+        <small>{hasConflicts ? 'Push blocked by unresolved sync conflicts.' : 'Accepted changes can be pushed back to Anki.'}</small>
+      </span>
+      <button className="button secondary" onClick={onCreateSuggestion} disabled={busy || !canSuggest}><Icon name="spark" /> Suggest edit</button>
+      {item ? <button className="button secondary" onClick={onMarkNeedsSourceCheck} disabled={busy}>Mark needs source check</button> : null}
+      <button
+        className="button primary"
+        disabled={busy || hasConflicts}
+        title={hasConflicts ? 'Push blocked: resolve sync conflicts before writing accepted changes back to Anki.' : undefined}
+        onClick={onPushToAnki}
+      >
+        <Icon name="sync" /> Push to Anki
+      </button>
+    </div>
+  );
+}
+
+function ReviewInspectionPanel({
+  item,
+  deck,
+  currentCard,
+  suggestion,
+  conflict,
+  reviewTab,
+  setReviewTab,
+  currentUserId,
+  currentUserName,
+  commentsVersion,
+  brief,
+  aiReviewEnabled,
+  canManageAi,
+  briefBusy,
+  canReview,
+  busy,
+  hasConflicts,
+  canSuggest,
+  sourceCheckState,
+  draftReason,
+  setDraftReason,
+  onGenerateBrief,
+  onMarkBriefUseful,
+  onDismissBrief,
+  onDecideSuggestion,
+  onResolveConflict,
+  onMarkNeedsSourceCheck,
+  onMarkSourceChecked,
+  onCreateSuggestion,
+  onPushToAnki
+}: {
+  item?: QualityReviewItem;
+  deck: Deck;
+  currentCard?: DeckCard;
+  suggestion?: Suggestion;
+  conflict?: AppState['sync']['conflicts'][number];
+  reviewTab: 'changes' | 'discussion';
+  setReviewTab: (tab: 'changes' | 'discussion') => void;
+  currentUserId: string;
+  currentUserName: string;
+  commentsVersion: number;
+  brief: AiArtifact | null;
+  aiReviewEnabled: boolean;
+  canManageAi: boolean;
+  briefBusy: boolean;
+  canReview: boolean;
+  busy: boolean;
+  hasConflicts: boolean;
+  canSuggest: boolean;
+  sourceCheckState: 'needs' | 'checked' | undefined;
+  draftReason: string;
+  setDraftReason: (value: string) => void;
+  onGenerateBrief: () => void;
+  onMarkBriefUseful: (artifactId: string) => void;
+  onDismissBrief: (artifactId: string) => void;
+  onDecideSuggestion: (decision: 'accepted' | 'rejected' | 'revision') => void;
+  onResolveConflict: (resolution: 'local' | 'incoming' | 'skip') => void;
+  onMarkNeedsSourceCheck: () => void;
+  onMarkSourceChecked: () => void;
+  onCreateSuggestion: () => void;
+  onPushToAnki: () => void;
+}) {
+  if (!currentCard) {
+    return (
+      <section className="review-inspection-panel">
+        <EmptyState message="Select a quality review item to inspect the rendered card and raw changes." />
+      </section>
+    );
+  }
+
+  if (!item) {
+    const currentFrontHtml = renderCardHtml(currentCard, deck.id, 'front', undefined, currentCard.clozeOrd);
+    return (
+      <section className="review-inspection-panel">
+        <div className="review-inspection-header">
+          <div>
+            <small>Card context</small>
+            <h2>{fieldValue(currentCard, 'Front') || Object.values(currentCard.fields)[0] || currentCard.id}</h2>
+            <p>No queue item is selected. You can browse the card or propose a new owner-review change.</p>
+          </div>
+        </div>
+        <div className="card-preview-single">
+          <span className="card-preview-side-label">Front</span>
+          <AnkiCardRenderer card={currentCard} deckId={deck.id} side="front" />
+          <span className="card-preview-side-label">Back</span>
+          <AnkiCardRenderer card={currentCard} deckId={deck.id} side="back" frontHtml={currentFrontHtml} />
+        </div>
+        <ReviewDecisionBar
+          canReview={canReview}
+          busy={busy}
+          hasSuggestion={false}
+          hasConflicts={hasConflicts}
+          renderFallback={hasRenderFallback(currentCard, 'front') || hasRenderFallback(currentCard, 'back')}
+          canSuggest={canSuggest}
+          sourceCheckState={sourceCheckState}
+          onDecideSuggestion={onDecideSuggestion}
+          onResolveConflict={onResolveConflict}
+          onMarkNeedsSourceCheck={onMarkNeedsSourceCheck}
+          onMarkSourceChecked={onMarkSourceChecked}
+          onCreateSuggestion={onCreateSuggestion}
+          onPushToAnki={onPushToAnki}
+        />
+      </section>
+    );
+  }
+
+  const proposedCard: DeckCard = suggestion
+    ? { ...currentCard, fields: { ...currentCard.fields, ...suggestion.proposedFields }, tags: suggestion.proposedTags, renderedFront: undefined, renderedBack: undefined }
+    : currentCard;
+  const showRendered = item.kind !== 'conflict' && !(item.labels.includes('Tag-only') && !item.labels.includes('Formatting/render'));
+  const prompt = reviewCardPrompt(currentCard);
+  const effectiveNeedsSourceCheck = sourceCheckState === 'checked' ? false : sourceCheckState === 'needs' ? true : item.needsSourceCheck;
+  const effectiveLabels = effectiveNeedsSourceCheck && !item.labels.includes('Source check')
+    ? [...item.labels, 'Source check' as const]
+    : item.labels;
+  const renderFallback = item.kind !== 'conflict' && (
+    hasRenderFallback(currentCard, 'front') ||
+    hasRenderFallback(currentCard, 'back') ||
+    (suggestion ? hasRenderFallback(proposedCard, 'front') || hasRenderFallback(proposedCard, 'back') : false)
+  );
+
+  return (
+    <section className={`review-inspection-panel review-inspection-panel--${item.kind}`}>
+      <div className="review-inspection-header">
+        <div>
+          <small>{item.kind === 'conflict' ? 'Conflict review' : 'Card quality review'}</small>
+          <h2>{prompt}</h2>
+          <p>{item.kind === 'conflict' ? 'Which source of truth should win?' : 'Should this proposed change become canonical?'}</p>
+        </div>
+        <div className="review-risk-stack">
+          <b className={`review-risk-score review-risk-score--${item.risk}`}>{item.risk} risk</b>
+          {effectiveLabels.map((label) => <ReviewRiskBadge key={label} label={label} />)}
+        </div>
+      </div>
+
+      {item.blocksPush ? (
+        <div className="review-warning">
+          Push to Anki is blocked because unresolved sync conflicts could overwrite local Anki or DeckBridge edits.
+        </div>
+      ) : effectiveNeedsSourceCheck ? (
+        <div className="review-warning">
+          Source check recommended before quiet acceptance. Use Mark checked only after source evidence has been reviewed.
+        </div>
+      ) : null}
+
+      {sourceCheckState === 'checked' ? (
+        <div className="review-source-checked">Source check marked checked in this review session.</div>
+      ) : null}
+
+      <div className="review-tabs">
+        <button className={reviewTab === 'changes' ? 'active' : ''} onClick={() => setReviewTab('changes')}>Inspection</button>
+        <button className={reviewTab === 'discussion' ? 'active' : ''} onClick={() => setReviewTab('discussion')} disabled={!suggestion}>Discussion</button>
+      </div>
+
+      {reviewTab === 'changes' ? (
+        <>
+          {showRendered ? (
+            <CardPreviewComparison
+              currentCard={currentCard}
+              proposedCard={proposedCard}
+              deckId={deck.id}
+              hasSuggestion={!!suggestion}
+            />
+          ) : (
+            <div className="review-render-collapsed">
+              <strong>Rendered preview collapsed for tag-only review.</strong>
+              <span>Raw tag changes are the primary quality check for this item.</span>
+            </div>
+          )}
+
+          <div className="review-detail-grid">
+            <section className="review-detail-section">
+              <div className="review-section-heading">
+                <strong>Raw field changes</strong>
+                <small>{item.changedFields.length ? item.changedFields.join(', ') : 'No field changes'}</small>
+              </div>
+              <ChangedFieldRows currentCard={currentCard} suggestion={suggestion} conflict={conflict} />
+            </section>
+
+            <section className="review-detail-section">
+              <div className="review-section-heading">
+                <strong>Tags and source cues</strong>
+                <small>{item.changedTags ? 'Tags changed' : 'Tags unchanged'}</small>
+              </div>
+              <div className="tag-diff">
+                <span>{currentCard.tags.join(', ') || 'No tags'}</span>
+                <strong>→</strong>
+                <span>{suggestion?.proposedTags.join(', ') || currentCard.tags.join(', ') || 'No tags'}</span>
+              </div>
+              <div className="source-cue-list">
+                <span>{effectiveNeedsSourceCheck ? 'Needs source check' : 'Source checked'}</span>
+                <span>{item.affectsNextPull ? 'Affects next pull' : 'No next-pull impact'}</span>
+                <span>{item.blocksPush ? 'Blocks push' : 'Does not block push'}</span>
+                {renderFallback ? <span>Rendered HTML missing: field-rendered preview active</span> : null}
+              </div>
+              {suggestion ? (
+                <label className="reason-box">
+                  <span>Reason for change</span>
+                  <textarea id="suggestion-reason" name="suggestion-reason" aria-label="Reason for change" value={suggestion.reason || draftReason} onChange={(event) => setDraftReason(event.target.value)} />
+                </label>
+              ) : null}
+            </section>
+          </div>
+        </>
+      ) : (
+        suggestion ? (
+          <SuggestionDiscussion
+            suggestionId={suggestion.id}
+            deckId={deck.id}
+            currentUserId={currentUserId}
+            currentUserName={currentUserName}
+            commentsVersion={commentsVersion}
+            brief={brief}
+            aiEnabled={aiReviewEnabled}
+            canManageAi={canManageAi}
+            briefBusy={briefBusy}
+            onGenerateBrief={onGenerateBrief}
+            onMarkBriefUseful={onMarkBriefUseful}
+            onDismissBrief={onDismissBrief}
+          />
+        ) : <EmptyState message="Discussion is available for suggestion items." />
+      )}
+
+      <ReviewDecisionBar
+        item={item}
+        canReview={canReview}
+        busy={busy}
+        hasSuggestion={!!suggestion}
+        hasConflicts={hasConflicts}
+        renderFallback={renderFallback}
+        canSuggest={canSuggest}
+        sourceCheckState={sourceCheckState}
+        onDecideSuggestion={onDecideSuggestion}
+        onResolveConflict={onResolveConflict}
+        onMarkNeedsSourceCheck={onMarkNeedsSourceCheck}
+        onMarkSourceChecked={onMarkSourceChecked}
+        onCreateSuggestion={onCreateSuggestion}
+        onPushToAnki={onPushToAnki}
+      />
+    </section>
+  );
+}
+
+function ReviewWorkspace({
+  deck,
+  items,
+  selectedItem,
+  selectedCard,
+  selectedSuggestion,
+  selectedConflict,
+  suggestions,
+  bucketCounts,
+  activeBucket,
+  onBucketChange,
+  statusFilter,
+  onStatusFilterChange,
+  authorFilter,
+  onAuthorFilterChange,
+  authors,
+  canReview,
+  canManageDeck,
+  busy,
+  selectedSuggestionIds,
+  onToggleSuggestion,
+  onSelectItem,
+  onResetFilters,
+  onBulkDecision,
+  onClearSelection,
+  reviewTab,
+  setReviewTab,
+  currentUserId,
+  currentUserName,
+  commentsVersion,
+  brief,
+  briefBusy,
+  draftReason,
+  setDraftReason,
+  onGenerateBrief,
+  onMarkBriefUseful,
+  onDismissBrief,
+  onDecideSuggestion,
+  onResolveConflict,
+  sourceCheckByReviewItem,
+  onMarkNeedsSourceCheck,
+  onMarkSourceChecked,
+  onCreateSuggestion,
+  onPushToAnki,
+  hasConflicts,
+  canSuggest,
+}: {
+  deck: Deck;
+  items: QualityReviewItem[];
+  selectedItem?: QualityReviewItem;
+  selectedCard?: DeckCard;
+  selectedSuggestion?: Suggestion;
+  selectedConflict?: AppState['sync']['conflicts'][number];
+  suggestions: Suggestion[];
+  bucketCounts: Record<ReviewBucket, number>;
+  activeBucket: ReviewBucket;
+  onBucketChange: (bucket: ReviewBucket) => void;
+  statusFilter: 'pending' | 'accepted' | 'rejected' | 'revision' | 'all';
+  onStatusFilterChange: (status: 'pending' | 'accepted' | 'rejected' | 'revision' | 'all') => void;
+  authorFilter: string;
+  onAuthorFilterChange: (author: string) => void;
+  authors: string[];
+  canReview: boolean;
+  canManageDeck: boolean;
+  busy: boolean;
+  selectedSuggestionIds: Set<string>;
+  onToggleSuggestion: (suggestionId: string) => void;
+  onSelectItem: (item: QualityReviewItem) => void;
+  onResetFilters: () => void;
+  onBulkDecision: (decision: 'accepted' | 'rejected' | 'revision') => void;
+  onClearSelection: () => void;
+  reviewTab: 'changes' | 'discussion';
+  setReviewTab: (tab: 'changes' | 'discussion') => void;
+  currentUserId: string;
+  currentUserName: string;
+  commentsVersion: number;
+  brief: AiArtifact | null;
+  briefBusy: boolean;
+  draftReason: string;
+  setDraftReason: (value: string) => void;
+  onGenerateBrief: () => void;
+  onMarkBriefUseful: (artifactId: string) => void;
+  onDismissBrief: (artifactId: string) => void;
+  onDecideSuggestion: (decision: 'accepted' | 'rejected' | 'revision') => void;
+  onResolveConflict: (resolution: 'local' | 'incoming' | 'skip') => void;
+  sourceCheckByReviewItem: Record<string, 'needs' | 'checked'>;
+  onMarkNeedsSourceCheck: (itemId: string) => void;
+  onMarkSourceChecked: (itemId: string) => void;
+  onCreateSuggestion: () => void;
+  onPushToAnki: () => void;
+  hasConflicts: boolean;
+  canSuggest: boolean;
+}) {
+  return (
+    <div className="quality-review-workspace">
+      <div className="quality-review-header">
+        <div>
+          <small>Quality Review Workspace</small>
+          <h1>{deck.name}</h1>
+        </div>
+        <button
+          type="button"
+          className="button secondary"
+          onClick={onResetFilters}
+          disabled={activeBucket === 'all' && statusFilter === 'pending' && authorFilter === 'All'}
+        >
+          <Icon name="filter" /> Reset review filters
+        </button>
+      </div>
+
+      <ReviewQualitySummary
+        activeBucket={activeBucket}
+        counts={bucketCounts}
+        onBucketChange={onBucketChange}
+      />
+
+      <div className="quality-review-layout">
+        <aside className="quality-queue-panel">
+          <div className="review-filter-bar" aria-label="Review queue filters">
+            <label>
+              <span>Status</span>
+              <select
+                aria-label="Filter review queue by status"
+                value={statusFilter}
+                onChange={(event) => onStatusFilterChange(event.target.value as typeof statusFilter)}
+              >
+                <option value="pending">Pending</option>
+                <option value="revision">Needs revision</option>
+                <option value="accepted">Accepted</option>
+                <option value="rejected">Rejected</option>
+                <option value="all">All statuses</option>
+              </select>
+            </label>
+            <label>
+              <span>Author</span>
+              <select
+                aria-label="Filter review queue by author"
+                value={authorFilter}
+                onChange={(event) => onAuthorFilterChange(event.target.value)}
+              >
+                {authors.map((author) => <option key={author}>{author}</option>)}
+              </select>
+            </label>
+          </div>
+          <ReviewQueueList
+            items={items}
+            selectedItem={selectedItem}
+            suggestions={suggestions}
+            cards={deck.cards}
+            sourceCheckByReviewItem={sourceCheckByReviewItem}
+            canReview={canReview}
+            selectedSuggestionIds={selectedSuggestionIds}
+            onSelect={onSelectItem}
+            onToggleSuggestion={onToggleSuggestion}
+          />
+          {canReview && selectedSuggestionIds.size > 0 ? (
+            <div className="suggestion-bulk-toolbar" role="toolbar" aria-label="Bulk suggestion decisions">
+              <span>{selectedSuggestionIds.size} selected</span>
+              <button className="button secondary" onClick={() => onBulkDecision('rejected')} disabled={busy}>Reject</button>
+              <button className="button secondary" onClick={() => onBulkDecision('revision')} disabled={busy}>Request revision</button>
+              <button className="button primary" onClick={() => onBulkDecision('accepted')} disabled={busy}>Accept</button>
+              <button className="button secondary" onClick={onClearSelection} disabled={busy}>Clear</button>
+            </div>
+          ) : null}
+        </aside>
+
+        <ReviewInspectionPanel
+          item={selectedItem}
+          deck={deck}
+          currentCard={selectedCard}
+          suggestion={selectedSuggestion}
+          conflict={selectedConflict}
+          reviewTab={reviewTab}
+          setReviewTab={setReviewTab}
+          currentUserId={currentUserId}
+          currentUserName={currentUserName}
+          commentsVersion={commentsVersion}
+          brief={brief}
+          aiReviewEnabled={deck.aiSettings?.reviewBriefs === true}
+          canManageAi={canManageDeck}
+          briefBusy={briefBusy}
+          canReview={canReview}
+          busy={busy}
+          hasConflicts={hasConflicts}
+          canSuggest={canSuggest}
+          sourceCheckState={sourceCheckByReviewItem[selectedItem?.id || '']}
+          draftReason={draftReason}
+          setDraftReason={setDraftReason}
+          onGenerateBrief={onGenerateBrief}
+          onMarkBriefUseful={onMarkBriefUseful}
+          onDismissBrief={onDismissBrief}
+          onDecideSuggestion={onDecideSuggestion}
+          onResolveConflict={onResolveConflict}
+          onMarkNeedsSourceCheck={() => selectedItem && onMarkNeedsSourceCheck(selectedItem.id)}
+          onMarkSourceChecked={() => selectedItem && onMarkSourceChecked(selectedItem.id)}
+          onCreateSuggestion={onCreateSuggestion}
+          onPushToAnki={onPushToAnki}
+        />
+      </div>
+    </div>
+  );
+}
+
 function ModelTemplateEditor({ deck, busy, onSave }: {
   deck: Deck;
   busy: boolean;
@@ -1003,12 +1566,14 @@ export default function App() {
   const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(new Set());
   const [bulkAction, setBulkAction] = useState<'tag-add' | 'tag-remove' | 'delete' | null>(null);
   const [bulkTagInput, setBulkTagInput] = useState('');
-  const [activeTab, setActiveTab] = useState<'overview' | 'study' | 'cards' | 'models' | 'stats' | 'analytics' | 'activity' | 'settings'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'review' | 'study' | 'cards' | 'models' | 'stats' | 'analytics' | 'activity' | 'settings'>('overview');
   const [showStudy, setShowStudy] = useState(false);
   const [studyApprovedOnly, setStudyApprovedOnly] = useState(true);
   const [reviewTab, setReviewTab] = useState<'changes' | 'discussion'>('changes');
+  const [reviewRiskFilter, setReviewRiskFilter] = useState<ReviewBucket>('all');
   const [reviewStatusFilter, setReviewStatusFilter] = useState<'pending' | 'accepted' | 'rejected' | 'revision' | 'all'>('pending');
   const [reviewAuthorFilter, setReviewAuthorFilter] = useState('All');
+  const [sourceCheckByReviewItem, setSourceCheckByReviewItem] = useState<Record<string, 'needs' | 'checked'>>({});
   const [suggestionBriefs, setSuggestionBriefs] = useState<Record<string, AiArtifact | null>>({});
   const [qualityPulse, setQualityPulse] = useState<AiQualityPulse | null>(null);
   const [qualityPulseBusy, setQualityPulseBusy] = useState(false);
@@ -1224,6 +1789,21 @@ export default function App() {
   };
   const activeSyncConflicts = syncSnapshot.conflicts;
   const pendingConflictIds = useMemo(() => activeSyncConflicts.map((conflict) => conflict.id), [activeSyncConflicts]);
+  useEffect(() => {
+    if (!activeSyncConflicts.length) return;
+    const savedDecisions = readSavedConflictDecisions(activeSyncConflicts);
+    const decidedConflictIds = new Set(Object.keys(savedDecisions));
+    if (!decidedConflictIds.size) return;
+
+    retainConflictReviewSnapshot.current = true;
+    setState((previous) => previous ? {
+      ...previous,
+      sync: {
+        ...previous.sync,
+        conflicts: previous.sync.conflicts.filter((conflict) => !decidedConflictIds.has(conflict.id))
+      }
+    } : previous);
+  }, [activeSyncConflicts]);
   const suggestions = useMemo(
     () => (state?.suggestions || []).filter((item) => item.deckId === activeDeck?.id),
     [state, activeDeck]
@@ -1233,17 +1813,22 @@ export default function App() {
   const ownerReviewQueue = useMemo(() => deriveOwnerReviewQueue({
     suggestions,
     conflicts: activeSyncConflicts,
-    pulse: qualityPulse
-  }), [activeSyncConflicts, qualityPulse, suggestions]);
+    pulse: qualityPulse,
+    cards: activeDeck?.cards || []
+  }), [activeDeck?.cards, activeSyncConflicts, qualityPulse, suggestions]);
+  const reviewBucketCounts = useMemo(() => deriveReviewBucketCounts(ownerReviewQueue), [ownerReviewQueue]);
   const queueItems = useMemo(() => ownerReviewQueue.filter((item) => {
+    const bucketMatch = reviewItemMatchesBucket(item, reviewRiskFilter);
     const statusMatch = reviewStatusFilter === 'all' || item.status === reviewStatusFilter;
     const authorMatch = reviewAuthorFilter === 'All' || !item.authorName || item.authorName === reviewAuthorFilter;
-    return statusMatch && authorMatch;
-  }), [ownerReviewQueue, reviewStatusFilter, reviewAuthorFilter]);
+    return bucketMatch && statusMatch && authorMatch;
+  }), [ownerReviewQueue, reviewRiskFilter, reviewStatusFilter, reviewAuthorFilter]);
   const selectedOwnerQueueItem = queueItems.find((item) => item.id === selectedOwnerQueueItemId) || queueItems[0];
-  const selectedSuggestion = suggestions.find((item) => item.id === (selectedOwnerQueueItem?.suggestionId || selectedSuggestionId)) ||
-    suggestions.find((item) => item.id === selectedSuggestionId);
-  const selectedCard = activeDeck?.cards.find((card) => card.id === (selectedSuggestion?.cardId || selectedOwnerQueueItem?.cardId || selectedCardId)) || activeDeck?.cards[0];
+  const selectedSuggestion = selectSuggestionForReview(selectedOwnerQueueItem, suggestions, selectedSuggestionId);
+  const selectedConflict = selectedOwnerQueueItem?.conflictId
+    ? activeSyncConflicts.find((item) => item.id === selectedOwnerQueueItem.conflictId) || conflictReviewSnapshot.find((item) => item.id === selectedOwnerQueueItem.conflictId)
+    : undefined;
+  const selectedCard = activeDeck ? selectCardForReview(selectedOwnerQueueItem, selectedSuggestion, activeDeck.cards, selectedCardId) : undefined;
   const selectedSuggestionBrief = selectedSuggestion ? suggestionBriefs[selectedSuggestion.id] : null;
   const selectedDuplicateLinks = useMemo(() => duplicateLinks.filter((link) => (
     selectedCard && (link.sourceCardId === selectedCard.id || link.targetCardId === selectedCard.id)
@@ -1467,6 +2052,8 @@ export default function App() {
       pushToast(`Imported ${result.imported} suggestion${result.imported === 1 ? '' : 's'}.${suffix}`, 'success');
       setReviewStatusFilter('pending');
       setReviewAuthorFilter('All');
+      setReviewRiskFilter('all');
+      setActiveTab('review');
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Import failed', 'error');
     } finally {
@@ -1634,15 +2221,19 @@ export default function App() {
     if (action === 'suggestions') {
       setReviewStatusFilter(item.subjectId ? 'all' : 'pending');
       setReviewAuthorFilter('All');
+      setReviewRiskFilter('all');
       if (item.subjectId) {
         setSelectedSuggestionId(item.subjectId);
         setSelectedOwnerQueueItemId(`suggestion:${item.subjectId}`);
       }
+      setActiveTab('review');
       setReviewTab('changes');
       return;
     }
     if (action === 'conflicts') {
-      setActiveTab('overview');
+      setReviewRiskFilter('conflict');
+      setReviewStatusFilter('pending');
+      setActiveTab('review');
       return;
     }
     if (action === 'cards') {
@@ -1702,11 +2293,13 @@ export default function App() {
     }
 
     if (item.kind === 'conflict') {
-      setActiveTab('overview');
+      setReviewRiskFilter('conflict');
+      setActiveTab('review');
     } else if (item.kind === 'ai' && item.conflictId) {
-      setActiveTab('overview');
+      setReviewRiskFilter('conflict');
+      setActiveTab('review');
     } else if (item.cardId) {
-      setActiveTab('cards');
+      setActiveTab('review');
     }
     setReviewTab('changes');
   }
@@ -1714,6 +2307,23 @@ export default function App() {
   function decideSuggestion(decision: 'accepted' | 'rejected' | 'revision') {
     if (!selectedSuggestion) return;
     refreshWith(api.decideSuggestion(selectedSuggestion.id, decision), `Suggestion ${decision}`);
+  }
+
+  function resolveSelectedConflict(resolution: 'local' | 'incoming' | 'skip') {
+    if (!selectedConflict) return;
+    retainConflictReviewSnapshot.current = true;
+    const decisionConflicts = conflictReviewSnapshot.some((conflict) => conflict.id === selectedConflict.id)
+      ? conflictReviewSnapshot
+      : activeSyncConflicts;
+    saveConflictDecision(decisionConflicts, selectedConflict, resolution);
+    setState(prev => prev ? {
+      ...prev,
+      sync: {
+        ...prev.sync,
+        conflicts: prev.sync.conflicts.filter(c => c.id !== selectedConflict.id)
+      }
+    } : prev);
+    pushToast(resolution === 'local' ? 'Kept local Anki version' : resolution === 'incoming' ? 'Applied DeckBridge version' : 'Skipped conflict for now', 'info');
   }
 
   async function generateSuggestionBrief() {
@@ -2081,6 +2691,7 @@ export default function App() {
             <div className="breadcrumb">Decks <span>/</span> {activeDeck.name}</div>
             <div className="tabs">
               <button ref={overviewTabRef} className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
+              <button className={activeTab === 'review' ? 'active' : ''} onClick={() => setActiveTab('review')}>Review</button>
               <button className={activeTab === 'study' ? 'active' : ''} onClick={() => setActiveTab('study')}>Study</button>
               <button className={activeTab === 'cards' ? 'active' : ''} onClick={() => setActiveTab('cards')}>Cards</button>
               {canManageDeck ? <button className={activeTab === 'models' ? 'active' : ''} onClick={() => setActiveTab('models')}>Models</button> : null}
@@ -2164,6 +2775,76 @@ export default function App() {
                   });
                 }}
                 onRemoveDeck={() => removeActiveDeckFromDeckBridge(activeDeck.id, activeDeck.name)}
+              />
+            ) : null}
+
+            {activeTab === 'review' && activeDeck ? (
+              <ReviewWorkspace
+                deck={activeDeck}
+                items={queueItems}
+                selectedItem={selectedOwnerQueueItem}
+                selectedCard={selectedCard}
+                selectedSuggestion={selectedSuggestion}
+                selectedConflict={selectedConflict}
+                suggestions={suggestions}
+                bucketCounts={reviewBucketCounts}
+                activeBucket={reviewRiskFilter}
+                onBucketChange={(bucket) => {
+                  setReviewRiskFilter(bucket);
+                  setSelectedOwnerQueueItemId(null);
+                }}
+                statusFilter={reviewStatusFilter}
+                onStatusFilterChange={(status) => {
+                  setReviewStatusFilter(status);
+                  setSelectedOwnerQueueItemId(null);
+                }}
+                authorFilter={reviewAuthorFilter}
+                onAuthorFilterChange={(author) => {
+                  setReviewAuthorFilter(author);
+                  setSelectedOwnerQueueItemId(null);
+                }}
+                authors={reviewAuthors}
+                canReview={canReview}
+                canManageDeck={canManageDeck}
+                busy={busy}
+                selectedSuggestionIds={selectedSuggestionIds}
+                onToggleSuggestion={toggleSuggestionSelection}
+                onSelectItem={selectOwnerQueueItem}
+                onResetFilters={() => {
+                  setReviewRiskFilter('all');
+                  setReviewStatusFilter('pending');
+                  setReviewAuthorFilter('All');
+                  setSelectedOwnerQueueItemId(null);
+                }}
+                onBulkDecision={bulkDecideSuggestions}
+                onClearSelection={clearSuggestionSelection}
+                reviewTab={reviewTab}
+                setReviewTab={setReviewTab}
+                currentUserId={state.user?.id || 'you'}
+                currentUserName={state.user?.name || 'You'}
+                commentsVersion={commentsVersion}
+                brief={selectedSuggestionBrief}
+                briefBusy={briefBusy}
+                draftReason={draftReason}
+                setDraftReason={setDraftReason}
+                onGenerateBrief={generateSuggestionBrief}
+                onMarkBriefUseful={(artifactId) => updateSuggestionBriefStatus(artifactId, 'useful')}
+                onDismissBrief={(artifactId) => updateSuggestionBriefStatus(artifactId, 'dismiss')}
+                onDecideSuggestion={decideSuggestion}
+                onResolveConflict={resolveSelectedConflict}
+                sourceCheckByReviewItem={sourceCheckByReviewItem}
+                onMarkNeedsSourceCheck={(itemId) => {
+                  setSourceCheckByReviewItem((prev) => ({ ...prev, [itemId]: 'needs' }));
+                  pushToast('Marked needs source check for this review session', 'info');
+                }}
+                onMarkSourceChecked={(itemId) => {
+                  setSourceCheckByReviewItem((prev) => ({ ...prev, [itemId]: 'checked' }));
+                  pushToast('Marked source checked for this review session', 'success');
+                }}
+                onCreateSuggestion={createSuggestion}
+                onPushToAnki={() => refreshWith(api.ankiPush(activeDeck.id), 'Pushed accepted note updates', (value) => value.state)}
+                hasConflicts={state.sync.conflicts.length > 0}
+                canSuggest={canSuggest}
               />
             ) : null}
 
@@ -2410,222 +3091,32 @@ export default function App() {
               syncHealth={syncHealth}
               onAction={handleOwnerAttentionAction}
             />
-
-            <div className="review-heading">
-              <strong>Review Queue <span>{ownerReviewQueue.length}</span></strong>
-              <button
-                type="button"
-                onClick={() => {
-                  setReviewStatusFilter('pending');
-                  setReviewAuthorFilter('All');
-                  setSelectedOwnerQueueItemId(null);
-                }}
-                disabled={reviewStatusFilter === 'pending' && reviewAuthorFilter === 'All'}
-              >
-                Reset
+            <section className="review-entry-card">
+              <div className="review-heading">
+                <strong>Quality Review <span>{ownerReviewQueue.length}</span></strong>
+              </div>
+              <div className="review-entry-grid">
+                <button type="button" onClick={() => { setReviewRiskFilter('answer'); setActiveTab('review'); }}>
+                  <small>Answer changed</small>
+                  <strong>{reviewBucketCounts.answer}</strong>
+                </button>
+                <button type="button" onClick={() => { setReviewRiskFilter('source'); setActiveTab('review'); }}>
+                  <small>Source check</small>
+                  <strong>{reviewBucketCounts.source}</strong>
+                </button>
+                <button type="button" onClick={() => { setReviewRiskFilter('conflict'); setActiveTab('review'); }}>
+                  <small>Sync conflict</small>
+                  <strong>{reviewBucketCounts.conflict}</strong>
+                </button>
+              </div>
+              <button className="button primary review-open-button" type="button" onClick={() => setActiveTab('review')}>
+                Open review workspace
               </button>
-            </div>
-            <div className="review-filter-bar" aria-label="Review queue filters">
-              <label>
-                <span>Status</span>
-                <select
-                  aria-label="Filter review queue by status"
-                  value={reviewStatusFilter}
-                  onChange={(event) => setReviewStatusFilter(event.target.value as typeof reviewStatusFilter)}
-                >
-                  <option value="pending">Pending</option>
-                  <option value="revision">Needs revision</option>
-                  <option value="accepted">Accepted</option>
-                  <option value="rejected">Rejected</option>
-                  <option value="all">All statuses</option>
-                </select>
-              </label>
-              <label>
-                <span>Author</span>
-                <select
-                  aria-label="Filter review queue by author"
-                  value={reviewAuthorFilter}
-                  onChange={(event) => setReviewAuthorFilter(event.target.value)}
-                >
-                  {reviewAuthors.map((author) => <option key={author}>{author}</option>)}
-                </select>
-              </label>
-            </div>
-
-            {selectedCard ? (
-              <section className="selected-card">
-                <div className="suggestion-author">
-                  <span className="avatar">{initials(selectedSuggestion?.authorName || 'Card')}</span>
-                  <span>
-                    <strong>{selectedSuggestion?.authorName || selectedOwnerQueueItem?.source || 'Selected card'}</strong>
-                    <small>{selectedSuggestion ? relativeTime(selectedSuggestion.createdAt) : selectedOwnerQueueItem ? selectedOwnerQueueItem.detail : 'No pending suggestion selected'}</small>
-                  </span>
-                  <b className="pending-status">{selectedSuggestion?.status || selectedOwnerQueueItem?.status || 'draft'}</b>
-                </div>
-                <p className="card-context">Card: {fieldValue(selectedCard, 'Front') || Object.values(selectedCard.fields)[0]}</p>
-                {activeDeck.aiSettings?.embeddings ? (
-                  <div className="ai-brief-card">
-                    <div className="ai-brief-header">
-                      <strong>Semantic duplicates</strong>
-                      {canManageDeck ? (
-                        <button className="button secondary" onClick={indexSelectedCardEmbedding} disabled={embeddingBusy}>
-                          <Icon name="spark" /> {embeddingBusy ? 'Indexing' : 'Index card'}
-                        </button>
-                      ) : null}
-                    </div>
-                    {duplicateBusy ? <small>Checking related cards...</small> : null}
-                    {selectedDuplicateLinks.length ? (
-                      <ul>
-                        {selectedDuplicateLinks.slice(0, 3).map((link) => {
-                          const comparedId = link.sourceCardId === selectedCard.id ? link.targetCardId : link.sourceCardId;
-                          const comparedCard = activeDeck.cards.find((card) => card.id === comparedId);
-                          return (
-                            <li key={link.id}>
-                              <strong>{link.relationship}</strong> {Math.round(link.score * 100)}%
-                              <br />
-                              <small>{selectedCard.id} vs {comparedId}: {comparedCard ? fieldValue(comparedCard, 'Front') || Object.values(comparedCard.fields)[0] : comparedId}</small>
-                              <br />
-                              <small>{link.rationale}</small>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    ) : <small>No active duplicate links for this card.</small>}
-                  </div>
-                ) : null}
-                <div className="review-tabs">
-                  <button className={reviewTab === 'changes' ? 'active' : ''} onClick={() => setReviewTab('changes')}>Changes</button>
-                  <button className={reviewTab === 'discussion' ? 'active' : ''} onClick={() => setReviewTab('discussion')}>Discussion</button>
-                </div>
-
-                {reviewTab === 'changes' ? (<>
-                <CardPreviewComparison
-                  currentCard={selectedCard}
-                  proposedCard={selectedSuggestion
-                    ? { ...selectedCard, fields: { ...selectedCard.fields, ...selectedSuggestion.proposedFields } }
-                    : selectedCard}
-                  deckId={activeDeck!.id}
-                  hasSuggestion={!!selectedSuggestion}
-                />
-                <div className="diff-block">
-                  <label>Tags</label>
-                  <div className="tag-diff">
-                    <span>{selectedCard.tags.join(', ') || 'No tags'}</span>
-                    <strong>→</strong>
-                    <span>{selectedSuggestion?.proposedTags.join(', ') || selectedCard.tags.join(', ')}</span>
-                  </div>
-                </div>
-
-                <label className="reason-box">
-                  <span>Reason for change</span>
-                  <textarea id="suggestion-reason" name="suggestion-reason" aria-label="Reason for change" value={selectedSuggestion?.reason || draftReason} onChange={(event) => setDraftReason(event.target.value)} />
-                </label>
-
-                {canReview && selectedSuggestion ? (
-                  <div className="decision-row">
-                    <button className="button secondary" onClick={() => decideSuggestion('rejected')} disabled={busy}><Icon name="x" /> Reject</button>
-                    <button className="button secondary" onClick={() => decideSuggestion('revision')} disabled={busy}>Request revision</button>
-                    <button className="button primary" onClick={() => decideSuggestion('accepted')} disabled={busy}><Icon name="check" /> Accept</button>
-                  </div>
-                ) : (
-                  <div className="decision-row">
-                    <button className="button secondary" onClick={createSuggestion} disabled={busy || !canSuggest}><Icon name="spark" /> Suggest edit</button>
-                    <button
-                      className="button primary"
-                      disabled={busy || state.sync.conflicts.length > 0}
-                      title={state.sync.conflicts.length > 0 ? `Push blocked: resolve ${state.sync.conflicts.length} sync conflict${state.sync.conflicts.length === 1 ? '' : 's'} before writing accepted changes back to Anki.` : undefined}
-                      onClick={() => activeDeck && refreshWith(api.ankiPush(activeDeck.id), 'Pushed accepted note updates', (value) => value.state)}
-                    >
-                      <Icon name="sync" /> Push to Anki
-                    </button>
-                    {state.sync.conflicts.length > 0 ? (
-                      <small className="conflict-block-rationale" style={{ gridColumn: '1 / -1' }}>
-                        Push blocked because unresolved sync conflicts could overwrite local Anki or DeckBridge edits.
-                      </small>
-                    ) : null}
-                  </div>
-                )}
-                </>) : (
-                  selectedSuggestion ? (
-                    <SuggestionDiscussion
-                      suggestionId={selectedSuggestion.id}
-                      deckId={activeDeck.id}
-                      currentUserId={state.user?.id || 'you'}
-                      currentUserName={state.user?.name || 'You'}
-                      commentsVersion={commentsVersion}
-                      brief={selectedSuggestionBrief}
-                      aiEnabled={activeDeck.aiSettings?.reviewBriefs === true}
-                      canManageAi={canManageDeck}
-                      briefBusy={briefBusy}
-                      onGenerateBrief={generateSuggestionBrief}
-                      onMarkBriefUseful={(artifactId) => updateSuggestionBriefStatus(artifactId, 'useful')}
-                      onDismissBrief={(artifactId) => updateSuggestionBriefStatus(artifactId, 'dismiss')}
-                    />
-                  ) : <EmptyState message="Select a suggestion to view its discussion." />
-                )}
-              </section>
-            ) : <EmptyState message="Select a card to review changes." />}
-
-            {canReview && selectedSuggestionIds.size > 0 ? (
-              <div className="suggestion-bulk-toolbar" role="toolbar" aria-label="Bulk suggestion decisions">
-                <span>{selectedSuggestionIds.size} selected</span>
-                <button className="button secondary" onClick={() => bulkDecideSuggestions('rejected')} disabled={busy}>Reject</button>
-                <button className="button secondary" onClick={() => bulkDecideSuggestions('revision')} disabled={busy}>Request revision</button>
-                <button className="button primary" onClick={() => bulkDecideSuggestions('accepted')} disabled={busy}>Accept</button>
-                <button className="button secondary" onClick={clearSuggestionSelection} disabled={busy}>Clear</button>
-              </div>
-            ) : null}
-
-            <div className="queue-list">
-              {queueItems.length ? queueItems.map((item) => {
-                const suggestion = item.suggestionId ? suggestions.find((candidate) => candidate.id === item.suggestionId) : undefined;
-                return (
-                <div
-                  className={`queue-item ${item.id === selectedOwnerQueueItem?.id ? 'active' : ''}`}
-                  key={item.id}
-                >
-                  {canReview && suggestion?.status === 'pending' ? (
-                    <input
-                      type="checkbox"
-                      className="queue-select"
-                      checked={selectedSuggestionIds.has(suggestion.id)}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                      }}
-                      onChange={(event) => {
-                        event.stopPropagation();
-                        toggleSuggestionSelection(suggestion.id);
-                      }}
-                      aria-label={`${selectedSuggestionIds.has(suggestion.id) ? 'Deselect' : 'Select'} ${suggestion.authorName}'s suggestion`}
-                    />
-                  ) : <span className="queue-select-spacer" aria-hidden="true" />}
-                  <button
-                    type="button"
-                    className="queue-item-main"
-                    onClick={() => selectOwnerQueueItem(item)}
-                  >
-                    <span className="avatar">{initials(item.source)}</span>
-                    <span>
-                      <strong>{item.label}</strong>
-                      <small>{item.source} · {relativeTime(item.sortAt)} · {item.affectsNextPull ? 'Affects next pull' : 'No pull impact'}</small>
-                    </span>
-                    <b className={`queue-status ${item.status}`}>{item.status}</b>
-                  </button>
-                </div>
-                );
-              }) : <EmptyState message="No owner review items match the queue filters." />}
-            </div>
-
-            <section className="go-to-features">
-              <strong>Collaboration edge</strong>
-              <div className="feature-grid">
-                <span>Review assignments</span>
-                <span>Card comments</span>
-                <span>Quality flags</span>
-                <span>Conflict triage</span>
-                <span>Deck health</span>
-                <span>Accepted impact</span>
-              </div>
+              {state.sync.conflicts.length > 0 ? (
+                <small className="conflict-block-rationale">
+                  Push blocked because unresolved sync conflicts could overwrite local Anki or DeckBridge edits.
+                </small>
+              ) : <small className="review-entry-clear">No sync conflicts are blocking push-back.</small>}
             </section>
           </aside>
         </div>
@@ -2695,34 +3186,57 @@ function CardPreviewComparison({ currentCard, proposedCard, deckId, hasSuggestio
     () => renderCardHtml(proposedCard, deckId, 'front'),
     [proposedCard, deckId],
   );
+  const currentRenderFallback = hasRenderFallback(currentCard, 'front') || hasRenderFallback(currentCard, 'back');
+  const proposedRenderFallback = hasSuggestion && (hasRenderFallback(proposedCard, 'front') || hasRenderFallback(proposedCard, 'back'));
+  const renderFallback = currentRenderFallback || proposedRenderFallback;
+
+  const renderFallbackNotice = renderFallback ? (
+    <div className="render-unavailable" role="status">
+      <strong>Rendered HTML missing</strong>
+      <span>
+        {currentRenderFallback && proposedRenderFallback
+          ? 'Current and proposed previews are field-rendered from card data.'
+          : currentRenderFallback
+            ? 'Current preview is field-rendered from card data.'
+            : 'Proposed preview is field-rendered from card data.'}
+        {' '}Use the raw field diff below before accepting.
+      </span>
+    </div>
+  ) : null;
 
   if (!hasSuggestion) {
     return (
-      <div className="card-preview-single">
-        <span className="card-preview-side-label">Front</span>
-        <AnkiCardRenderer card={currentCard} deckId={deckId} side="front" />
-        <span className="card-preview-side-label">Back</span>
-        <AnkiCardRenderer card={currentCard} deckId={deckId} side="back" frontHtml={currentFrontHtml} />
-      </div>
+      <>
+        {renderFallbackNotice}
+        <div className="card-preview-single">
+          <span className="card-preview-side-label">Front</span>
+          <AnkiCardRenderer card={currentCard} deckId={deckId} side="front" />
+          <span className="card-preview-side-label">Back</span>
+          <AnkiCardRenderer card={currentCard} deckId={deckId} side="back" frontHtml={currentFrontHtml} />
+        </div>
+      </>
     );
   }
 
   return (
-    <div className="card-preview-comparison">
-      <div className="card-preview-col">
-        <span className="card-preview-label">Current</span>
-        <span className="card-preview-side-label">Front</span>
-        <AnkiCardRenderer card={currentCard} deckId={deckId} side="front" />
-        <span className="card-preview-side-label">Back</span>
-        <AnkiCardRenderer card={currentCard} deckId={deckId} side="back" frontHtml={currentFrontHtml} />
+    <>
+      {renderFallbackNotice}
+      <div className="card-preview-comparison">
+        <div className="card-preview-col">
+          <span className="card-preview-label">Current</span>
+          <span className="card-preview-side-label">Front</span>
+          <AnkiCardRenderer card={currentCard} deckId={deckId} side="front" />
+          <span className="card-preview-side-label">Back</span>
+          <AnkiCardRenderer card={currentCard} deckId={deckId} side="back" frontHtml={currentFrontHtml} />
+        </div>
+        <div className="card-preview-col">
+          <span className="card-preview-label proposed">Proposed</span>
+          <span className="card-preview-side-label">Front</span>
+          <AnkiCardRenderer card={proposedCard} deckId={deckId} side="front" />
+          <span className="card-preview-side-label">Back</span>
+          <AnkiCardRenderer card={proposedCard} deckId={deckId} side="back" frontHtml={proposedFrontHtml} />
+        </div>
       </div>
-      <div className="card-preview-col">
-        <span className="card-preview-label proposed">Proposed</span>
-        <span className="card-preview-side-label">Front</span>
-        <AnkiCardRenderer card={proposedCard} deckId={deckId} side="front" />
-        <span className="card-preview-side-label">Back</span>
-        <AnkiCardRenderer card={proposedCard} deckId={deckId} side="back" frontHtml={proposedFrontHtml} />
-      </div>
-    </div>
+    </>
   );
 }
