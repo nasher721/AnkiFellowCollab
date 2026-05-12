@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Session } from '@supabase/supabase-js';
 import { api, setApiAuthToken, type AddonDownloadAvailability, type AddonVersion, type MeResponse } from './api';
 import type { AddonSyncResult, AiArtifact, AiDuplicateLink, AiQualityPulse, AppState, Deck, DeckCard, DeckMember, DeckSummary, Suggestion } from './types';
@@ -70,6 +70,8 @@ export interface OwnerAttentionItem {
 }
 
 export type OwnerReviewQueueItem = QualityReviewItem;
+export type WorkbenchTab = 'overview' | 'review' | 'study' | 'cards' | 'models' | 'stats' | 'analytics' | 'activity' | 'settings';
+export type WorkbenchRailKind = 'overview' | 'card' | 'none';
 
 const TOAST_ICONS: Record<Toast['type'], string> = {
   success: '✓',
@@ -110,6 +112,19 @@ const statusColors: Record<string, string> = {
   Suspended: 'red',
   Anki: 'neutral'
 };
+
+export function deriveWorkbenchRail({
+  activeTab,
+  hasDeck
+}: {
+  activeTab: WorkbenchTab;
+  hasDeck: boolean;
+}): WorkbenchRailKind {
+  if (!hasDeck) return 'none';
+  if (activeTab === 'overview') return 'overview';
+  if (activeTab === 'cards') return 'card';
+  return 'none';
+}
 
 function initials(name: string) {
   return name.split(/\s+/).map((part) => part[0]).slice(0, 2).join('').toUpperCase();
@@ -744,6 +759,174 @@ function OwnerAttentionPanel({
           </span>
         </div>
       )}
+    </section>
+  );
+}
+
+function WorkbenchLayout({
+  railKind,
+  rail,
+  children
+}: {
+  railKind: WorkbenchRailKind;
+  rail?: ReactNode;
+  children: ReactNode;
+}) {
+  const hasRail = railKind !== 'none' && Boolean(rail);
+  return (
+    <div className={`content-grid content-grid--${hasRail ? 'with-rail' : 'full'} content-grid--rail-${railKind}`}>
+      <section className="deck-panel">
+        {children}
+      </section>
+      {hasRail ? (
+        <aside className={`review-panel context-rail context-rail--${railKind}`} aria-label="Workbench context">
+          {rail}
+        </aside>
+      ) : null}
+    </div>
+  );
+}
+
+function OverviewRail({
+  ownerAttentionItems,
+  syncHealth,
+  reviewCount,
+  reviewBucketCounts,
+  conflictCount,
+  onDismissArtifact,
+  onOwnerAction,
+  onOpenReviewBucket,
+  onOpenReview
+}: {
+  ownerAttentionItems: OwnerAttentionItem[];
+  syncHealth: SyncHealth;
+  reviewCount: number;
+  reviewBucketCounts: ReturnType<typeof deriveReviewBucketCounts>;
+  conflictCount: number;
+  onDismissArtifact: (artifactId: string) => void;
+  onOwnerAction: (item: OwnerAttentionItem) => void;
+  onOpenReviewBucket: (bucket: ReviewBucket) => void;
+  onOpenReview: () => void;
+}) {
+  return (
+    <>
+      <OwnerAttentionPanel
+        items={ownerAttentionItems}
+        onDismissArtifact={onDismissArtifact}
+        syncHealth={syncHealth}
+        onAction={onOwnerAction}
+      />
+      <section className="review-entry-card">
+        <div className="review-heading">
+          <strong>Quality Review <span>{reviewCount}</span></strong>
+        </div>
+        <div className="review-entry-grid">
+          <button type="button" onClick={() => onOpenReviewBucket('answer')}>
+            <small>Answer changed</small>
+            <strong>{reviewBucketCounts.answer}</strong>
+          </button>
+          <button type="button" onClick={() => onOpenReviewBucket('source')}>
+            <small>Source check</small>
+            <strong>{reviewBucketCounts.source}</strong>
+          </button>
+          <button type="button" onClick={() => onOpenReviewBucket('conflict')}>
+            <small>Sync conflict</small>
+            <strong>{reviewBucketCounts.conflict}</strong>
+          </button>
+        </div>
+        <button className="button primary review-open-button" type="button" onClick={onOpenReview}>
+          Open review workspace
+        </button>
+        {conflictCount > 0 ? (
+          <small className="conflict-block-rationale">
+            Push blocked because unresolved sync conflicts could overwrite local Anki or DeckBridge edits.
+          </small>
+        ) : <small className="review-entry-clear">No sync conflicts are blocking push-back.</small>}
+      </section>
+    </>
+  );
+}
+
+function CardRail({
+  deckId,
+  card,
+  pendingSuggestion,
+  duplicateCount,
+  canSuggest,
+  onEditCard,
+  onOpenSuggestion
+}: {
+  deckId: string;
+  card?: DeckCard;
+  pendingSuggestion?: Suggestion;
+  duplicateCount: number;
+  canSuggest: boolean;
+  onEditCard: (cardId: string) => void;
+  onOpenSuggestion: (suggestion: Suggestion) => void;
+}) {
+  if (!card) {
+    return (
+      <section className="card-context-card" aria-label="Selected card context">
+        <div className="card-context-heading">
+          <span>Card Context</span>
+          <strong>Select a card</strong>
+        </div>
+        <p className="card-context-empty">Choose a row in Cards to inspect rendered preview, note metadata, and linked review work.</p>
+      </section>
+    );
+  }
+
+  const frontHtml = renderCardHtml(card, deckId, 'front', undefined, card.clozeOrd);
+  const visibleTags = card.tags.slice(0, 5);
+
+  return (
+    <section className="card-context-card" aria-label="Selected card context">
+      <div className="card-context-heading">
+        <span>Card Context</span>
+        <strong>{fieldValue(card, 'Front') || Object.values(card.fields)[0] || card.id}</strong>
+      </div>
+
+      <div className="card-context-preview" aria-label="Selected card preview">
+        <small>Rendered preview</small>
+        <span className="card-preview-side-label">Front</span>
+        <AnkiCardRenderer card={card} deckId={deckId} side="front" />
+        <span className="card-preview-side-label">Back</span>
+        <AnkiCardRenderer card={card} deckId={deckId} side="back" frontHtml={frontHtml} />
+      </div>
+
+      <dl className="card-context-meta">
+        <div><dt>Note type</dt><dd>{card.modelName || card.type}</dd></div>
+        <div><dt>State</dt><dd><b className={`state-chip ${statusColors[card.state] || 'neutral'}`}>{card.state}</b></dd></div>
+        <div><dt>Due</dt><dd>{card.due ?? '-'}</dd></div>
+        <div><dt>Modified</dt><dd>{relativeTime(card.modifiedAt)} by {card.modifiedBy}</dd></div>
+        <div><dt>Anki note</dt><dd>{card.ankiNoteId ?? card.id}</dd></div>
+      </dl>
+
+      <div className="card-context-tags" aria-label="Selected card tags">
+        {visibleTags.length ? visibleTags.map((tag) => <em key={tag}>{tag}</em>) : <small>No tags</small>}
+        {card.tags.length > visibleTags.length ? <small>+{card.tags.length - visibleTags.length} more</small> : null}
+      </div>
+
+      {pendingSuggestion ? (
+        <div className="card-context-linked-review">
+          <small>Pending suggestion</small>
+          <strong>{pendingSuggestion.authorName}</strong>
+          <span>{pendingSuggestion.reason || 'Review proposed card changes.'}</span>
+          <button className="button secondary" type="button" onClick={() => onOpenSuggestion(pendingSuggestion)}>
+            Open in Review
+          </button>
+        </div>
+      ) : null}
+
+      {duplicateCount > 0 ? (
+        <small className="card-context-signal">{duplicateCount} related or duplicate candidate{duplicateCount === 1 ? '' : 's'} linked to this card.</small>
+      ) : null}
+
+      {canSuggest ? (
+        <button className="button primary card-context-action" type="button" onClick={() => onEditCard(card.id)}>
+          Suggest edit
+        </button>
+      ) : null}
     </section>
   );
 }
@@ -1566,7 +1749,7 @@ export default function App() {
   const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(new Set());
   const [bulkAction, setBulkAction] = useState<'tag-add' | 'tag-remove' | 'delete' | null>(null);
   const [bulkTagInput, setBulkTagInput] = useState('');
-  const [activeTab, setActiveTab] = useState<'overview' | 'review' | 'study' | 'cards' | 'models' | 'stats' | 'analytics' | 'activity' | 'settings'>('overview');
+  const [activeTab, setActiveTab] = useState<WorkbenchTab>('overview');
   const [showStudy, setShowStudy] = useState(false);
   const [studyApprovedOnly, setStudyApprovedOnly] = useState(true);
   const [reviewTab, setReviewTab] = useState<'changes' | 'discussion'>('changes');
@@ -1929,6 +2112,49 @@ export default function App() {
     studyCards: studyCards.length,
     syncHealth
   }), [activeDeckVisibility, canReview, changedCards, pendingSuggestions.length, qualityPulse, studyCards.length, syncHealth]);
+  const activeRail = deriveWorkbenchRail({ activeTab, hasDeck: Boolean(activeDeck) });
+  const cardRailCard = activeDeck?.cards.find((card) => card.id === selectedCardId) || selectedCard;
+  const highlightedCard = activeTab === 'cards' ? cardRailCard : selectedCard;
+  const cardRailPendingSuggestion = cardRailCard
+    ? pendingSuggestions.find((item) => item.cardId === cardRailCard.id)
+    : undefined;
+  const contextRail = activeRail === 'overview' ? (
+    <OverviewRail
+      ownerAttentionItems={ownerAttentionItems}
+      syncHealth={syncHealth}
+      reviewCount={ownerReviewQueue.length}
+      reviewBucketCounts={reviewBucketCounts}
+      conflictCount={activeSyncConflicts.length}
+      onDismissArtifact={dismissOwnerArtifact}
+      onOwnerAction={handleOwnerAttentionAction}
+      onOpenReviewBucket={(bucket) => {
+        setReviewRiskFilter(bucket);
+        setReviewStatusFilter('pending');
+        setSelectedOwnerQueueItemId(null);
+        setActiveTab('review');
+      }}
+      onOpenReview={() => setActiveTab('review')}
+    />
+  ) : activeRail === 'card' && activeDeck ? (
+    <CardRail
+      deckId={activeDeck.id}
+      card={cardRailCard}
+      pendingSuggestion={cardRailPendingSuggestion}
+      duplicateCount={cardRailCard ? duplicateCountsByCard.get(cardRailCard.id) || 0 : 0}
+      canSuggest={canSuggest}
+      onEditCard={(cardId) => {
+        setSelectedCardId(cardId);
+        setEditingCardId(cardId);
+      }}
+      onOpenSuggestion={(suggestion) => {
+        setSelectedSuggestionId(suggestion.id);
+        setSelectedOwnerQueueItemId(`suggestion:${suggestion.id}`);
+        setReviewRiskFilter('all');
+        setReviewStatusFilter('pending');
+        setActiveTab('review');
+      }}
+    />
+  ) : null;
 
   const refreshQualityPulse = useCallback(async () => {
     if (!activeDeck?.id || !activeDeck.aiSettings?.qualityPulse) {
@@ -2686,8 +2912,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="content-grid">
-          <section className="deck-panel">
+        <WorkbenchLayout railKind={activeRail} rail={contextRail}>
             <div className="breadcrumb">Decks <span>/</span> {activeDeck.name}</div>
             <div className="tabs">
               <button ref={overviewTabRef} className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
@@ -3011,7 +3236,7 @@ export default function App() {
                     </div>
                   ) : (
                   <div
-                    className={`table-row ${card.id === selectedCard?.id ? 'selected' : ''} ${selectedCardIds.has(card.id) ? 'checked' : ''}`}
+                    className={`table-row ${card.id === highlightedCard?.id ? 'selected' : ''} ${selectedCardIds.has(card.id) ? 'checked' : ''}`}
                     key={card.id}
                     onClick={(e) => {
                       if (selectedCardIds.size > 0 || e.shiftKey) {
@@ -3082,44 +3307,7 @@ export default function App() {
               </div>
             </div>
             </>) : null}
-          </section>
-
-          <aside className="review-panel">
-            <OwnerAttentionPanel
-              items={ownerAttentionItems}
-              onDismissArtifact={dismissOwnerArtifact}
-              syncHealth={syncHealth}
-              onAction={handleOwnerAttentionAction}
-            />
-            <section className="review-entry-card">
-              <div className="review-heading">
-                <strong>Quality Review <span>{ownerReviewQueue.length}</span></strong>
-              </div>
-              <div className="review-entry-grid">
-                <button type="button" onClick={() => { setReviewRiskFilter('answer'); setActiveTab('review'); }}>
-                  <small>Answer changed</small>
-                  <strong>{reviewBucketCounts.answer}</strong>
-                </button>
-                <button type="button" onClick={() => { setReviewRiskFilter('source'); setActiveTab('review'); }}>
-                  <small>Source check</small>
-                  <strong>{reviewBucketCounts.source}</strong>
-                </button>
-                <button type="button" onClick={() => { setReviewRiskFilter('conflict'); setActiveTab('review'); }}>
-                  <small>Sync conflict</small>
-                  <strong>{reviewBucketCounts.conflict}</strong>
-                </button>
-              </div>
-              <button className="button primary review-open-button" type="button" onClick={() => setActiveTab('review')}>
-                Open review workspace
-              </button>
-              {state.sync.conflicts.length > 0 ? (
-                <small className="conflict-block-rationale">
-                  Push blocked because unresolved sync conflicts could overwrite local Anki or DeckBridge edits.
-                </small>
-              ) : <small className="review-entry-clear">No sync conflicts are blocking push-back.</small>}
-            </section>
-          </aside>
-        </div>
+        </WorkbenchLayout>
       </section>}
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />

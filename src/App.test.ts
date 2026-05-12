@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { authMessage, deriveOwnerReviewQueue, deriveReviewBucketCounts, deriveSyncHealth, mergeHydratedDeckState, reviewItemMatchesBucket, selectCardForReview, selectSuggestionForReview, stateFromMeResponse, withAuthTimeout } from './App';
+import { authMessage, deriveOwnerReviewQueue, deriveReviewBucketCounts, deriveSyncHealth, deriveWorkbenchRail, mergeHydratedDeckState, reviewItemMatchesBucket, selectCardForReview, selectSuggestionForReview, stateFromMeResponse, withAuthTimeout } from './App';
 import type { AiQualityPulse, AppState, DeckCard, Suggestion } from './types';
 
 const NOW = new Date('2026-05-09T12:00:00.000Z').getTime();
@@ -133,6 +133,20 @@ describe('deriveSyncHealth', () => {
     expect(health.lastCheckedLabel).toBe('15m ago');
     expect(health.conflictLabel).toBe('1 conflict');
     expect(health.primaryAction).toBe('conflicts');
+  });
+});
+
+describe('deriveWorkbenchRail', () => {
+  it('keeps owner attention on Overview and selected-card context on Cards', () => {
+    expect(deriveWorkbenchRail({ activeTab: 'overview', hasDeck: true })).toBe('overview');
+    expect(deriveWorkbenchRail({ activeTab: 'cards', hasDeck: true })).toBe('card');
+  });
+
+  it('gives focused tabs full width without an empty rail', () => {
+    for (const activeTab of ['review', 'study', 'stats', 'analytics', 'activity', 'settings', 'models'] as const) {
+      expect(deriveWorkbenchRail({ activeTab, hasDeck: true })).toBe('none');
+    }
+    expect(deriveWorkbenchRail({ activeTab: 'overview', hasDeck: false })).toBe('none');
   });
 });
 

@@ -67,7 +67,8 @@ test.describe('Workspace', () => {
   test('loads the app with demo deck', async ({ page }) => {
     await expect(page.getByText('DeckBridge')).toBeVisible();
     await expect(page.getByRole('button', { name: /Zanki Step 2 CK/ })).toBeVisible();
-    await expect(page.getByText('Quality Review')).toBeVisible();
+    await expect(page.locator('.context-rail--overview').getByText('Quality Review')).toBeVisible();
+    await expect(page.locator('.context-rail--overview').getByText('Owner Attention')).toBeVisible();
   });
 
   test('displays cards in the table', async ({ page }) => {
@@ -106,6 +107,7 @@ test.describe('Review Queue', () => {
     await expect(page.getByText('1 pending')).toBeVisible();
     await expect(page.getByRole('button', { name: /Pending suggestion.*Maya Patel.*pending/i })).toBeVisible();
     await expect(page.getByText('Quality Review Workspace')).toBeVisible();
+    await expect(page.locator('.context-rail')).toHaveCount(0);
     await expect(page.locator('.review-quality-summary').getByRole('button', { name: /Answer changed/ })).toBeVisible();
   });
 
@@ -681,6 +683,9 @@ test.describe('Tabs', () => {
     await page.getByRole('button', { name: 'Cards', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Cards', exact: true })).toHaveClass(/active/);
     await expect(page.getByRole('row', { name: /Microscopic polyangiitis/ })).toBeVisible();
+    await expect(page.locator('.context-rail--card').getByText('Card Context')).toBeVisible();
+    await expect(page.locator('.context-rail--card').getByText('Rendered preview')).toBeVisible();
+    await expect(page.locator('.context-rail--card').getByText('Quality Review')).toHaveCount(0);
   });
 
   test('switches to Stats tab', async ({ page }) => {
@@ -767,6 +772,7 @@ test.describe('Tabs', () => {
 
     await page.getByRole('button', { name: 'Settings' }).click();
     await expect(page.getByText('Deck settings')).toBeVisible();
+    await expect(page.locator('.context-rail')).toHaveCount(0);
     await expect(page.locator('.settings-note[role="status"]')).toHaveText('Checking share links...');
     await expect.poll(() => listedShareLinks).toBe(true);
     await expect(page.locator('.settings-note[role="status"]')).toHaveCount(0);
