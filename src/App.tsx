@@ -432,10 +432,67 @@ export async function withAuthTimeout<T>(request: Promise<T>, timeoutMs = AUTH_R
   }
 }
 
-export function authMessage(message: string, mode: 'sign-in' | 'sign-up') {
+function cleanAuthText(value: unknown) {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === '{}' || trimmed === '[object Object]' || trimmed === 'Error') return '';
+  return trimmed;
+}
+
+function authErrorStatus(error: unknown) {
+  if (!error || typeof error !== 'object') return null;
+  const status = (error as Record<string, unknown>).status;
+  if (typeof status === 'number') return status;
+  if (typeof status === 'string') {
+    const parsed = Number(status);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function authErrorText(error: unknown): string {
+  const direct = cleanAuthText(error);
+  if (direct) return direct;
+  if (error instanceof Error) {
+    return cleanAuthText(error.message) || cleanAuthText(error.name);
+  }
+  if (!error || typeof error !== 'object') return '';
+
+  const value = error as Record<string, unknown>;
+  for (const key of ['message', 'error_description', 'msg', 'detail', 'statusText', 'code', 'name']) {
+    const text = cleanAuthText(value[key]);
+    if (text) return text;
+  }
+
+  if (value.error && value.error !== error) {
+    const nested = authErrorText(value.error);
+    if (nested) return nested;
+  }
+
+  try {
+    return cleanAuthText(JSON.stringify(value));
+  } catch (_error) {
+    return '';
+  }
+}
+
+export function authMessage(error: unknown, mode: 'sign-in' | 'sign-up') {
+  const message = authErrorText(error);
+  const status = authErrorStatus(error);
   const lower = message.toLowerCase();
-  if (lower.includes('timed out') || lower.includes('failed to fetch') || lower.includes('networkerror')) {
+  const fingerprint = `${lower} ${status ?? ''}`.trim();
+  if (
+    fingerprint.includes('timed out') ||
+    fingerprint.includes('failed to fetch') ||
+    fingerprint.includes('networkerror') ||
+    fingerprint.includes('authretryablefetcherror') ||
+    status === 0 ||
+    (status !== null && status >= 500)
+  ) {
     return 'DeckBridge could not reach the auth provider. The Supabase project may be paused or temporarily unavailable; try again in a moment.';
+  }
+  if (!message) {
+    return 'DeckBridge could not complete authentication because the auth provider returned an empty error. Try again in a moment.';
   }
   if (lower.includes('invalid login credentials')) {
     return 'That email and password did not match a DeckBridge account. Create an account here, or check the password and try again.';
@@ -2301,13 +2358,12 @@ export default function App() {
           : supabase.auth.signUp({ ...credentials, options: { data: { name: authEmail } } })
       );
       if (error) {
-        setAuthNotice(authMessage(error.message, authMode));
+        setAuthNotice(authMessage(error, authMode));
       } else if (authMode === 'sign-up') {
         setAuthNotice('Account created. DeckBridge will sign you in automatically.');
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to fetch';
-      setAuthNotice(authMessage(message, authMode));
+      setAuthNotice(authMessage(error, authMode));
     } finally {
       setAuthBusy(false);
     }

@@ -155,6 +155,30 @@ describe('auth helpers', () => {
     expect(authMessage('Failed to fetch', 'sign-in')).toContain('could not reach the auth provider');
   });
 
+  it('does not surface empty auth-provider errors as raw JSON', () => {
+    const message = authMessage('{}', 'sign-in');
+
+    expect(message).toContain('auth provider returned an empty error');
+    expect(message).not.toBe('{}');
+  });
+
+  it('does not surface generic Error names for empty auth failures', () => {
+    const message = authMessage(new Error('{}'), 'sign-in');
+
+    expect(message).toContain('auth provider returned an empty error');
+    expect(message).not.toBe('Error');
+  });
+
+  it('uses structured Supabase auth errors when the message is useful', () => {
+    expect(authMessage({ message: 'Invalid login credentials' }, 'sign-in')).toContain('did not match');
+  });
+
+  it('maps retryable empty Supabase fetch errors to the network notice', () => {
+    const message = authMessage({ name: 'AuthRetryableFetchError', message: '{}', status: 0 }, 'sign-in');
+
+    expect(message).toContain('could not reach the auth provider');
+  });
+
   it('rejects auth requests that hang beyond the timeout', async () => {
     vi.useFakeTimers();
     const request = withAuthTimeout(new Promise(() => undefined), 1000);
