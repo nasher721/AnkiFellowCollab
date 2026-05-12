@@ -2663,28 +2663,28 @@ export function createApp(options = {}) {
       if (!auth.supabase) { res.json({ ok: true }); return; }
       const updates = Array.isArray(req.body.updates) ? req.body.updates : [];
       if (!updates.length) { res.json({ ok: true, synced: 0 }); return; }
+      const updatedAt = new Date().toISOString();
       const valid = updates
         .filter(u => u.deckId && u.cardId)
         .slice(0, 200)
-        .map((u) => ({ ...u, deckId: assertValidDeckId(u.deckId) }));
-      let synced = 0;
-      for (const u of valid) {
-        const id = crypto.randomUUID();
-        const { error } = await auth.supabase.from('study_progress').upsert({
-          id,
+        .map((u) => ({
+          id: crypto.randomUUID(),
           user_id: req.user.id,
-          deck_id: u.deckId,
+          deck_id: assertValidDeckId(u.deckId),
           card_id: u.cardId,
           interval_days: u.intervalDays ?? 1,
           ease_factor: u.easeFactor ?? 2.5,
           repetitions: u.repetitions ?? 0,
-          next_due: u.nextDue ?? new Date().toISOString(),
+          next_due: u.nextDue ?? updatedAt,
           last_rating: u.lastRating ?? null,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'user_id,deck_id,card_id', ignoreDuplicates: false });
-        if (!error) synced++;
-      }
-      res.json({ ok: true, synced });
+          updated_at: updatedAt
+        }));
+      if (!valid.length) { res.json({ ok: true, synced: 0 }); return; }
+      const { error } = await auth.supabase
+        .from('study_progress')
+        .upsert(valid, { onConflict: 'user_id,deck_id,card_id', ignoreDuplicates: false });
+      if (error) fail(500, 'progress_sync_error', error.message || 'Unable to sync study progress');
+      res.json({ ok: true, synced: valid.length });
     } catch (err) { next(err); }
   });
 

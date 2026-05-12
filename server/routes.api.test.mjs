@@ -17,18 +17,20 @@ class FakeSupabase {
       user_tokens: []
     };
     this.errors = [];
+    this.calls = [];
   }
 
   from(table) {
-    return new FakeQuery(this.tables, table, this.errors);
+    return new FakeQuery(this.tables, table, this.errors, this.calls);
   }
 }
 
 class FakeQuery {
-  constructor(tables, table, errors = []) {
+  constructor(tables, table, errors = [], calls = []) {
     this.tables = tables;
     this.table = table;
     this.errors = errors;
+    this.calls = calls;
     this.filters = [];
     this.pendingUpdate = null;
     this.pendingDelete = false;
@@ -79,15 +81,30 @@ class FakeQuery {
     return this;
   }
 
-  async upsert(row) {
-    const rows = this.tables[this.table];
-    const index = rows.findIndex((item) => item.id === row.id);
-    if (index >= 0) rows[index] = { ...rows[index], ...row };
-    else rows.push(row);
+  async upsert(row, options = {}) {
+    const incomingRows = Array.isArray(row) ? row : [row];
+    const rows = this.tables[this.table] || [];
+    this.tables[this.table] = rows;
+    this.calls.push({
+      table: this.table,
+      operation: 'upsert',
+      rowCount: incomingRows.length,
+      options
+    });
+    const conflictColumns = String(options.onConflict || 'id')
+      .split(',')
+      .map((column) => column.trim())
+      .filter(Boolean);
+    for (const incoming of incomingRows) {
+      const index = rows.findIndex((item) => conflictColumns.every((column) => item[column] === incoming[column]));
+      if (index >= 0) rows[index] = { ...rows[index], ...incoming };
+      else rows.push(incoming);
+    }
     return { data: row, error: null };
   }
 
   async insert(row) {
+    if (!this.tables[this.table]) this.tables[this.table] = [];
     this.tables[this.table].push(row);
     return { data: row, error: null };
   }
@@ -2079,6 +2096,57 @@ test('study session API persists and lists sessions without changing progress co
     .expect((res) => {
       assert.equal(res.body.ok, true);
     });
+});
+
+test('study progress API batches Supabase upserts', async () => {
+  const { app, supabase } = await createTokenTestApp();
+  supabase.tables.study_progress = [{
+    id: 'existing-progress',
+    user_id: 'you',
+    deck_id: 'deck-demo-zanki',
+    card_id: 'card-1',
+    interval_days: 1,
+    ease_factor: 2.5,
+    repetitions: 0,
+    next_due: '2026-05-11T00:00:00.000Z',
+    last_rating: null,
+    updated_at: '2026-05-11T00:00:00.000Z'
+  }];
+
+  const response = await asUser(request(app)
+    .post('/api/study/progress')
+    .send({
+      updates: [
+        {
+          deckId: 'deck-demo-zanki',
+          cardId: 'card-1',
+          intervalDays: 5,
+          easeFactor: 2.8,
+          repetitions: 2,
+          nextDue: '2026-05-16T00:00:00.000Z',
+          lastRating: 4
+        },
+        {
+          deckId: 'deck-demo-zanki',
+          cardId: 'card-2',
+          intervalDays: 1,
+          easeFactor: 2.5,
+          repetitions: 1,
+          nextDue: '2026-05-12T00:00:00.000Z',
+          lastRating: 3
+        }
+      ]
+    }), 'you', 'You').expect(200);
+
+  assert.equal(response.body.synced, 2);
+  assert.deepEqual(
+    supabase.calls.filter((call) => call.table === 'study_progress' && call.operation === 'upsert').map((call) => call.rowCount),
+    [2]
+  );
+  assert.equal(supabase.tables.study_progress.length, 2);
+  const updated = supabase.tables.study_progress.find((row) => row.card_id === 'card-1');
+  assert.equal(updated.interval_days, 5);
+  assert.equal(updated.last_rating, 4);
 });
 
 test('spreadsheet import creates one pending suggestion per changed row', async () => {
