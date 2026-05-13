@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { Fragment, useState, useEffect, useCallback } from 'react';
 import { api, type Comment } from './api';
 import type { AiArtifact, AiSuggestionBriefPayload } from './types';
 
@@ -252,7 +252,7 @@ function SuggestionBriefPanel({
           <p>{payload.rationale}</p>
           {payload.evidence.length ? (
             <ul className="ai-brief-evidence">
-              {payload.evidence.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}
+              {payload.evidence.map((item) => <li key={item}>{item}</li>)}
             </ul>
           ) : null}
           <small className="ai-brief-trace">
@@ -290,10 +290,10 @@ function label(value: string) {
   return value.replaceAll('-', ' ');
 }
 
-function renderWithMentions(text: string) {
+function FormattedCommentText({ text }: { text: string }) {
   const parts = text.split(/(@\w[\w.-]*)/g);
   return parts.map((part, i) =>
-    part.startsWith('@') ? <strong key={i} className="mention-highlight">{part}</strong> : part
+    part.startsWith('@') ? <strong key={`mention-${i}`} className="mention-highlight">{part}</strong> : <Fragment key={`mention-${i}`}>{part}</Fragment>
   );
 }
 
@@ -318,7 +318,7 @@ function CommentItem({
           <small>{relTime(comment.createdAt)}</small>
           {resolved && <span className="comment-resolved-badge">Resolved</span>}
         </div>
-        <p className="comment-text">{renderWithMentions(comment.body)}</p>
+        <p className="comment-text"><FormattedCommentText text={comment.body} /></p>
         <div className="comment-actions">
           <button className="comment-reply-btn" onClick={onReply}>Reply</button>
           {canResolve && (

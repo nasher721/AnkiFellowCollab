@@ -67,7 +67,7 @@ function getConflictFingerprint(conflict: Conflict) {
 }
 
 function getStorageKey(conflicts: Conflict[]) {
-  const deckIds = Array.from(new Set(conflicts.map((conflict) => conflict.deckId).filter(Boolean))).sort();
+  const deckIds = Array.from(new Set(conflicts.flatMap((conflict) => conflict.deckId ? [conflict.deckId] : []))).sort();
   const conflictSetFingerprint = hashParts(conflicts
     .map((conflict) => getConflictFingerprint(conflict))
     .sort());
@@ -105,12 +105,9 @@ function readStoredDecisions(storageKey: string, conflicts: Conflict[]): StoredD
     const conflictFingerprints = new Map(conflicts.map((conflict) => [conflict.id, getConflictFingerprint(conflict)]));
 
     return Object.fromEntries(
-      Object.entries(parsed)
-        .filter(([conflictId, decision]) => (
-          isResolution(decision?.resolution) &&
-          decision.fingerprint === conflictFingerprints.get(conflictId)
-        ))
-        .map(([conflictId, decision]) => [conflictId, {
+      Object.entries(parsed).flatMap(([conflictId, decision]) => {
+        if (!isResolution(decision?.resolution) || decision.fingerprint !== conflictFingerprints.get(conflictId)) return [];
+        return [[conflictId, {
           resolution: decision.resolution as Resolution,
           decidedAt: decision.decidedAt || '',
           deckId: decision.deckId || '',
@@ -118,7 +115,8 @@ function readStoredDecisions(storageKey: string, conflicts: Conflict[]): StoredD
           source: decision.source || '',
           detectedAt: decision.detectedAt || '',
           fingerprint: decision.fingerprint || ''
-        }])
+        }]];
+      })
     );
   } catch {
     return {};
@@ -175,20 +173,20 @@ function highlightDiff(local: string, incoming: string, side: 'local' | 'incomin
   const localWords = local.split(/(\s+)/);
   const incomingWords = incoming.split(/(\s+)/);
 
-  if (side === 'local') {
+    if (side === 'local') {
     return <>{localWords.map((word, i) => {
       if (!incomingWords.includes(word) && word.trim()) {
-        return <mark className="conflict-changed" aria-label={`Changed local text: ${word.trim()}`} key={i}>{word}</mark>;
+        return <mark className="conflict-changed" aria-label={`Changed local text: ${word.trim()}`} key={`local-${i}`}>{word}</mark>;
       }
-      return <span key={i}>{word}</span>;
+      return <span key={`local-${i}`}>{word}</span>;
     })}</>;
   }
 
   return <>{incomingWords.map((word, i) => {
     if (!localWords.includes(word) && word.trim()) {
-      return <mark className="conflict-changed" aria-label={`Changed incoming text: ${word.trim()}`} key={i}>{word}</mark>;
+      return <mark className="conflict-changed" aria-label={`Changed incoming text: ${word.trim()}`} key={`incoming-${i}`}>{word}</mark>;
     }
-    return <span key={i}>{word}</span>;
+    return <span key={`incoming-${i}`}>{word}</span>;
   })}</>;
 }
 
@@ -219,7 +217,7 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
 
   useEffect(() => {
     let cancelled = false;
-    const deckIds = Array.from(new Set(conflicts.map((item) => item.deckId).filter(Boolean)));
+    const deckIds = Array.from(new Set(conflicts.flatMap((item) => item.deckId ? [item.deckId] : [])));
     if (!deckIds.length) {
       setSummaries({});
       return () => { cancelled = true; };
@@ -352,7 +350,7 @@ function ConflictResolution({ conflicts, pendingConflictIds, onResolve, onClearR
     <div className="conflict-panel">
       <div className="conflict-header">
         <div>
-          <strong>Sync Conflict — {conflict.source}</strong>
+          <strong>Sync Conflict: {conflict.source}</strong>
           <span className="conflict-progress">Conflict {safeIndex + 1} of {visibleConflicts.length}</span>
           {currentDecision ? (
             <span className="conflict-decision">Decided: {currentDecision.resolution}</span>

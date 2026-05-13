@@ -57,7 +57,7 @@ function recentSuggestionCutoff(nowMs: number) {
 }
 
 function sameTags(left: string[], right: string[]) {
-  return [...left].sort().join('\u0000') === [...right].sort().join('\u0000');
+  return left.toSorted().join('\u0000') === right.toSorted().join('\u0000');
 }
 
 function uniqueLabels(labels: ReviewRiskLabel[]) {

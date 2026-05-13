@@ -34,6 +34,7 @@ export function StudyPrepView({
           type="checkbox"
           checked={approvedOnly}
           onChange={(event) => onApprovedOnlyChange(event.target.checked)}
+          aria-label="Study approved cards only"
         />
         <span>
           <strong>Study approved cards only</strong>

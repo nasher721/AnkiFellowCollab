@@ -116,7 +116,6 @@ export function TemplateGallery({ onUse }: Props) {
                       value={deckName}
                       onChange={(e) => setDeckName(e.target.value)}
                       onKeyDown={(e) => { if (e.key === 'Enter') handleUse(tpl); if (e.key === 'Escape') { setNameInputId(null); setDeckName(''); } }}
-                      autoFocus
                     />
                     <button
                       className="btn btn-primary btn-sm"
@@ -141,7 +140,7 @@ export function TemplateGallery({ onUse }: Props) {
                 <div className="template-preview">
                   <p className="preview-label">Sample cards ({tpl.sampleCards.length}):</p>
                   {tpl.sampleCards.slice(0, 3).map((card, i) => (
-                    <div key={i} className="preview-card">
+                    <div key={`${tpl.id}-sample-${i}`} className="preview-card">
                       {Object.entries(card).map(([k, v]) => (
                         <div key={k} className="preview-row">
                           <span className="preview-field">{k}</span>

@@ -40,7 +40,9 @@ export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props
   const fieldNames = card.fieldOrder?.length ? card.fieldOrder : Object.keys(card.fields);
   const editorId = useId();
   const [fields, setFields] = useState<Record<string, string>>(() => ({ ...card.fields }));
-  const [tagsInput, setTagsInput] = useState(card.tags.join(', '));
+
+
+  const [tagsInput, setTagsInput] = useState(() => card.tags.join(', '));
   const [reason, setReason] = useState('');
   const [error, setError] = useState('');
   const firstRef = useRef<HTMLTextAreaElement>(null);
@@ -61,8 +63,8 @@ export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props
 
   function handleSubmit() {
     const changed = fieldNames.some((f) => fields[f] !== card.fields[f]);
-    const parsedTags = tagsInput.split(',').map((t) => t.trim()).filter(Boolean);
-    const tagsChanged = JSON.stringify(parsedTags.sort()) !== JSON.stringify([...card.tags].sort());
+    const parsedTags = tagsInput.split(',').flatMap((t) => { const trimmed = t.trim(); return trimmed ? [trimmed] : []; });
+    const tagsChanged = JSON.stringify(parsedTags.toSorted()) !== JSON.stringify(card.tags.toSorted());
     if (!changed && !tagsChanged) {
       setError('No changes detected — modify at least one field or tag.');
       return;
@@ -95,7 +97,7 @@ export function CardEditor({ card, canSuggest, busy, onSubmit, onCancel }: Props
           const normalizedName = name.toLowerCase();
 
           return (
-            <div className="card-editor-field" key={`${name}-${i}`}>
+            <div className="card-editor-field" key={`${editorId}-${name}`}>
               <label htmlFor={fieldId}>{name}</label>
               {(normalizedName === 'front' || normalizedName === 'back') && (
                 <FormattingToolbar textareaId={fieldId} />

@@ -259,7 +259,7 @@ export function DeckSettingsView({
           <button className="button secondary" onClick={createShareLink} disabled={!canReview || shareLoading}>
             {primaryShareLink ? 'Create another share link' : 'Create share link'}
           </button>
-          {shareLoading ? <p className="settings-note" role="status">Checking share links...</p> : null}
+          {shareLoading ? <p className="settings-note" role="status">Checking share links…</p> : null}
           {shareError ? (
             <p className="settings-note error">
               {shareError}
@@ -288,6 +288,7 @@ export function DeckSettingsView({
                 checked={Boolean(aiSettings[option.key])}
                 disabled={!canReview || aiLoading || aiSaving}
                 onChange={(event) => updateAiSetting(option.key, event.target.checked)}
+                aria-label={option.label}
               />
               <span>
                 <strong>{option.label}</strong>
@@ -295,8 +296,8 @@ export function DeckSettingsView({
               </span>
             </label>
           ))}
-          {aiLoading ? <p className="settings-note" role="status">Loading AI settings...</p> : null}
-          {aiSaving ? <p className="settings-note" role="status">Saving AI settings...</p> : null}
+          {aiLoading ? <p className="settings-note" role="status">Loading AI settings…</p> : null}
+          {aiSaving ? <p className="settings-note" role="status">Saving AI settings…</p> : null}
           {aiError ? <p className="settings-note error">{aiError}</p> : null}
           {!canReview ? <p className="settings-note">Owner access is required to change AI settings.</p> : null}
           <small>AI features are off by default. Provider keys and generation stay on the server.</small>

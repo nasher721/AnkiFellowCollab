@@ -105,7 +105,7 @@ function renderTypeAnswer(value: string, context: TemplateContext): string {
 }
 
 function applyFieldReference(ref: string, context: TemplateContext): string {
-  const parts = ref.split(':').map((part) => part.trim()).filter(Boolean);
+  const parts = ref.split(':').flatMap((part) => { const trimmed = part.trim(); return trimmed ? [trimmed] : []; });
   if (!parts.length) return '';
   const fieldName = parts[parts.length - 1];
   const filters = parts.slice(0, -1).map((filter) => filter.toLowerCase());
@@ -182,12 +182,10 @@ function buildFallbackHtml(card: DeckCard, deckId: string, side: 'front' | 'back
     const key = keys[0] ?? 'Front';
     return renderMediaHtml(deckId, card.fields[key] ?? card.fields['Front'] ?? '');
   }
-  return keys
-    .map((k, i) => {
-      const html = renderMediaHtml(deckId, card.fields[k] ?? '');
-      return i === 0 ? html : `<hr id="answer">${html}`;
-    })
-    .join('');
+  return keys.reduce((acc, k, i) => {
+    const html = renderMediaHtml(deckId, card.fields[k] ?? '');
+    return acc + (i === 0 ? html : `<hr id="answer">${html}`);
+  }, '');
 }
 
 export function renderCardHtml(

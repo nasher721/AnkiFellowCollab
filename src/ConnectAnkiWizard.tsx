@@ -124,9 +124,9 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
   const [diagnosticArtifact, setDiagnosticArtifact] = useState<AiArtifact | null>(null);
   const [diagnosticLoading, setDiagnosticLoading] = useState(false);
   const [diagnosticMessage, setDiagnosticMessage] = useState('');
+  const proofState = useMemo(() => syncProofFromState(currentState, selectedDeckId), [currentState, selectedDeckId]);
   const [proofLoading, setProofLoading] = useState(false);
   const [proofError, setProofError] = useState('');
-  const [proofState, setProofState] = useState(() => syncProofFromState(currentState, selectedDeckId));
   const [showManualToken, setShowManualToken] = useState(false);
   const localDeckNameForConfig = localDeckName.trim();
   const activeSetupError = structuredSetupError || structuredErrorFromDownload(downloadAvailability);
@@ -184,10 +184,6 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
       setSelectedDeckId(availableDecks[0]?.id || '');
     }
   }, [availableDecks, selectedDeckId]);
-
-  useEffect(() => {
-    setProofState(syncProofFromState(currentState, selectedDeckId));
-  }, [currentState, selectedDeckId]);
 
   const generateToken = useCallback(async () => {
     setGenerating(true);
@@ -257,8 +253,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
     setProofLoading(true);
     setProofError('');
     try {
-      const nextState = await onRefreshState();
-      setProofState(syncProofFromState(nextState, selectedDeckId));
+      await onRefreshState();
       setStructuredSetupError(null);
       setDiagnosticArtifact(null);
       setDiagnosticMessage('');
@@ -328,7 +323,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
               <p>Download the DeckBridge Sync add-on and open the file in Anki to install it.</p>
               <div className="wizard-status-card">
                 {versionLoading ? (
-                  <span>Checking add-on package...</span>
+                  <span>Checking add-on package…</span>
                 ) : versionError ? (
                   <span className="wizard-error-inline">Version unavailable: {versionError}</span>
                 ) : addonVersion ? (
@@ -338,7 +333,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
                   </>
                 ) : null}
                 {downloadLoading ? (
-                  <span>Checking download availability...</span>
+                  <span>Checking download availability…</span>
                 ) : downloadAvailability?.available ? (
                   <span className="wizard-success-inline">Download package is ready.</span>
                 ) : downloadAvailability ? (
@@ -417,7 +412,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
               {error && <div className="wizard-error">{error}</div>}
               {diagnosticPanel}
               <div className="wizard-field-row">
-                <label>Platform URL</label>
+                <span>Platform URL</span>
                 <div className="wizard-copy-row">
                   <code className="wizard-token-display">{platformUrl}</code>
                   <button className="btn btn-secondary btn-sm" onClick={() => copyText(platformUrl)}>
@@ -426,7 +421,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
                 </div>
               </div>
               <div className="wizard-field-row">
-                <label>API Token</label>
+                <span>API Token</span>
                 <div className="wizard-copy-row">
                   <code className="wizard-token-display">{createdToken.raw}</code>
                   <button className="btn btn-secondary btn-sm" onClick={copyToken}>
@@ -435,7 +430,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
                 </div>
               </div>
               <p className="wizard-warning">
-                Save this token — it won't be shown again.
+                Save this token; it won't be shown again.
               </p>
               <div className="wizard-test-card">
                 <strong>Test token from this browser</strong>
@@ -518,7 +513,7 @@ export function ConnectAnkiWizard({ decks, platformUrl, currentState, onRefreshS
                 </select>
               </div>
               <div className="wizard-field-row">
-                <label>Deck ID (paste into add-on)</label>
+                <span>Deck ID (paste into add-on)</span>
                 <div className="wizard-copy-row">
                   <code className="wizard-token-display">{selectedDeckId}</code>
                   <button

@@ -670,7 +670,7 @@ function AuthScreen({
             <em>No silent overwrites</em>
           </div>
           <div className="auth-lattice">
-            {Array.from({ length: 28 }, (_, index) => <i key={index} />)}
+            {Array.from({ length: 28 }, (_, index) => <i key={`lattice-${index}`} />)}
           </div>
         </div>
         <div className="auth-copy">
@@ -1721,18 +1721,18 @@ function ModelTemplateEditor({ deck, busy, onSave }: {
     [deck.cards, selectedModel]
   );
   const previewCard = modelCards[0];
-  const [templateFront, setTemplateFront] = useState('');
-  const [templateBack, setTemplateBack] = useState('');
-  const [modelCss, setModelCss] = useState('');
+  const [templateForm, setTemplateForm] = useState({ templateFront: '', templateBack: '', modelCss: '' });
 
   useEffect(() => {
     if (!models.includes(selectedModel)) setSelectedModel(models[0] || '');
   }, [models, selectedModel]);
 
   useEffect(() => {
-    setTemplateFront(previewCard?.templateFront || '{{Front}}');
-    setTemplateBack(previewCard?.templateBack || '{{FrontSide}}<hr id=answer>{{Back}}');
-    setModelCss(previewCard?.modelCss || '');
+    setTemplateForm({
+      templateFront: previewCard?.templateFront || '{{Front}}',
+      templateBack: previewCard?.templateBack || '{{FrontSide}}<hr id=answer>{{Back}}',
+      modelCss: previewCard?.modelCss || ''
+    });
   }, [previewCard?.id, previewCard?.templateFront, previewCard?.templateBack, previewCard?.modelCss]);
 
   if (!models.length || !previewCard) {
@@ -1741,9 +1741,7 @@ function ModelTemplateEditor({ deck, busy, onSave }: {
 
   const draftCard: DeckCard = {
     ...previewCard,
-    templateFront,
-    templateBack,
-    modelCss,
+    ...templateForm,
     renderedFront: undefined,
     renderedBack: undefined
   };
@@ -1764,17 +1762,17 @@ function ModelTemplateEditor({ deck, busy, onSave }: {
         <section>
           <label>
             <span>Front template</span>
-            <textarea value={templateFront} onChange={(event) => setTemplateFront(event.target.value)} rows={8} spellCheck={false} />
+            <textarea value={templateForm.templateFront} onChange={(event) => setTemplateForm((prev) => ({ ...prev, templateFront: event.target.value }))} rows={8} spellCheck={false} />
           </label>
           <label>
             <span>Back template</span>
-            <textarea value={templateBack} onChange={(event) => setTemplateBack(event.target.value)} rows={8} spellCheck={false} />
+            <textarea value={templateForm.templateBack} onChange={(event) => setTemplateForm((prev) => ({ ...prev, templateBack: event.target.value }))} rows={8} spellCheck={false} />
           </label>
           <label>
             <span>Model CSS</span>
-            <textarea value={modelCss} onChange={(event) => setModelCss(event.target.value)} rows={8} spellCheck={false} />
+            <textarea value={templateForm.modelCss} onChange={(event) => setTemplateForm((prev) => ({ ...prev, modelCss: event.target.value }))} rows={8} spellCheck={false} />
           </label>
-          <button className="button primary" disabled={busy} onClick={() => onSave(selectedModel, { templateFront, templateBack, modelCss })}>
+          <button className="button primary" disabled={busy} onClick={() => onSave(selectedModel, templateForm)}>
             Save template
           </button>
         </section>
@@ -2440,16 +2438,16 @@ export default function App() {
     if (!tag.trim() || !activeDeck || !state) return;
     const trimmed = tag.trim();
     const cards = activeDeck.cards.filter((c) => selectedCardIds.has(c.id));
-    const tasks = cards
-      .filter((c) => !c.tags.includes(trimmed))
-      .map((c) => api.createSuggestion({
+    const tasks = cards.flatMap((c) =>
+      !c.tags.includes(trimmed) ? [api.createSuggestion({
         deckId: activeDeck.id,
         cardId: c.id,
         authorId: state.user?.id || 'you',
         reason: `Bulk: add tag "${trimmed}"`,
         proposedFields: c.fields,
         proposedTags: [...c.tags, trimmed],
-      }));
+      })] : []
+    );
     if (tasks.length === 0) { setBulkAction(null); setBulkTagInput(''); return; }
     refreshWith(
       Promise.all(tasks).then(() => api.deck(activeDeck.id)),
@@ -2464,16 +2462,16 @@ export default function App() {
     if (!tag.trim() || !activeDeck || !state) return;
     const trimmed = tag.trim();
     const cards = activeDeck.cards.filter((c) => selectedCardIds.has(c.id));
-    const tasks = cards
-      .filter((c) => c.tags.includes(trimmed))
-      .map((c) => api.createSuggestion({
+    const tasks = cards.flatMap((c) =>
+      c.tags.includes(trimmed) ? [api.createSuggestion({
         deckId: activeDeck.id,
         cardId: c.id,
         authorId: state.user?.id || 'you',
         reason: `Bulk: remove tag "${trimmed}"`,
         proposedFields: c.fields,
         proposedTags: c.tags.filter((t) => t !== trimmed),
-      }));
+      })] : []
+    );
     if (tasks.length === 0) { setBulkAction(null); setBulkTagInput(''); return; }
     refreshWith(
       Promise.all(tasks).then(() => api.deck(activeDeck.id)),
@@ -2768,7 +2766,7 @@ export default function App() {
     return (
       <div className="loading">
         <div className="loading-spinner" aria-hidden="true" />
-        <strong>Loading DeckBridge...</strong>
+        <strong>Loading DeckBridge…</strong>
         {apiHealth === 'down' ? <span>API bridge is unavailable. Start it with npm run dev:server.</span> : null}
       </div>
     );
@@ -3219,7 +3217,6 @@ export default function App() {
                         value={bulkTagInput}
                         onChange={(e) => setBulkTagInput(e.target.value)}
                         onKeyDown={(e) => { if (e.key === 'Enter') handleBulkTagAdd(bulkTagInput); if (e.key === 'Escape') setBulkAction(null); }}
-                        autoFocus
                       />
                       <button className="button primary" onClick={() => handleBulkTagAdd(bulkTagInput)}>Apply</button>
                       <button className="button secondary" onClick={() => { setBulkAction(null); setBulkTagInput(''); }}>Cancel</button>
@@ -3233,7 +3230,6 @@ export default function App() {
                         value={bulkTagInput}
                         onChange={(e) => setBulkTagInput(e.target.value)}
                         onKeyDown={(e) => { if (e.key === 'Enter') handleBulkTagRemove(bulkTagInput); if (e.key === 'Escape') setBulkAction(null); }}
-                        autoFocus
                       />
                       <button className="button primary" onClick={() => handleBulkTagRemove(bulkTagInput)}>Apply</button>
                       <button className="button secondary" onClick={() => { setBulkAction(null); setBulkTagInput(''); }}>Cancel</button>
@@ -3331,6 +3327,7 @@ export default function App() {
                       <span
                         className={`checkbox${selectedCardIds.has(card.id) ? ' checked' : ''}`}
                         onClick={(e) => { e.stopPropagation(); toggleCardSelection(card.id); }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); toggleCardSelection(card.id); } }}
                         aria-label={selectedCardIds.has(card.id) ? 'Deselect card' : 'Select card'}
                         role="checkbox"
                         aria-checked={selectedCardIds.has(card.id)}

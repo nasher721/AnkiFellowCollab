@@ -99,8 +99,10 @@ export function buildStudyQueue(
 ): string[] {
   const now = new Date();
   return cardIds
-    .map((id) => all[id] ?? initialProgress(id))
-    .filter((p) => new Date(p.nextDue) <= now)
+    .flatMap((id) => {
+      const p = all[id] ?? initialProgress(id);
+      return new Date(p.nextDue) <= now ? [p] : [];
+    })
     .sort((a, b) => new Date(a.nextDue).getTime() - new Date(b.nextDue).getTime())
     .map((p) => p.cardId);
 }

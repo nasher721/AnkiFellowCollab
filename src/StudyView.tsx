@@ -101,6 +101,8 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
   const sessionSavedRef = useRef(false);
   const startedAtRef = useRef(new Date().toISOString());
   const startTime = useRef(Date.now());
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -171,13 +173,14 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
       easy: s.easy + (rating === 4 ? 1 : 0),
     }));
 
-    // If "Again", push card to end of queue
     if (rating === 1) {
       setQueue(nextQueue);
     }
 
     advanceQueue(nextQueue, queueIndex);
   }, [currentCardId, allProgress, queue, deckId, advanceQueue, queueIndex]);
+  const rateRef = useRef(rate);
+  rateRef.current = rate;
 
   const skipCard = useCallback(() => {
     if (!currentCardId) return;
@@ -187,6 +190,8 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
     }));
     advanceQueue(queue, queueIndex);
   }, [currentCardId, advanceQueue, queue, queueIndex]);
+  const skipCardRef = useRef(skipCard);
+  skipCardRef.current = skipCard;
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -228,24 +233,24 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
         return;
       }
       if (e.key === 'Escape') {
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || isInteractiveShortcutTarget(e.target)) return;
       if (e.key === ' ' || e.key === 'Enter') {
         if (!flipped) setFlipped(true);
-        else rate(3);
+        else rateRef.current(3);
       } else if (flipped) {
-        if (e.key === '1') rate(1);
-        else if (e.key === '2') rate(2);
-        else if (e.key === '3') rate(3);
-        else if (e.key === '4') rate(4);
+        if (e.key === '1') rateRef.current(1);
+        else if (e.key === '2') rateRef.current(2);
+        else if (e.key === '3') rateRef.current(3);
+        else if (e.key === '4') rateRef.current(4);
       }
-      if (e.key === 's') skipCard();
+      if (e.key === 's') skipCardRef.current();
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [flipped, rate, skipCard, onClose]);
+  }, [flipped]);
 
   const elapsed = Math.round((Date.now() - startTime.current) / 1000);
   const totalRated = sessionStats.again + sessionStats.hard + sessionStats.good + sessionStats.easy;
@@ -289,7 +294,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
       <div className="study-overlay" role="dialog" aria-modal="true" aria-labelledby="study-title">
         <div className="study-panel study-done" ref={panelRef} tabIndex={-1}>
           <h2 id="study-title">Loading study session</h2>
-          <p className="study-empty-msg">Checking current card progress...</p>
+          <p className="study-empty-msg">Checking current card progress…</p>
           <button className="btn btn-ghost" onClick={onClose} aria-label="Cancel study session">Cancel</button>
         </div>
       </div>
@@ -314,7 +319,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
             <span className="rating-skipped">Skipped: {sessionStats.skipped}</span>
           </div>
           {queue.length === 0 && <p className="study-empty-msg">No cards are due right now. Come back tomorrow!</p>}
-          <button className="btn btn-primary" onClick={onClose}>Done</button>
+          <button className="btn btn-primary" onClick={onClose}>Close session</button>
         </div>
       </div>
     );
@@ -326,7 +331,7 @@ export function StudyView({ deckId, cards, modeLabel = 'Due cards', onClose }: P
         <div className="study-panel study-done" ref={panelRef} tabIndex={-1}>
           <h2 id="study-title" className="sr-only">Study mode</h2>
           <p>Session complete!</p>
-          <button className="btn btn-primary" onClick={onClose}>Done</button>
+          <button className="btn btn-primary" onClick={onClose}>Close session</button>
         </div>
       </div>
     );

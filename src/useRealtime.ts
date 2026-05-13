@@ -38,7 +38,7 @@ export function useRealtime({ supabase, deckId, onSuggestionChange, onCommentCha
     channelRef.current = channel;
 
     return () => {
-      supabase.removeChannel(channel);
+      channel.unsubscribe();
       channelRef.current = null;
     };
   }, [supabase, deckId, enabled, onSuggestionChange, onCommentChange]);

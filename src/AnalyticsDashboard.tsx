@@ -18,7 +18,7 @@ function AnalyticsSkeleton() {
       </div>
       <div className="analytics-grid" aria-hidden="true">
         {Array.from({ length: 6 }, (_, index) => (
-          <div className="analytics-card analytics-skeleton-card" key={index}>
+          <div className="analytics-card analytics-skeleton-card" key={`skeleton-${index}`}>
             <span className="analytics-skeleton analytics-skeleton-value" />
             <span className="analytics-skeleton analytics-skeleton-label" />
           </div>
@@ -74,11 +74,12 @@ export function AnalyticsDashboard({ deckId, deckName, isOwner, onSetVisibility,
   return (
     <div className="analytics-view">
       <div className="analytics-header">
-        <h2>{deckName} — Analytics</h2>
+        <h2>{deckName}: Analytics</h2>
         {isOwner && (
           <div className="visibility-control">
-            <label>Visibility</label>
+            <label htmlFor="analytics-visibility">Visibility</label>
             <select
+              id="analytics-visibility"
               value={currentVisibility}
               onChange={(e) => handleVisibility(e.target.value as 'public' | 'private' | 'unlisted')}
               disabled={settingVisibility}
