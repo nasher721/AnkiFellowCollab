@@ -943,6 +943,30 @@ export function createApp(options = {}) {
     }
   });
 
+  app.use('/api/auth/proxy', async (req, res, next) => {
+    try {
+      const supabaseUrlVal = options.supabaseUrl || process.env.SUPABASE_URL;
+      const anonKeyVal = anonKey;
+      if (!supabaseUrlVal || !anonKeyVal) fail(503, 'auth_proxy_unavailable', 'Auth service is not configured');
+      const targetUrl = `${supabaseUrlVal}/auth/v1${req.url}`;
+      const headers = { apikey: anonKeyVal, 'content-type': 'application/json' };
+      if (req.headers.authorization) headers.authorization = req.headers.authorization;
+      const fetchOptions = { method: req.method, headers };
+      if (req.method !== 'GET' && req.method !== 'HEAD' && req.body && Object.keys(req.body).length > 0) {
+        fetchOptions.body = JSON.stringify(req.body);
+      }
+      const upstream = await fetch(targetUrl, fetchOptions);
+      const contentType = upstream.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        res.status(upstream.status).json(await upstream.json());
+      } else {
+        res.status(upstream.status).set('content-type', contentType).send(await upstream.text());
+      }
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post('/api/anki/login', async (req, res, next) => {
     try {
       if (!auth.supabase || !loginClient) fail(501, 'anki_login_unavailable', 'Anki login requires Supabase auth');
