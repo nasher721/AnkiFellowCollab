@@ -945,7 +945,7 @@ export function createApp(options = {}) {
 
   app.use('/api/auth/proxy', async (req, res, next) => {
     try {
-      const supabaseUrlVal = options.supabaseUrl || process.env.SUPABASE_URL;
+      const supabaseUrlVal = options.supabaseUrl || process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
       const anonKeyVal = anonKey;
       if (!supabaseUrlVal || !anonKeyVal) fail(503, 'auth_proxy_unavailable', 'Auth service is not configured');
       const targetUrl = `${supabaseUrlVal}/auth/v1${req.url}`;

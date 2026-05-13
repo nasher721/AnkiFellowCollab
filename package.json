@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "dev:server": "node server/index.mjs",
+    "dev:server": "node --env-file .env server/index.mjs",
     "dev:web": "vite --host 0.0.0.0",
     "build": "tsc && vite build",
     "start": "NODE_ENV=production node server/index.mjs",

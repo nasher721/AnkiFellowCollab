@@ -494,6 +494,9 @@ export function authMessage(error: unknown, mode: 'sign-in' | 'sign-up') {
   const status = authErrorStatus(error);
   const lower = message.toLowerCase();
   const fingerprint = `${lower} ${status ?? ''}`.trim();
+  if (fingerprint.includes('auth service is not configured')) {
+    return 'DeckBridge authentication is not configured on this server. Contact the administrator or try again later.';
+  }
   if (
     fingerprint.includes('timed out') ||
     fingerprint.includes('failed to fetch') ||
