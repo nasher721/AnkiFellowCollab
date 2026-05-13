@@ -90,8 +90,21 @@ function useDebounce<T>(value: T, delay: number): T {
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+
+function supabaseAuthFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
+  if (supabaseUrl && urlStr.startsWith(supabaseUrl + '/auth/v1/')) {
+    const suffix = urlStr.slice(supabaseUrl.length + '/auth/v1'.length);
+    return fetch('/api/auth/proxy' + suffix, init);
+  }
+  return fetch(input, init);
+}
+
 const supabase = supabaseUrl && supabaseAnonKey
-  ? createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true } })
+  ? createClient(supabaseUrl, supabaseAnonKey, {
+      auth: { persistSession: true, autoRefreshToken: true },
+      global: { fetch: supabaseAuthFetch }
+    })
   : null;
 export const AUTH_REQUEST_TIMEOUT_MS = 20000;
 
