@@ -116,19 +116,6 @@ async function countRows(supabase, table, deckId, apply = (query) => query) {
   return count || 0;
 }
 
-async function summarizeDeckRow(supabase, deck) {
-  const [cardCount, pendingSuggestions] = await Promise.all([
-    countRows(supabase, 'cards', deck.id),
-    countRows(supabase, 'suggestions', deck.id, (query) => query.eq('status', 'pending'))
-  ]);
-  return {
-    ...summarizeDeck(toDeck(deck), []),
-    cardCount,
-    noteCount: cardCount,
-    pendingSuggestions
-  };
-}
-
 function toCard(row) {
   return {
     id: row.id,
@@ -501,19 +488,24 @@ async function fetchSyncCandidateCards(supabase, deckId, incomingCards) {
 }
 
 async function upsertSyncCards(supabase, deckId, cards) {
-  for (const chunk of chunked(cards, SYNC_CARD_WRITE_CHUNK_SIZE)) {
-    const { error } = await supabase.from('cards')
-      .upsert(chunk.map((card) => cardRowForUpsert(deckId, card)), { onConflict: 'id' });
-    if (error) throw error;
+  const chunks = chunked(cards, SYNC_CARD_WRITE_CHUNK_SIZE);
+  const results = await Promise.all(chunks.map((chunk) =>
+    supabase.from('cards').upsert(chunk.map((card) => cardRowForUpsert(deckId, card)), { onConflict: 'id' })
+  ));
+  for (const result of results) {
+    if (result.error) throw result.error;
   }
 }
 
 async function upsertManagedFileRows(supabase, rows) {
   if (!rows.length) return;
-  const { error } = await supabase
-    .from('deck_files')
-    .upsert(rows, { onConflict: 'storage_bucket,storage_path' });
-  if (error) throw error;
+  const chunks = chunked(rows, SYNC_CARD_WRITE_CHUNK_SIZE);
+  const results = await Promise.all(chunks.map((chunk) =>
+    supabase.from('deck_files').upsert(chunk, { onConflict: 'storage_bucket,storage_path' })
+  ));
+  for (const result of results) {
+    if (result.error) throw result.error;
+  }
 }
 
 function boundedPositiveInteger(value, fallback, minimum = 1, maximum = 100) {
@@ -616,7 +608,11 @@ function emptyState(user) {
 export function createSupabaseRepository(options = {}) {
   const url = requireEnv('SUPABASE_URL', options.supabaseUrl || process.env.SUPABASE_URL);
   const serviceKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY', options.supabaseServiceRoleKey || process.env.SUPABASE_SERVICE_ROLE_KEY);
-  const supabase = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  const supabase = createClient(url, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    cache: new Map(),
+    global: { headers: { 'x-connection-tag': 'deckbridge-api' } }
+  });
 
   async function assertMembership(userId, deckId, minimumRole = 'viewer') {
     const { data, error } = await supabase
@@ -709,7 +705,24 @@ export function createSupabaseRepository(options = {}) {
       if (!ids.length) return [];
       const { data: decks, error: deckError } = await supabase.from('decks').select('*').in('id', ids);
       if (deckError) throw deckError;
-      return Promise.all((decks || []).map((deck) => summarizeDeckRow(supabase, deck)));
+      const [cardCounts, pendingCounts] = await Promise.all([
+        Promise.all(ids.map(async (deckId) => {
+          const { count } = await supabase.from('cards').select('id', { count: 'exact', head: true }).eq('deck_id', deckId);
+          return { deckId, count: count || 0 };
+        })),
+        Promise.all(ids.map(async (deckId) => {
+          const { count } = await supabase.from('suggestions').select('id', { count: 'exact', head: true }).eq('deck_id', deckId).eq('status', 'pending');
+          return { deckId, count: count || 0 };
+        }))
+      ]);
+      const cardCountMap = new Map(cardCounts.map((r) => [r.deckId, r.count]));
+      const pendingCountMap = new Map(pendingCounts.map((r) => [r.deckId, r.count]));
+      return (decks || []).map((deck) => ({
+        ...summarizeDeck(toDeck(deck), []),
+        cardCount: cardCountMap.get(deck.id) || 0,
+        noteCount: cardCountMap.get(deck.id) || 0,
+        pendingSuggestions: pendingCountMap.get(deck.id) || 0
+      }));
     },
 
     async deleteDeck(user, deckId) {
@@ -1153,7 +1166,6 @@ export function createSupabaseRepository(options = {}) {
     async bulkDecideSuggestions(user, deckId, suggestionIds, decision) {
       if (new Set(suggestionIds).size !== suggestionIds.length) fail(400, 'duplicate_suggestion_ids', 'suggestionIds must be unique');
       const reviewedAt = nowIso();
-      let acceptedCardIds = [];
       if (decision === 'accepted') {
         const { data: acceptedRows, error: acceptedRowsError } = await supabase
           .from('suggestions')
@@ -1161,10 +1173,46 @@ export function createSupabaseRepository(options = {}) {
           .eq('deck_id', deckId)
           .in('id', suggestionIds);
         if (acceptedRowsError) throw acceptedRowsError;
-        acceptedCardIds = (acceptedRows || []).map((row) => row.card_id).filter(Boolean);
-        const uniqueCardIds = [...new Set(acceptedCardIds)];
-        for (const cid of uniqueCardIds) {
-          await this.createCardVersion(user, deckId, cid);
+        const uniqueCardIds = [...new Set((acceptedRows || []).map((row) => row.card_id).filter(Boolean))];
+        if (uniqueCardIds.length) {
+          const snapshotRows = uniqueCardIds.map((cardId) => ({
+            card_id: cardId,
+            deck_id: deckId,
+            snapshot: {},
+            created_by: user?.name || 'system'
+          }));
+          const { data: currentCards, error: cardsError } = await supabase
+            .from('cards').select('id, fields, tags, model_name, modified_at').in('id', uniqueCardIds);
+          if (cardsError) throw cardsError;
+          const filledSnapshots = (currentCards || []).map((card) => ({
+            card_id: card.id,
+            deck_id: deckId,
+            snapshot: { fields: card.fields, tags: card.tags, modelName: card.model_name, modifiedAt: card.modified_at },
+            created_by: user?.name || 'system'
+          }));
+          if (filledSnapshots.length) {
+            const { error: versionError } = await supabase.from('deck_card_versions').insert(filledSnapshots);
+            if (versionError) throw versionError;
+          }
+          await Promise.all(uniqueCardIds.map(async (cardId) => {
+            const { data: card } = await supabase.from('cards').select('id, fields, tags, modified_at').eq('id', cardId).single();
+            if (!card) return;
+            const { data: suggestion } = await supabase.from('suggestions')
+              .select('proposed_fields, proposed_tags')
+              .eq('deck_id', deckId)
+              .eq('card_id', cardId)
+              .in('id', suggestionIds)
+              .eq('status', 'pending')
+              .single();
+            if (!suggestion) return;
+            await supabase.from('cards').update({
+              fields: { ...card.fields, ...(suggestion.proposed_fields || {}) },
+              tags: suggestion.proposed_tags || card.tags,
+              modified_at: nowIso(),
+              modified_by: user.name
+            }).eq('id', cardId);
+          }));
+          await this.markCardEmbeddingsStale(user, deckId, uniqueCardIds);
         }
       }
       const { error } = await supabase.rpc('bulk_decide_suggestions', {
@@ -1177,7 +1225,6 @@ export function createSupabaseRepository(options = {}) {
         p_reviewed_at: reviewedAt
       });
       if (error) throw error;
-      if (acceptedCardIds.length) await this.markCardEmbeddingsStale(user, deckId, acceptedCardIds);
       return getDeckRows(user, deckId);
     },
 
@@ -1642,16 +1689,18 @@ export function createSupabaseRepository(options = {}) {
           await supabase.from('sync_conflicts').delete().eq('deck_id', deck.id);
         }
         if (result.conflicts.length) {
-          const { error } = await supabase.from('sync_conflicts').insert(result.conflicts.map((conflict) => ({
-            id: conflict.id,
-            deck_id: deck.id,
-            card_id: conflict.cardId,
-            source: conflict.source,
-            detected_at: conflict.detectedAt,
-            incoming_fields: conflict.incomingFields,
-            local_fields: conflict.localFields
-          })));
-          if (error) throw error;
+          const conflictChunks = chunked(result.conflicts, SYNC_CARD_WRITE_CHUNK_SIZE);
+          await Promise.all(conflictChunks.map((conflictChunk) =>
+            supabase.from('sync_conflicts').insert(conflictChunk.map((conflict) => ({
+              id: conflict.id,
+              deck_id: deck.id,
+              card_id: conflict.cardId,
+              source: conflict.source,
+              detected_at: conflict.detectedAt,
+              incoming_fields: conflict.incomingFields,
+              local_fields: conflict.localFields
+            })))
+          ));
         }
         const deckUpdate = {
           last_synced_at: result.syncedAt,

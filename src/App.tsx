@@ -1,4 +1,4 @@
-import { type FormEvent, type ReactNode, useMemo, useState, useEffect } from 'react';
+import { type FormEvent, type ReactNode, useMemo, useState, useEffect, useCallback, memo } from 'react';
 import { api } from './api';
 import type { AiArtifact, AppState, Deck, DeckCard, Suggestion } from './types';
 import {
@@ -41,7 +41,7 @@ export type { OwnerAttentionItem, OwnerReviewQueueItem, SyncHealth, WorkbenchRai
 
 
 
-function Icon({ name }: { name: 'upload' | 'download' | 'sync' | 'search' | 'filter' | 'cards' | 'users' | 'check' | 'x' | 'spark' | 'moon' | 'sun' }) {
+const Icon = memo(function Icon({ name }: { name: 'upload' | 'download' | 'sync' | 'search' | 'filter' | 'cards' | 'users' | 'check' | 'x' | 'spark' | 'moon' | 'sun' }) {
   const paths = {
     upload: 'M12 3v12m0-12 4 4m-4-4-4 4M4 17v3h16v-3',
     download: 'M12 3v12m0 0 4-4m-4 4-4-4M4 17v3h16v-3',
@@ -61,7 +61,7 @@ function Icon({ name }: { name: 'upload' | 'download' | 'sync' | 'search' | 'fil
       <path d={paths[name]} fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
     </svg>
   );
-}
+});
 
 function AuthScreen({
   authMode,
@@ -177,9 +177,9 @@ function AuthScreen({
   );
 }
 
-function EmptyState({ message }: { message: string }) {
+const EmptyState = memo(function EmptyState({ message }: { message: string }) {
   return <div className="empty-state">{message}</div>;
-}
+});
 
 function SyncHealthStrip({ health, onAction }: { health: SyncHealth; onAction: (action: SyncHealth['primaryAction']) => void }) {
   return (
@@ -448,12 +448,12 @@ const REVIEW_BUCKETS: Array<{ key: ReviewBucket; label: string; detail: string }
   { key: 'conflict', label: 'Sync conflict', detail: 'Blocks push' }
 ];
 
-function ReviewRiskBadge({ label }: { label: ReviewRiskLabel }) {
+const ReviewRiskBadge = memo(function ReviewRiskBadge({ label }: { label: ReviewRiskLabel }) {
   const className = label.toLowerCase().replace(/[^a-z]+/g, '-').replace(/-$/, '');
   return <span className={`review-risk-badge review-risk-badge--${className}`}>{label}</span>;
-}
+});
 
-function ReviewQualitySummary({
+const ReviewQualitySummary = memo(function ReviewQualitySummary({
   activeBucket,
   counts,
   onBucketChange
@@ -479,9 +479,9 @@ function ReviewQualitySummary({
       ))}
     </div>
   );
-}
+});
 
-function ReviewQueueList({
+const ReviewQueueList = memo(function ReviewQueueList({
   items,
   selectedItem,
   suggestions,
@@ -549,7 +549,7 @@ function ReviewQueueList({
       })}
     </div>
   );
-}
+});
 
 function formatFieldValue(value?: string) {
   const trimmed = (value || '').trim();
