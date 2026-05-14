@@ -1,3 +1,4 @@
+import compression from 'compression';
 import cors from 'cors';
 import crypto, { randomUUID } from 'node:crypto';
 import express from 'express';
@@ -6,6 +7,7 @@ import multer from 'multer';
 import path from 'node:path';
 import { createClient } from '@supabase/supabase-js';
 import { createAuth } from './auth.mjs';
+import { createTimingMiddleware } from './timing.mjs';
 import { requireContributor, requireEditor, requireOwner, requireReviewer, resolveSuggestionDeck } from './rbac.mjs';
 import { canonicalCardInputHash, canonicalCardText, cleanText, cosineSimilarity, deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeMediaUploadFiles, normalizeParsedDeck, normalizeSuggestionInput, nowIso, safeMediaMimeType, tagList } from './domain.mjs';
 import { AppError, errorPayload, fail } from './errors.mjs';
@@ -825,12 +827,15 @@ export function createApp(options = {}) {
     res.set({
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
-      'Permissions-Policy': 'camera=(), microphone=(), geolocation=()'
+      'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+      'Cache-Control': 'no-store'
     });
     next();
   });
+  app.use(compression({ level: 6, threshold: 1024 }));
   app.use(cors({ origin: corsOrigin }));
   app.use(express.json({ limit: '20mb' }));
+  app.use(createTimingMiddleware());
   app.use('/downloads', express.static(paths().exportsDir, {
     dotfiles: 'deny',
     fallthrough: false,
@@ -854,9 +859,17 @@ export function createApp(options = {}) {
     }
   }
 
+  app.post('/api/analytics/web-vitals', (req, res) => {
+    if (process.env.DECKBRIDGE_WEB_VITALS_LOG) {
+      console.log('[web-vitals]', JSON.stringify(req.body));
+    }
+    res.status(204).end();
+  });
+
   app.get('/api/health', async (_req, res, next) => {
     try {
       await ensureDataDirs();
+      res.set('Cache-Control', 'public, max-age=30');
       res.json({
         ok: true,
         repository: repository.constructor?.name || 'DeckBridgeRepository',
@@ -869,6 +882,7 @@ export function createApp(options = {}) {
 
   app.get('/api/ai/status', async (_req, res, next) => {
     try {
+      res.set('Cache-Control', 'private, max-age=60');
       res.json(await aiGateway.capabilities());
     } catch (error) {
       next(error);
@@ -982,6 +996,7 @@ export function createApp(options = {}) {
   app.get('/api/addon/version', async (_req, res, next) => {
     try {
       const manifest = JSON.parse(await fs.readFile(ADDON_MANIFEST_PATH, 'utf8'));
+      res.set('Cache-Control', 'public, max-age=300');
       res.json({
         version: manifest.version || '0.0.0',
         minVersion: resolveManifestMinVersion(manifest),
