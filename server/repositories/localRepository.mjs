@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { applySuggestion, buildAddonSyncResult, mergeAddonCards, nowIso, summarizeDeck } from '../domain.mjs';
+import { applySuggestion, buildAddonSyncResult, cosineSimilarity, mergeAddonCards, nowIso, snapshotCard, summarizeDeck } from '../domain.mjs';
 import { fail } from '../errors.mjs';
 import { loadState, saveState } from '../store.mjs';
+import { encodeCursor, decodeCursor } from '../pagination.mjs';
 
 const roleRank = { viewer: 0, contributor: 1, reviewer: 2, editor: 3, owner: 4 };
 const DEFAULT_AI_SETTINGS = Object.freeze({
@@ -85,6 +86,7 @@ function ensureCollections(state) {
   state.comments ||= [];
   state.aiArtifacts ||= [];
   state.cardEmbeddings ||= [];
+  state.cardVersions ||= [];
   state.aiDuplicateLinks ||= [];
   state.sync ||= {};
   state.sync.lastAddonSync ??= null;
@@ -128,6 +130,24 @@ function mergeConflicts(existing = [], incoming = []) {
 
 function countReceivedMedia(syncInput = {}) {
   return Object.keys(syncInput.media || {}).length;
+}
+
+function createCardVersionInState(state, user, deckId, cardId) {
+  ensureCollections(state);
+  const deck = state.decks.find((d) => d.id === deckId);
+  if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+  const card = deck.cards.find((c) => c.id === cardId);
+  if (!card) fail(404, 'card_not_found', 'Card not found');
+  const version = {
+    id: `ver-${randomUUID()}`,
+    cardId,
+    deckId,
+    snapshot: snapshotCard(card),
+    createdAt: nowIso(),
+    createdBy: user?.name || 'system'
+  };
+  state.cardVersions.push(version);
+  return version;
 }
 
 function addMediaReceivedToSyncProof(syncInput, lastAddonSync, previousResult = null) {
@@ -563,6 +583,7 @@ export function createLocalRepository() {
       if (suggestion.status !== 'pending') fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');
       const { deck } = requireRole(state, user.id, suggestion.deckId, 'reviewer');
       if (decision === 'accepted') {
+        createCardVersionInState(state, user, suggestion.deckId, suggestion.cardId);
         applySuggestion(deck, suggestion, user.name);
         markEmbeddingsStaleInState(state, deck.id, [suggestion.cardId]);
         const collaborator = state.collaborators.find((item) => item.id === suggestion.authorId);
@@ -593,6 +614,7 @@ export function createLocalRepository() {
       const reviewedAt = nowIso();
       for (const suggestion of selected) {
         if (decision === 'accepted') {
+          createCardVersionInState(state, user, suggestion.deckId, suggestion.cardId);
           applySuggestion(deck, suggestion, user.name);
           markEmbeddingsStaleInState(state, deck.id, [suggestion.cardId]);
           const collaborator = state.collaborators.find((item) => item.id === suggestion.authorId);
@@ -610,6 +632,79 @@ export function createLocalRepository() {
       });
       await saveState(state);
       return this.getDeckState(user, deck.id);
+    },
+
+    async createCardVersion(user, deckId, cardId) {
+      const state = await loadState();
+      ensureCollections(state);
+      const deck = state.decks.find((d) => d.id === deckId);
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+      const card = deck.cards.find((c) => c.id === cardId);
+      if (!card) fail(404, 'card_not_found', 'Card not found');
+      const version = {
+        id: `ver-${randomUUID()}`,
+        cardId,
+        deckId,
+        snapshot: snapshotCard(card),
+        createdAt: nowIso(),
+        createdBy: user?.name || 'system'
+      };
+      state.cardVersions.push(version);
+      await saveState(state);
+      return version;
+    },
+
+    async listCardVersions(user, deckId, cardId) {
+      const state = await loadState();
+      const versions = (state.cardVersions || [])
+        .filter((v) => v.cardId === cardId && v.deckId === deckId)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .map((v) => ({ id: v.id, createdAt: v.createdAt, createdBy: v.createdBy }));
+      return { versions };
+    },
+
+    async getCardVersion(user, deckId, cardId, versionId) {
+      const state = await loadState();
+      const version = (state.cardVersions || [])
+        .find((v) => v.id === versionId && v.cardId === cardId && v.deckId === deckId);
+      if (!version) fail(404, 'version_not_found', 'Version not found');
+      return { version };
+    },
+
+    async rollbackCardToVersion(user, deckId, cardId, versionId) {
+      const state = await loadState();
+      ensureCollections(state);
+      const { deck } = requireRole(state, user.id, deckId, 'editor');
+      const card = deck.cards.find((c) => c.id === cardId);
+      if (!card) fail(404, 'card_not_found', 'Card not found');
+      const version = (state.cardVersions || [])
+        .find((v) => v.id === versionId && v.cardId === cardId && v.deckId === deckId);
+      if (!version) fail(404, 'version_not_found', 'Version not found');
+
+      if (card.modifiedAt > version.createdAt) {
+        fail(409, 'card_modified_after_version', 'Card was modified after this version was created');
+      }
+
+      const priorSnapshot = snapshotCard(card);
+      const priorVersion = {
+        id: `ver-${randomUUID()}`,
+        cardId,
+        deckId,
+        snapshot: priorSnapshot,
+        createdAt: nowIso(),
+        createdBy: user?.name || 'system'
+      };
+
+      const snap = version.snapshot;
+      card.fields = { ...(snap.fields || {}) };
+      if (snap.tags) card.tags = [...snap.tags];
+      if (snap.modelName) card.modelName = snap.modelName;
+      card.modifiedAt = nowIso();
+      card.modifiedBy = user.name || 'rollback';
+
+      state.cardVersions.push(priorVersion);
+      await saveState(state);
+      return { card, priorVersion: { id: priorVersion.id } };
     },
 
     async listSuggestionComments(user, suggestionId) {
@@ -1065,6 +1160,53 @@ export function createLocalRepository() {
           createdBy: link.createdBy,
           createdAt: link.createdAt
         }));
+    },
+
+    async listCardsCursor(deckId, { cursor, limit }) {
+      const state = await loadState();
+      const deck = state.decks.find((d) => d.id === deckId);
+      if (!deck) return { cards: [], nextCursor: null };
+
+      const sorted = [...deck.cards].sort((a, b) => {
+        const aTime = a.createdAt || a.modifiedAt || '';
+        const bTime = b.createdAt || b.modifiedAt || '';
+        if (aTime < bTime) return -1;
+        if (aTime > bTime) return 1;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      });
+
+      let startIndex = 0;
+      if (cursor) {
+        const decoded = decodeCursor(cursor);
+        if (decoded) {
+          startIndex = sorted.findIndex((card) => card.id === decoded.id) + 1;
+          if (startIndex <= 0) startIndex = sorted.length;
+        }
+      }
+
+      const page = sorted.slice(startIndex, startIndex + limit);
+      const nextCursor = page.length === limit ? encodeCursor(page[page.length - 1]) : null;
+      return { cards: page, nextCursor };
+    },
+
+    async findSimilarCards(user, deckId, sourceCardId, embedding, { topK = 5, threshold = 0.7 } = {}) {
+      const state = await loadState();
+      const deck = state.decks.find((d) => d.id === deckId);
+      if (!deck) return { similar: [] };
+
+      const similar = (state.cardEmbeddings || [])
+        .filter((e) => e.deckId === deckId && e.status === 'active' && e.cardId !== sourceCardId && Array.isArray(e.embedding) && e.embedding.length > 0)
+        .map((e) => {
+          const card = deck.cards.find((c) => c.id === e.cardId);
+          const score = cosineSimilarity(embedding, e.embedding);
+          return { card: card || null, score, cardId: e.cardId };
+        })
+        .filter((item) => item.score >= threshold && item.card)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topK)
+        .map((item) => ({ card: item.card, score: Math.round(item.score * 10000) / 10000 }));
+
+      return { similar };
     },
 
     async listActivity(user, deckId, filters = {}) {

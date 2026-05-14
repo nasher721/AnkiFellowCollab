@@ -840,6 +840,15 @@ export function summarizeDeck(deck, suggestions = []) {
   };
 }
 
+export function snapshotCard(card) {
+  return {
+    fields: { ...(card.fields || {}) },
+    tags: [...(card.tags || [])],
+    modelName: card.modelName || card.type || 'Basic',
+    modifiedAt: card.modifiedAt
+  };
+}
+
 export function applySuggestion(deck, suggestion, actorName = 'You') {
   const card = deck.cards.find((item) => item.id === suggestion.cardId);
   if (!card) throw new Error('Card not found for suggestion');
@@ -871,4 +880,27 @@ export function deckToCreateDeckJson(deck) {
       rendered_back: card.renderedBack
     }))
   };
+}
+
+export function normalizeVector(value) {
+  return (Array.isArray(value) ? value : [])
+    .map(Number)
+    .filter((item) => Number.isFinite(item));
+}
+
+export function cosineSimilarity(left, right) {
+  const a = normalizeVector(left);
+  const b = normalizeVector(right);
+  const length = Math.min(a.length, b.length);
+  if (!length) return 0;
+  let dot = 0;
+  let leftNorm = 0;
+  let rightNorm = 0;
+  for (let index = 0; index < length; index += 1) {
+    dot += a[index] * b[index];
+    leftNorm += a[index] ** 2;
+    rightNorm += b[index] ** 2;
+  }
+  if (!leftNorm || !rightNorm) return 0;
+  return Math.max(0, Math.min(1, dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm))));
 }

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { createClient } from '@supabase/supabase-js';
 import { createAuth } from './auth.mjs';
 import { requireContributor, requireEditor, requireOwner, requireReviewer, resolveSuggestionDeck } from './rbac.mjs';
-import { canonicalCardInputHash, canonicalCardText, cleanText, deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeMediaUploadFiles, normalizeParsedDeck, normalizeSuggestionInput, nowIso, safeMediaMimeType, tagList } from './domain.mjs';
+import { canonicalCardInputHash, canonicalCardText, cleanText, cosineSimilarity, deckToCreateDeckJson, normalizeAddonDeckCreateInput, normalizeAddonSyncInput, normalizeMediaUploadFiles, normalizeParsedDeck, normalizeSuggestionInput, nowIso, safeMediaMimeType, tagList } from './domain.mjs';
 import { AppError, errorPayload, fail } from './errors.mjs';
 import { checkAnki, pullDeck, pushDeck } from './ankiConnect.mjs';
 import { createApkg, parseApkg } from './ankiPackage.mjs';
@@ -18,6 +18,7 @@ import { createRateLimiters } from './rateLimits.mjs';
 import { ensureDataDirs, loadState, paths, saveState } from './store.mjs';
 import { createUserToken, listUserTokens, revokeUserToken } from './tokens.mjs';
 import { assertValidDeckId, assertValidEmail, assertValidSessionRole, deckIdFromRequest, hashSecret } from './security.mjs';
+import { encodeCursor, decodeCursor, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from './pagination.mjs';
 
 const ADDON_PACKAGE_FILENAME = 'deckbridge-sync.ankiaddon';
 const ADDON_MANIFEST_PATH = path.resolve(process.cwd(), 'addons', 'deckbridge_sync', 'manifest.json');
@@ -564,29 +565,6 @@ function normalizeCompatSuggestionStatusFilter(status) {
 
 function isRecoverableAiError(error) {
   return typeof error?.code === 'string' && error.code.startsWith('ai_');
-}
-
-function normalizeVector(value) {
-  return (Array.isArray(value) ? value : [])
-    .map(Number)
-    .filter((item) => Number.isFinite(item));
-}
-
-function cosineSimilarity(left, right) {
-  const a = normalizeVector(left);
-  const b = normalizeVector(right);
-  const length = Math.min(a.length, b.length);
-  if (!length) return 0;
-  let dot = 0;
-  let leftNorm = 0;
-  let rightNorm = 0;
-  for (let index = 0; index < length; index += 1) {
-    dot += a[index] * b[index];
-    leftNorm += a[index] ** 2;
-    rightNorm += b[index] ** 2;
-  }
-  if (!leftNorm || !rightNorm) return 0;
-  return Math.max(0, Math.min(1, dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm))));
 }
 
 function relationshipForScore(score) {
@@ -1469,6 +1447,30 @@ export function createApp(options = {}) {
     }
   });
 
+  app.post('/api/decks/:deckId/cards/similar', validateDeckIdParam, auth.requireUser, requireContributor(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      const { cardId, topK = 5, threshold = 0.7 } = req.body || {};
+      if (!cardId) fail(400, 'cardId_required', 'cardId is required');
+
+      const deckState = await repository.getDeckState(req.user, deckId);
+      const deck = (deckState.decks || []).find((item) => item.id === deckId);
+      if (!deck) fail(404, 'deck_not_found', 'Deck not found');
+      const card = (deck.cards || []).find((c) => c.id === cardId);
+      if (!card) fail(404, 'card_not_found', 'Card not found');
+
+      const embeddings = await repository.listCardEmbeddings(req.user, deckId, { status: 'active', cardId });
+      let embedding = embeddings?.[0]?.embedding;
+
+      if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
+        return res.json({ similar: [] });
+      }
+
+      const result = await repository.findSimilarCards(req.user, deckId, cardId, embedding, { topK, threshold });
+      res.json(result);
+    } catch (error) { next(error); }
+  });
+
   app.get('/api/state', auth.requireUser, async (req, res, next) => {
     try {
       const deckId = req.query.deckId ? assertValidDeckId(req.query.deckId) : undefined;
@@ -1638,6 +1640,47 @@ export function createApp(options = {}) {
     } catch (error) {
       next(error);
     }
+  });
+
+  // Card version history
+  app.post('/api/decks/:deckId/cards/:cardId/versions', validateDeckIdParam, auth.requireUser, requireContributor(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      res.json(await repository.createCardVersion(req.user, deckId, req.params.cardId));
+    } catch (error) { next(error); }
+  });
+
+  app.get('/api/decks/:deckId/cards/:cardId/versions', validateDeckIdParam, auth.requireUser, requireContributor(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      res.json(await repository.listCardVersions(req.user, deckId, req.params.cardId));
+    } catch (error) { next(error); }
+  });
+
+  app.get('/api/decks/:deckId/cards/:cardId/versions/:versionId', validateDeckIdParam, auth.requireUser, requireContributor(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      res.json(await repository.getCardVersion(req.user, deckId, req.params.cardId, req.params.versionId));
+    } catch (error) { next(error); }
+  });
+
+  app.post('/api/decks/:deckId/cards/:cardId/rollback', validateDeckIdParam, auth.requireUser, requireEditor(auth.supabase), async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      const { version } = req.query;
+      if (!version) fail(400, 'version_required', 'version query param is required');
+      res.json(await repository.rollbackCardToVersion(req.user, deckId, req.params.cardId, version));
+    } catch (error) { next(error); }
+  });
+
+  // Cursor-paginated card list
+  app.get('/api/decks/:deckId/cards', validateDeckIdParam, auth.requireUser, async (req, res, next) => {
+    try {
+      const deckId = deckIdFromRequest(req);
+      const params = parsePaginationParams(req.query, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+      const result = await repository.listCardsCursor(deckId, params);
+      res.json(result);
+    } catch (err) { next(err); }
   });
 
   // Bulk delete cards (owner only)

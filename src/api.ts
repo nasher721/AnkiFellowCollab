@@ -1,4 +1,4 @@
-import type { AiArtifact, AiArtifactGenerationResult, AiCapabilityStatus, AiCardEmbeddingResult, AiQualityPulse, AiRelatedCardsResult, AiSuggestionBriefResult, ApiError, AppState, DeckAiSettings, DemoRole, StorageAsset, StructuredSetupError, User, DeckMember, DeckSummary, StudySession } from './types';
+import type { AiArtifact, AiArtifactGenerationResult, AiCapabilityStatus, AiCardEmbeddingResult, AiQualityPulse, AiRelatedCardsResult, AiSuggestionBriefResult, ApiError, AppState, CursorPage, DeckAiSettings, DeckCard, DemoRole, StorageAsset, StructuredSetupError, User, DeckMember, DeckSummary, StudySession } from './types';
 
 let authToken: string | null = null;
 
@@ -46,7 +46,8 @@ async function jsonRequest<T>(url: string, options: RequestInit = {}): Promise<T
   };
   const response = await fetch(url, {
     ...options,
-    headers
+    headers,
+    signal: options.signal
   });
 
   if (!response.ok) {
@@ -223,6 +224,17 @@ export interface Template {
   fields: { name: string; description: string }[];
   sampleCards: Record<string, string>[];
   createdAt: string;
+}
+
+export type ApiRequest<T> = { promise: Promise<T>; cancel: () => void };
+
+export function createCancellableFetch<T>(url: string, options?: RequestInit): ApiRequest<T> {
+  const controller = new AbortController();
+  const promise = jsonRequest<T>(url, { ...options, signal: controller.signal });
+  return {
+    promise,
+    cancel: () => controller.abort()
+  };
 }
 
 export const api = {
@@ -583,5 +595,14 @@ export const api = {
       jsonRequest<{ deckId: string; role: string }>(`/api/invites/${token}/accept`, { method: 'POST' }),
     preview: (token: string) =>
       jsonRequest<{ invite: InvitePreview }>(`/api/invites/${token}`)
+  },
+  cards: {
+    list: (deckId: string, params: { cursor?: string | null; limit?: number } = {}) => {
+      const query = new URLSearchParams();
+      if (params.cursor) query.set('cursor', params.cursor);
+      if (params.limit) query.set('limit', String(params.limit));
+      const suffix = query.toString() ? `?${query.toString()}` : '';
+      return createCancellableFetch<CursorPage<DeckCard>>(`/api/decks/${deckId}/cards${suffix}`);
+    }
   }
 };

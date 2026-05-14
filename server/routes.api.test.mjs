@@ -2482,3 +2482,225 @@ test('activity filtering and summary exports return backend-only artifacts', asy
     .expect(200);
   assert.match(html.text, /DeckBridge summary/);
 });
+
+test('card version history: create, list metadata, get snapshot', async () => {
+  const { app } = await createTestApp();
+
+  const created = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/cards/card-anca/versions'), 'you', 'You')
+    .expect(200);
+  assert.ok(created.body.id);
+  assert.equal(created.body.cardId, 'card-anca');
+  assert.equal(created.body.deckId, 'deck-demo-zanki');
+  assert.ok(created.body.snapshot);
+  assert.deepEqual(created.body.snapshot.fields, {
+    Front: 'Microscopic polyangiitis is most strongly associated with which autoantibody?',
+    Back: 'p-ANCA (myeloperoxidase)'
+  });
+  assert.deepEqual(created.body.snapshot.tags, ['Rheumatology', 'Step2']);
+
+  const listed = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/cards/card-anca/versions'), 'you', 'You')
+    .expect(200);
+  assert.ok(listed.body.versions.length >= 1);
+  assert.equal(listed.body.versions[0].id, created.body.id);
+  assert.equal(listed.body.versions[0].createdBy, 'You');
+  assert.ok(listed.body.versions[0].createdAt);
+
+  const got = await asUser(request(app)
+    .get(`/api/decks/deck-demo-zanki/cards/card-anca/versions/${created.body.id}`), 'you', 'You')
+    .expect(200);
+  assert.ok(got.body.version.snapshot);
+  assert.deepEqual(got.body.version.snapshot.fields, created.body.snapshot.fields);
+});
+
+test('auto-versioning on suggestion accept creates a card version', async () => {
+  const { app } = await createTestApp();
+
+  const stateBefore = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki'), 'you', 'You')
+    .expect(200);
+  const versionsBefore = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/cards/card-anca/versions'), 'you', 'You')
+    .expect(200);
+  const countBefore = versionsBefore.body.versions.length;
+
+  await asUser(request(app)
+    .post('/api/suggestions/sugg-anca/decision')
+    .send({ decision: 'accepted' }), 'you', 'You')
+    .expect(200);
+
+  const versionsAfter = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/cards/card-anca/versions'), 'you', 'You')
+    .expect(200);
+  assert.equal(versionsAfter.body.versions.length, countBefore + 1);
+  const version = versionsAfter.body.versions[0];
+  assert.ok(version.id);
+  assert.equal(version.createdBy, 'You');
+});
+
+test('rollback restores card fields and creates prior snapshot', async () => {
+  const { app } = await createTestApp();
+
+  const created = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/cards/card-hpylori/versions'), 'you', 'You')
+    .expect(200);
+  const originalSnapshot = created.body.snapshot;
+
+  const stateBefore = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki'), 'you', 'You')
+    .expect(200);
+  const cardBefore = stateBefore.body.decks[0].cards.find((c) => c.id === 'card-hpylori');
+
+  const rollback = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/cards/card-hpylori/rollback')
+    .query({ version: created.body.id }), 'you', 'You')
+    .expect(200);
+  assert.ok(rollback.body.card);
+  assert.ok(rollback.body.priorVersion);
+  assert.ok(rollback.body.priorVersion.id);
+
+  const stateAfter = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki'), 'you', 'You')
+    .expect(200);
+  const cardAfter = stateAfter.body.decks[0].cards.find((c) => c.id === 'card-hpylori');
+  assert.deepEqual(cardAfter.fields, cardBefore.fields);
+  assert.deepEqual(cardAfter.tags, cardBefore.tags);
+});
+
+test('non-editor receives 403 on rollback', async () => {
+  const { app, dataDir } = await createTestApp();
+  await seedLocalState(dataDir, (state) => {
+    state.collaborators.find((p) => p.id === 'maya').role = 'contributor';
+  });
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/cards/card-anca/versions'), 'maya', 'Maya Patel')
+    .expect(200);
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/cards/card-anca/rollback')
+    .query({ version: 'dummy' }), 'maya', 'Maya Patel')
+    .expect(403);
+});
+
+test('card modified after version receives 409 on rollback', async () => {
+  const { app, dataDir } = await createTestApp();
+  await seedLocalState(dataDir, (state) => {
+    const card = state.decks[0].cards.find((c) => c.id === 'card-anca');
+    card.modifiedAt = new Date(Date.now() + 86400000).toISOString();
+  });
+
+  const created = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/cards/card-anca/versions'), 'you', 'You')
+    .expect(200);
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/cards/card-anca/rollback')
+    .query({ version: created.body.id }), 'you', 'You')
+    .expect(409);
+});
+
+test('find similar cards returns results sorted by score descending', async () => {
+  const { app } = await createTestApp({
+    aiGateway: {
+      async embed(input) {
+        const text = Array.isArray(input) ? input[0] : input;
+        const embedding = text.includes('H. pylori')
+          ? [0.96, 0.04, 0]
+          : text.includes('Vitamin B12')
+            ? [0, 1, 0]
+            : text.includes('ADH')
+              ? [0, 0.2, 0.8]
+              : [1, 0, 0];
+        return { model: 'test-embedding-model', dimensions: 3, embeddings: [embedding], inputCount: 1 };
+      }
+    }
+  });
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ embeddings: true }), 'you', 'You').expect(200);
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/cards/embed')
+    .send({ cardIds: ['card-anca', 'card-hpylori', 'card-b12', 'card-endo'] }), 'you', 'You').expect(201);
+
+  const result = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/cards/similar')
+    .send({ cardId: 'card-anca', topK: 5, threshold: 0.1 }), 'you', 'You').expect(200);
+
+  assert.ok(Array.isArray(result.body.similar));
+  assert.ok(result.body.similar.length > 0);
+  for (let i = 1; i < result.body.similar.length; i++) {
+    assert.ok(result.body.similar[i - 1].score >= result.body.similar[i].score);
+  }
+  assert.ok(result.body.similar.every((item) => item.card && typeof item.score === 'number'));
+});
+
+test('find similar cards returns empty results when no embeddings exist', async () => {
+  const { app } = await createTestApp();
+
+  const result = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/cards/similar')
+    .send({ cardId: 'card-anca', topK: 5, threshold: 0.7 }), 'you', 'You').expect(200);
+
+  assert.deepEqual(result.body, { similar: [] });
+});
+
+test('find similar cards threshold filtering works', async () => {
+  const { app } = await createTestApp({
+    aiGateway: {
+      async embed(input) {
+        const text = Array.isArray(input) ? input[0] : input;
+        const embedding = text.includes('H. pylori')
+          ? [0.96, 0.04, 0]
+          : text.includes('Vitamin B12')
+            ? [0, 1, 0]
+            : [1, 0, 0];
+        return { model: 'test-embedding-model', dimensions: 3, embeddings: [embedding], inputCount: 1 };
+      }
+    }
+  });
+
+  await asUser(request(app)
+    .patch('/api/decks/deck-demo-zanki/ai/settings')
+    .send({ embeddings: true }), 'you', 'You').expect(200);
+
+  await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/ai/cards/embed')
+    .send({ cardIds: ['card-anca', 'card-hpylori', 'card-b12'] }), 'you', 'You').expect(201);
+
+  const permissive = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/cards/similar')
+    .send({ cardId: 'card-anca', topK: 5, threshold: 0.1 }), 'you', 'You').expect(200);
+  assert.ok(permissive.body.similar.length > 0, 'should return results with low threshold');
+
+  const strict = await asUser(request(app)
+    .post('/api/decks/deck-demo-zanki/cards/similar')
+    .send({ cardId: 'card-anca', topK: 5, threshold: 1.0 }), 'you', 'You').expect(200);
+  assert.equal(strict.body.similar.length, 0, 'threshold of 1.0 should filter all results');
+});
+
+test('cursor pagination for cards returns non-overlapping pages', async () => {
+  const { app } = await createTestApp();
+
+  const page1 = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/cards')
+    .query({ limit: 3 }), 'you', 'You')
+    .expect(200);
+
+  assert.equal(page1.body.cards.length, 3);
+  assert.ok(page1.body.nextCursor, 'should have a next cursor');
+
+  const page2 = await asUser(request(app)
+    .get('/api/decks/deck-demo-zanki/cards')
+    .query({ limit: 3, cursor: page1.body.nextCursor }), 'you', 'You')
+    .expect(200);
+
+  assert.ok(page2.body.cards.length > 0, 'page 2 should have cards');
+  const page1Ids = new Set(page1.body.cards.map((c) => c.id));
+  const overlap = page2.body.cards.filter((c) => page1Ids.has(c.id));
+  assert.equal(overlap.length, 0, 'no overlapping card IDs between pages');
+  assert.equal(page2.body.nextCursor, null, 'last page has no next cursor');
+});

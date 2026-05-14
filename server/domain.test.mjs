@@ -13,6 +13,7 @@ import {
   normalizeMediaUploadFiles,
   normalizeSuggestionInput,
   normalizeParsedDeck,
+  snapshotCard,
   summarizeDeck
 } from './domain.mjs';
 
@@ -257,4 +258,26 @@ test('add-on conflict detection preserves existing same-name media', () => {
   assert.equal(result.stats.conflicts, 1);
   assert.equal(deck.media['image.png'].sha256, mediaAsset(originalBytes).sha256);
   assert.equal(result.conflicts[0].incomingMedia['image.png'].sha256, mediaAsset(incomingBytes).sha256);
+});
+
+test('snapshotCard returns fields, tags, modelName, modifiedAt and omits rendered artifacts', () => {
+  const card = {
+    id: 'card-test',
+    fields: { Front: 'Question', Back: 'Answer' },
+    tags: ['tag1', 'tag2'],
+    modelName: 'Basic',
+    type: 'Basic',
+    modifiedAt: '2026-05-13T00:00:00.000Z',
+    renderedFront: '<div>rendered</div>',
+    renderedBack: '<div>rendered</div>',
+    mediaRefs: ['image.png']
+  };
+  const snap = snapshotCard(card);
+  assert.deepEqual(snap.fields, { Front: 'Question', Back: 'Answer' });
+  assert.deepEqual(snap.tags, ['tag1', 'tag2']);
+  assert.equal(snap.modelName, 'Basic');
+  assert.equal(snap.modifiedAt, '2026-05-13T00:00:00.000Z');
+  assert.equal(snap.renderedFront, undefined);
+  assert.equal(snap.renderedBack, undefined);
+  assert.equal(snap.mediaRefs, undefined);
 });

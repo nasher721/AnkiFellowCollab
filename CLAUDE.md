@@ -84,6 +84,10 @@ Key route groups:
 - `POST /api/decks/:id/export` — generates/signs an export file
 - `POST /api/decks/:id/sync/cards` — Anki add-on push endpoint; runs `mergeAddonCards`
 - `POST /api/decks/:id/sync/conflicts` — records conflicts detected by the local add-on
+- `GET /api/decks/:deckId/cards` — cursor-based card pagination
+- `POST /api/decks/:deckId/cards/:cardId/versions` — create card version
+- `POST /api/decks/:deckId/cards/:cardId/rollback` — rollback to version
+- `POST /api/decks/:deckId/cards/similar` — semantic similarity search
 - Legacy `GET|POST /api/anki/*` — proxies to AnkiConnect at `http://localhost:8765` for local dev
 
 ### Frontend
@@ -96,9 +100,14 @@ React 19 SPA built with Vite. Key source files:
 | `src/api.ts` | Typed fetch wrapper; sets Bearer token from Supabase session |
 | `src/types.ts` | All shared TypeScript types (Deck, Card, Suggestion, etc.) |
 | `src/sm2.ts` | Client-side SM-2 spaced-repetition; progress stored in `localStorage` and synced to server |
-| `src/useRealtime.ts` | Supabase Realtime hook; subscribes to `suggestions` and `comments` table changes for a deck |
+| `src/useRealtime.ts` | Supabase Realtime hook; subscribes to `suggestions`, `comments`, and `cards` table changes for a deck |
 
 Views: `StudyView`, `CardEditor`, `DiscoverView`, `AnalyticsDashboard`, `TemplateGallery`, `ConflictResolution`, `SuggestionDiscussion`, `ConnectAnkiWizard`, `ActivityTimeline`, `NotificationsBell`.
+
+Hooks:
+- `useDeckOperations` — deck operations hook
+- `useReviewQueue` — review queue hook
+- `useSyncState` — sync state hook
 
 The Vite dev server proxies `/api` and `/downloads` to `http://localhost:4175`.
 

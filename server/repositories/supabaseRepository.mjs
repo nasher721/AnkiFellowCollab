@@ -2,8 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { createClient } from '@supabase/supabase-js';
-import { applySuggestion, buildAddonSyncResult, mergeAddonCards, nowIso, summarizeDeck } from '../domain.mjs';
+import { applySuggestion, buildAddonSyncResult, cosineSimilarity, mergeAddonCards, nowIso, snapshotCard, summarizeDeck } from '../domain.mjs';
 import { fail } from '../errors.mjs';
+import { encodeCursor, decodeCursor } from '../pagination.mjs';
 
 export const roleRank = {
   viewer: 0,
@@ -150,7 +151,8 @@ function toCard(row) {
     modelCss: row.model_css || undefined,
     renderedFront: row.rendered_front || undefined,
     renderedBack: row.rendered_back || undefined,
-    clozeOrd: row.cloze_ord ?? undefined
+    clozeOrd: row.cloze_ord ?? undefined,
+    createdAt: row.created_at
   };
 }
 
@@ -929,6 +931,42 @@ export function createSupabaseRepository(options = {}) {
       return (data || []).map(toCardEmbedding);
     },
 
+    async findSimilarCards(user, deckId, sourceCardId, embedding, { topK = 5, threshold = 0.7 } = {}) {
+      if (!embedding || !Array.isArray(embedding) || embedding.length === 0) return { similar: [] };
+
+      const vectorStr = `[${embedding.join(',')}]`;
+
+      const { data, error } = await this.supabase.rpc('find_similar_cards', {
+        p_deck_id: deckId,
+        p_source_card_id: sourceCardId,
+        p_embedding: vectorStr,
+        p_top_k: topK,
+        p_threshold: threshold
+      });
+
+      if (error) {
+        const { data: cards } = await this.supabase
+          .from('cards')
+          .select('*')
+          .eq('deck_id', deckId)
+          .not('embedding', 'is', null);
+
+        const similar = (cards || [])
+          .filter((c) => c.id !== sourceCardId)
+          .map((c) => ({
+            card: toCard(c),
+            score: cosineSimilarity(embedding, c.embedding || [])
+          }))
+          .filter((item) => item.score >= threshold)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, topK);
+
+        return { similar };
+      }
+
+      return { similar: (data || []).map((row) => ({ card: toCard(row), score: row.similarity })) };
+    },
+
     async markCardEmbeddingsStale(user, deckId, cardIds = [], minimumRole = 'owner') {
       await assertMembership(user.id, deckId, minimumRole);
       const ids = (Array.isArray(cardIds) ? cardIds : [cardIds]).filter(Boolean).map(String);
@@ -1081,6 +1119,7 @@ export function createSupabaseRepository(options = {}) {
       if (suggestion.status !== 'pending') fail(409, 'suggestion_reviewed', 'Suggestion has already been reviewed');
       await assertMembership(user.id, suggestion.deck_id, 'reviewer');
       if (decision === 'accepted') {
+        await this.createCardVersion(user, suggestion.deck_id, suggestion.card_id);
         const { data: card, error: cardError } = await supabase.from('cards').select(CARD_COLUMNS).eq('id', suggestion.card_id).single();
         if (cardError || !card) fail(404, 'card_not_found', 'Card not found');
         const nextCard = applySuggestion(toDeck({ id: suggestion.deck_id, name: '', imported_at: nowIso() }, [toCard(card)]), toSuggestion(suggestion), user.name);
@@ -1123,6 +1162,10 @@ export function createSupabaseRepository(options = {}) {
           .in('id', suggestionIds);
         if (acceptedRowsError) throw acceptedRowsError;
         acceptedCardIds = (acceptedRows || []).map((row) => row.card_id).filter(Boolean);
+        const uniqueCardIds = [...new Set(acceptedCardIds)];
+        for (const cid of uniqueCardIds) {
+          await this.createCardVersion(user, deckId, cid);
+        }
       }
       const { error } = await supabase.rpc('bulk_decide_suggestions', {
         p_deck_id: deckId,
@@ -1419,6 +1462,31 @@ export function createSupabaseRepository(options = {}) {
       return (data || []).map(toShareLink);
     },
 
+    async listCardsCursor(deckId, { cursor, limit }) {
+      const { supabase } = this;
+      let query = supabase
+        .from('cards')
+        .select(CARD_COLUMNS)
+        .eq('deck_id', deckId)
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .limit(limit);
+
+      if (cursor) {
+        const decoded = decodeCursor(cursor);
+        if (decoded) {
+          query = query.or(`created_at.gt.${decoded.createdAt},and(created_at.eq.${decoded.createdAt},id.gt.${decoded.id})`);
+        }
+      }
+
+      const { data, error } = await query;
+      if (error) throw new Error(`listCardsCursor failed: ${error.message}`);
+
+      const cards = (data || []).map(toCard);
+      const nextCursor = cards.length === limit ? encodeCursor(cards[cards.length - 1]) : null;
+      return { cards, nextCursor };
+    },
+
     async listActivity(user, deckId, filters = {}) {
       await assertMembership(user.id, deckId);
       const limit = Math.min(Math.max(Number(filters.limit) || 50, 1), 200);
@@ -1436,6 +1504,93 @@ export function createSupabaseRepository(options = {}) {
       return (data || [])
         .map(toActivity)
         .filter((activity) => !kinds.length || kinds.includes(activity.kind));
+    },
+
+    async createCardVersion(user, deckId, cardId) {
+      const { data: cards, error: cardError } = await supabase.from('cards').select('*').eq('id', cardId).eq('deck_id', deckId).single();
+      if (cardError || !cards) fail(404, 'card_not_found', 'Card not found');
+      const snapshot = snapshotCard(cards);
+      const { data, error } = await supabase.from('deck_card_versions').insert({
+        card_id: cardId,
+        deck_id: deckId,
+        snapshot,
+        created_by: user?.name || 'system'
+      }).select().single();
+      if (error) throw new Error(`createCardVersion failed: ${error.message}`);
+      return data;
+    },
+
+    async listCardVersions(user, deckId, cardId) {
+      const { data, error } = await supabase
+        .from('deck_card_versions')
+        .select('id, created_at, created_by')
+        .eq('card_id', cardId)
+        .eq('deck_id', deckId)
+        .order('created_at', { ascending: false });
+      if (error) throw new Error(`listCardVersions failed: ${error.message}`);
+      return {
+        versions: (data || []).map((v) => ({
+          id: v.id,
+          createdAt: v.created_at,
+          createdBy: v.created_by
+        }))
+      };
+    },
+
+    async getCardVersion(user, deckId, cardId, versionId) {
+      const { data, error } = await supabase
+        .from('deck_card_versions')
+        .select('*')
+        .eq('id', versionId)
+        .eq('card_id', cardId)
+        .eq('deck_id', deckId)
+        .single();
+      if (error && error.code === 'PGRST116') fail(404, 'version_not_found', 'Version not found');
+      if (error) throw new Error(`getCardVersion failed: ${error.message}`);
+      return { version: { id: data.id, snapshot: data.snapshot } };
+    },
+
+    async rollbackCardToVersion(user, deckId, cardId, versionId) {
+      const member = await supabase.from('deck_members').select('role').eq('deck_id', deckId).eq('user_id', user.id).single();
+      if (!member || roleRank[member.data?.role] < roleRank.editor) {
+        fail(403, 'forbidden', 'Only editors can rollback cards');
+      }
+      const { data: version, error: versionError } = await supabase
+        .from('deck_card_versions')
+        .select('*')
+        .eq('id', versionId)
+        .eq('card_id', cardId)
+        .eq('deck_id', deckId)
+        .single();
+      if (versionError || !version) fail(404, 'version_not_found', 'Version not found');
+
+      const { data: card } = await supabase.from('cards').select('*').eq('id', cardId).single();
+      if (card && card.modified_at > version.created_at) {
+        fail(409, 'card_modified_after_version', 'Card was modified after this version was created');
+      }
+
+      const preSnapshot = snapshotCard(card);
+      await supabase.from('deck_card_versions').insert({
+        card_id: cardId,
+        deck_id: deckId,
+        snapshot: preSnapshot,
+        created_by: user?.name || 'system'
+      });
+
+      const snap = version.snapshot;
+      const { error: updateError } = await supabase
+        .from('cards')
+        .update({
+          fields: snap.fields,
+          tags: snap.tags,
+          modified_at: new Date().toISOString(),
+          modified_by: user.name || 'rollback'
+        })
+        .eq('id', cardId);
+      if (updateError) throw new Error(`rollback failed: ${updateError.message}`);
+
+      const { data: updatedCard } = await supabase.from('cards').select('*').eq('id', cardId).single();
+      return { card: updatedCard, priorVersion: { id: version.id } };
     },
 
     async recordSyncConflicts(user, deckId, conflicts) {

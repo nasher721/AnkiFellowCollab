@@ -352,6 +352,20 @@ export interface SyncState {
   }>;
 }
 
+export interface CardVersion {
+  id: string;
+  cardId: string;
+  deckId: string;
+  snapshot: Record<string, unknown>;
+  createdAt: string;
+  createdBy: string | null;
+}
+
+export interface CursorPage<T> {
+  cards: T[];
+  nextCursor: string | null;
+}
+
 export interface AppState {
   user?: User;
   memberships?: DeckMember[];
