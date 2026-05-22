@@ -10,6 +10,37 @@ This workspace can run DeckBridge as a local server backed by the Supabase stack
 
 The machine-local secrets and generated owner login are stored in `.env.local-server`, which is ignored by git.
 
+## TLS and network boundary
+
+For self-hosted access, publish only the TLS reverse proxy on ports `80` and `443`. Keep DeckBridge on `127.0.0.1:4175` and Supabase on `127.0.0.1:54321`; do not expose either service directly to the LAN or internet.
+
+Use Caddy to terminate TLS and proxy to DeckBridge:
+
+```powershell
+Copy-Item .\deploy\Caddyfile C:\Caddy\Caddyfile
+caddy validate --config C:\Caddy\Caddyfile
+caddy reload --config C:\Caddy\Caddyfile
+```
+
+Production environment values:
+
+```powershell
+DECKBRIDGE_HOST=127.0.0.1
+DECKBRIDGE_PORT=4175
+SUPABASE_URL=http://127.0.0.1:54321
+VITE_SUPABASE_URL=https://deckbridge.example.com
+CORS_ORIGIN=https://deckbridge.example.com
+```
+
+Windows firewall example:
+
+```powershell
+New-NetFirewallRule -DisplayName "DeckBridge TLS HTTP" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 80
+New-NetFirewallRule -DisplayName "DeckBridge TLS HTTPS" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 443
+New-NetFirewallRule -DisplayName "Block DeckBridge app direct" -Direction Inbound -Action Block -Protocol TCP -LocalPort 4175
+New-NetFirewallRule -DisplayName "Block Supabase direct" -Direction Inbound -Action Block -Protocol TCP -LocalPort 54321
+```
+
 ## Start after reboot
 
 1. Start Docker Desktop.
@@ -39,6 +70,15 @@ Invoke-RestMethod http://127.0.0.1:4175/api/health
 Invoke-WebRequest http://192.168.1.211:4175/
 Invoke-WebRequest http://192.168.1.211:54321/auth/v1/settings
 ```
+
+For self-hosted TLS, also verify:
+
+```powershell
+Invoke-WebRequest https://deckbridge.example.com/api/health
+Invoke-WebRequest http://deckbridge.example.com/api/health -MaximumRedirection 0
+```
+
+Expected: HTTPS health returns `200`; HTTP returns a `308` redirect to the HTTPS URL.
 
 ## Migrated owner login
 
