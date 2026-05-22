@@ -273,14 +273,14 @@ test('user token lockdown migration adds scoped active token controls', async ()
   assert.match(sql, /add column if not exists token_tail text/i);
   assert.match(sql, /create index if not exists user_tokens_active_idx/i);
   assert.match(sql, /where revoked_at is null/i);
-  assert.match(sql, /revoke insert, update on public\.user_tokens from anon, authenticated/i);
-  assert.match(sql, /grant select, delete on public\.user_tokens to authenticated/i);
+  assert.match(sql, /revoke insert, update, delete on public\.user_tokens from anon, authenticated/i);
+  assert.match(sql, /grant select on public\.user_tokens to authenticated/i);
   assert.match(sql, /create policy "tokens read own active"/i);
   assert.match(sql, /for select/i);
   assert.match(sql, /auth\.uid\(\)::text = user_id/i);
   assert.match(sql, /revoked_at is null/i);
   assert.match(sql, /expires_at is null or expires_at > now\(\)/i);
-  assert.match(sql, /create policy "tokens delete own active"/i);
+  assert.doesNotMatch(sql, /create policy "tokens delete own active"/i);
 });
 
 test('created add-on tokens default to 90 day expiry and store only token tail metadata', async () => {

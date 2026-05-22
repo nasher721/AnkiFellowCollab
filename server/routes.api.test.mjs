@@ -308,6 +308,18 @@ test('self-hosted app redirects plain http to canonical https origin', async () 
   assert.equal(response.headers.location, 'https://cards.example/api/health?probe=redirect');
 });
 
+test('self-hosted https redirect rejects protocol-relative open redirects', async () => {
+  const { app } = await createTestApp({
+    env: selfHostedEnv()
+  });
+
+  const response = await request(app)
+    .get('//evil.example/path?probe=redirect')
+    .expect(308);
+
+  assert.equal(response.headers.location, 'https://cards.example/evil.example/path?probe=redirect');
+});
+
 test('self-hosted app sends hsts csp and canonical cors behind tls proxy', async () => {
   const { app } = await createTestApp({
     env: selfHostedEnv(),

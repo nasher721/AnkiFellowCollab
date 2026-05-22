@@ -91,6 +91,17 @@ function cleanShortText(value, fallback, maxLength = 120) {
   return (text || fallback).slice(0, maxLength);
 }
 
+function canonicalHttpsRedirectTarget(originalUrl, publicUrl) {
+  const target = new URL(publicUrl);
+  const rawPath = typeof originalUrl === 'string' && originalUrl ? originalUrl : '/';
+  const safePath = `/${rawPath.replace(/^\/+/, '')}`;
+  const queryIndex = safePath.indexOf('?');
+  target.pathname = queryIndex >= 0 ? safePath.slice(0, queryIndex) : safePath;
+  target.search = queryIndex >= 0 ? safePath.slice(queryIndex) : '';
+  target.hash = '';
+  return target.toString();
+}
+
 function cleanIsoOrNull(value) {
   if (!value) return null;
   const date = new Date(value);
@@ -830,7 +841,7 @@ export function createApp(options = {}) {
   app.use((req, res, next) => {
     res.set(securityHeaders);
     if (selfHostSecurity.requireHttps && !req.secure && selfHostSecurity.publicUrl) {
-      res.redirect(308, new URL(req.originalUrl, selfHostSecurity.publicUrl).toString());
+      res.redirect(308, canonicalHttpsRedirectTarget(req.originalUrl || req.url, selfHostSecurity.publicUrl));
       return;
     }
     next();

@@ -11,8 +11,8 @@ create index if not exists user_tokens_active_idx
 create index if not exists user_tokens_token_tail_idx
   on public.user_tokens (token_tail);
 
-revoke insert, update on public.user_tokens from anon, authenticated;
-grant select, delete on public.user_tokens to authenticated;
+revoke insert, update, delete on public.user_tokens from anon, authenticated;
+grant select on public.user_tokens to authenticated;
 
 drop policy if exists "tokens read own" on public.user_tokens;
 drop policy if exists "tokens insert own" on public.user_tokens;
@@ -26,11 +26,4 @@ create policy "tokens read own active" on public.user_tokens
     auth.uid()::text = user_id
     and revoked_at is null
     and (expires_at is null or expires_at > now())
-  );
-
-create policy "tokens delete own active" on public.user_tokens
-  for delete
-  using (
-    auth.uid()::text = user_id
-    and revoked_at is null
   );
