@@ -1,6 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { onCLS, onFCP, onINP, onLCP, onTTFB } from 'web-vitals';
+import { onCLS, onFCP, onINP, onLCP, onTTFB, type Metric } from 'web-vitals';
 import App from './App';
 import './styles.css';
 
@@ -10,7 +10,7 @@ createRoot(document.getElementById('root')!).render(
   </StrictMode>
 );
 
-function reportWebVitals(metric) {
+function reportWebVitals(metric: Metric) {
   if (process.env.NODE_ENV === 'production') {
     const body = JSON.stringify({
       name: metric.name,

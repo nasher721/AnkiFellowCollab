@@ -234,7 +234,13 @@ async function createTokenTestApp(options = {}) {
         const authHeader = req.get('authorization') || '';
         const bearer = authHeader.match(/^Bearer\s+(.+)$/i)?.[1];
         if (bearer) {
-          const tokenUser = await resolveTokenUser(supabase, bearer);
+          const deckScope = req.params?.deckId
+            || (req.method === 'POST' && req.path === '/api/tokens'
+              ? req.body?.deckId || req.body?.deck_id || req.body?.deck_uuid
+              : undefined);
+          const tokenUser = await resolveTokenUser(supabase, bearer, {
+            deckId: deckScope
+          });
           if (!tokenUser) fail(401, 'unauthorized', 'Invalid or expired session');
           req.user = tokenUser;
         } else {
@@ -267,6 +273,21 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+function selfHostedEnv(overrides = {}) {
+  return {
+    DECKBRIDGE_SELF_HOSTED: 'true',
+    DECKBRIDGE_REQUIRE_HTTPS: 'true',
+    DECKBRIDGE_TRUST_PROXY: '1',
+    APP_PUBLIC_URL: 'https://cards.example',
+    CORS_ORIGIN: 'https://cards.example',
+    SUPABASE_URL: 'https://supabase.example',
+    SUPABASE_ANON_KEY: 'anon-key',
+    VITE_SUPABASE_ANON_KEY: 'anon-key',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+    ...overrides
+  };
+}
+
 async function seedLocalState(dataDir, mutator) {
   const state = createSeedState();
   mutator(state);
@@ -274,6 +295,49 @@ async function seedLocalState(dataDir, mutator) {
   await fs.writeFile(path.join(dataDir, 'state.json'), `${JSON.stringify(state, null, 2)}\n`, 'utf8');
   return state;
 }
+
+test('self-hosted app redirects plain http to canonical https origin', async () => {
+  const { app } = await createTestApp({
+    env: selfHostedEnv()
+  });
+
+  const response = await request(app)
+    .get('/api/health?probe=redirect')
+    .expect(308);
+
+  assert.equal(response.headers.location, 'https://cards.example/api/health?probe=redirect');
+});
+
+test('self-hosted https redirect rejects protocol-relative open redirects', async () => {
+  const { app } = await createTestApp({
+    env: selfHostedEnv()
+  });
+
+  const response = await request(app)
+    .get('//evil.example/path?probe=redirect')
+    .expect(308);
+
+  assert.equal(response.headers.location, 'https://cards.example/evil.example/path?probe=redirect');
+});
+
+test('self-hosted app sends hsts csp and canonical cors behind tls proxy', async () => {
+  const { app } = await createTestApp({
+    env: selfHostedEnv(),
+    corsOrigin: 'https://option.example'
+  });
+
+  const response = await request(app)
+    .get('/api/health')
+    .set('origin', 'https://cards.example')
+    .set('x-forwarded-proto', 'https')
+    .expect(200);
+
+  assert.equal(response.headers['strict-transport-security'], 'max-age=31536000; includeSubDomains');
+  assert.match(response.headers['content-security-policy'], /default-src 'self'/);
+  assert.match(response.headers['content-security-policy'], /upgrade-insecure-requests/);
+  assert.equal(response.headers['x-content-type-options'], 'nosniff');
+  assert.equal(response.headers['access-control-allow-origin'], 'https://cards.example');
+});
 
 test('authenticated API returns current user and visible decks', async () => {
   const { app } = await createTestApp();
@@ -576,6 +640,94 @@ test('Bearer API tokens authenticate /api/me and invalid tokens fail', async () 
     .expect((res) => {
       assert.equal(res.body.error.code, 'unauthorized');
     });
+});
+
+test('deck-scoped API tokens require matching deck scope', async () => {
+  const { app, supabase } = await createTokenTestApp();
+
+  const scoped = await asUser(request(app)
+    .post('/api/tokens')
+    .send({ label: 'Deck add-on', deckId: 'deck-demo-zanki' }), 'you', 'You').expect(201);
+  assert.equal(scoped.body.deckId, 'deck-demo-zanki');
+  assert.equal(supabase.tables.user_tokens[0].deck_id, 'deck-demo-zanki');
+
+  await request(app)
+    .get('/api/me')
+    .set('authorization', `Bearer ${scoped.body.token}`)
+    .expect(401)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'unauthorized');
+    });
+
+  await request(app)
+    .get('/api/me?deck_uuid=deck-demo-zanki')
+    .set('authorization', `Bearer ${scoped.body.token}`)
+    .expect(401)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'unauthorized');
+    });
+
+  await request(app)
+    .get('/api/decks?deckId=deck-demo-zanki')
+    .set('authorization', `Bearer ${scoped.body.token}`)
+    .expect(401)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'unauthorized');
+    });
+
+  await request(app)
+    .get('/api/tokens?deckId=deck-demo-zanki')
+    .set('authorization', `Bearer ${scoped.body.token}`)
+    .expect(401)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'unauthorized');
+    });
+
+  await request(app)
+    .post('/api/tokens')
+    .set('authorization', `Bearer ${scoped.body.token}`)
+    .send({})
+    .expect(401)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'unauthorized');
+    });
+
+  await request(app)
+    .get('/api/decks/deck-other-valid')
+    .set('authorization', `Bearer ${scoped.body.token}`)
+    .expect(401)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'unauthorized');
+    });
+
+  const matchingDeck = await request(app)
+    .get('/api/decks/deck-demo-zanki')
+    .set('authorization', `Bearer ${scoped.body.token}`)
+    .expect(200);
+  assert.equal(matchingDeck.body.decks[0].id, 'deck-demo-zanki');
+
+  const replacement = await request(app)
+    .post('/api/tokens')
+    .set('authorization', `Bearer ${scoped.body.token}`)
+    .send({ label: 'Replacement', deckId: 'deck-demo-zanki' })
+    .expect(201);
+  assert.equal(replacement.body.deckId, 'deck-demo-zanki');
+
+  await request(app)
+    .post('/api/tokens')
+    .set('authorization', `Bearer ${scoped.body.token}`)
+    .send({ deckId: 'deck-other-valid' })
+    .expect(401)
+    .expect((res) => {
+      assert.equal(res.body.error.code, 'unauthorized');
+    });
+
+  const aliasReplacement = await request(app)
+    .post('/api/tokens')
+    .set('authorization', `Bearer ${scoped.body.token}`)
+    .send({ label: 'Alias replacement', deck_uuid: 'deck-demo-zanki' })
+    .expect(201);
+  assert.equal(aliasReplacement.body.deckId, 'deck-demo-zanki');
 });
 
 test('token management gracefully reports unavailable Supabase setup', async () => {

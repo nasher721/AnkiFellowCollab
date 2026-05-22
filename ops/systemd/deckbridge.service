@@ -1,0 +1,27 @@
+[Unit]
+Description=DeckBridge self-hosted API and web server
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deckbridge
+Group=deckbridge
+WorkingDirectory=/opt/deckbridge/current
+EnvironmentFile=/etc/deckbridge/deckbridge.env
+ExecStart=/usr/bin/node server/start-production.mjs
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/deckbridge/current/.deckbridge /opt/deckbridge/backups
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -19,7 +19,7 @@ import { createRepository } from './repositories/index.mjs';
 import { createRateLimiters } from './rateLimits.mjs';
 import { ensureDataDirs, loadState, paths, saveState } from './store.mjs';
 import { createUserToken, listUserTokens, revokeUserToken } from './tokens.mjs';
-import { assertValidDeckId, assertValidEmail, assertValidSessionRole, deckIdFromRequest, hashSecret } from './security.mjs';
+import { assertSelfHostedSecurityConfig, assertValidDeckId, assertValidEmail, assertValidSessionRole, buildSecurityHeaders, deckIdFromRequest, hashSecret } from './security.mjs';
 import { encodeCursor, decodeCursor, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from './pagination.mjs';
 
 const ADDON_PACKAGE_FILENAME = 'deckbridge-sync.ankiaddon';
@@ -89,6 +89,17 @@ function syncCardsRequestBytes() {
 function cleanShortText(value, fallback, maxLength = 120) {
   const text = typeof value === 'string' ? value.trim() : '';
   return (text || fallback).slice(0, maxLength);
+}
+
+function canonicalHttpsRedirectTarget(originalUrl, publicUrl) {
+  const target = new URL(publicUrl);
+  const rawPath = typeof originalUrl === 'string' && originalUrl ? originalUrl : '/';
+  const safePath = `/${rawPath.replace(/^\/+/, '')}`;
+  const queryIndex = safePath.indexOf('?');
+  target.pathname = queryIndex >= 0 ? safePath.slice(0, queryIndex) : safePath;
+  target.search = queryIndex >= 0 ? safePath.slice(queryIndex) : '';
+  target.hash = '';
+  return target.toString();
 }
 
 function cleanIsoOrNull(value) {
@@ -796,40 +807,43 @@ function createSimplePdf(lines) {
 }
 
 export function createApp(options = {}) {
-  const production = options.production ?? process.env.NODE_ENV === 'production';
+  const env = options.env || process.env;
+  const selfHostSecurity = assertSelfHostedSecurityConfig(env);
+  const production = options.production ?? env.NODE_ENV === 'production';
   const app = express();
-  const trustProxy = options.trustProxy ?? (process.env.VERCEL ? 1 : false);
+  const trustProxy = options.trustProxy ?? selfHostSecurity.trustProxy ?? (env.VERCEL ? 1 : false);
   app.set('trust proxy', trustProxy);
   const repository = options.repository || createRepository(options);
   const auth = options.auth || createAuth({ ...options, production });
   const parsePackage = options.parseApkg || parseApkg;
   const createPackage = options.createApkg || createApkg;
   const aiGateway = options.aiGateway || createAiGateway(options.aiGatewayOptions || {});
-  const anonKey = options.supabaseAnonKey || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
-  const loginClient = options.authLoginClient || ((options.supabaseUrl || process.env.SUPABASE_URL) && anonKey
-    ? createClient(options.supabaseUrl || process.env.SUPABASE_URL, anonKey, {
+  const anonKey = options.supabaseAnonKey || env.SUPABASE_ANON_KEY || env.VITE_SUPABASE_ANON_KEY;
+  const supabaseUrl = options.supabaseUrl || env.SUPABASE_URL || env.VITE_SUPABASE_URL;
+  const loginClient = options.authLoginClient || (supabaseUrl && anonKey
+    ? createClient(supabaseUrl, anonKey, {
       auth: { persistSession: false, autoRefreshToken: false }
     })
     : null);
   const upload = multer({
     dest: paths().uploadsDir,
-    limits: { fileSize: Number(process.env.MAX_APKG_BYTES || 250 * 1024 * 1024), files: 1 },
+    limits: { fileSize: Number(env.MAX_APKG_BYTES || 250 * 1024 * 1024), files: 1 },
     fileFilter: (_req, file, cb) => {
       if (/\.apkg$/i.test(file.originalname)) cb(null, true);
       else cb(new AppError(400, 'invalid_upload_type', 'Only .apkg uploads are supported'));
     }
   });
-  const corsOrigin = options.corsOrigin ?? process.env.CORS_ORIGIN ?? (production ? false : true);
+  const corsOrigin = selfHostSecurity.corsOrigin ?? options.corsOrigin ?? env.CORS_ORIGIN ?? (production ? false : true);
   const rateLimiters = createRateLimiters(options.rateLimits);
+  const securityHeaders = buildSecurityHeaders({ requireHttps: selfHostSecurity.requireHttps });
 
   app.disable('x-powered-by');
-  app.use((_req, res, next) => {
-    res.set({
-      'X-Content-Type-Options': 'nosniff',
-      'Referrer-Policy': 'no-referrer',
-      'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
-      'Cache-Control': 'no-store'
-    });
+  app.use((req, res, next) => {
+    res.set(securityHeaders);
+    if (selfHostSecurity.requireHttps && !req.secure && selfHostSecurity.publicUrl) {
+      res.redirect(308, canonicalHttpsRedirectTarget(req.originalUrl || req.url, selfHostSecurity.publicUrl));
+      return;
+    }
     next();
   });
   app.use(compression({ level: 6, threshold: 1024 }));
@@ -928,7 +942,17 @@ export function createApp(options = {}) {
       const label = typeof req.body.label === 'string' && req.body.label.trim()
         ? req.body.label.trim()
         : 'Anki Add-on';
-      const token = await createUserToken(auth.supabase, req.user, label);
+      const rawDeckId = req.body.deckId || req.body.deck_id || req.body.deck_uuid;
+      const requestedDeckId = typeof rawDeckId === 'string' && rawDeckId.trim()
+        ? assertValidDeckId(rawDeckId.trim())
+        : null;
+      const tokenDeckId = req.user.token?.deckId || null;
+      if (tokenDeckId && !requestedDeckId) fail(403, 'forbidden', 'Deck-scoped tokens can only create deck-scoped replacement tokens');
+      if (tokenDeckId && requestedDeckId !== tokenDeckId) fail(403, 'forbidden', 'Deck-scoped tokens cannot create tokens for another deck');
+      if (requestedDeckId) await repository.getDeckState(req.user, requestedDeckId);
+      const token = await createUserToken(auth.supabase, req.user, label, {
+        deckId: requestedDeckId || undefined
+      });
       res.status(201).json(token);
     } catch (error) {
       next(error);
@@ -937,7 +961,7 @@ export function createApp(options = {}) {
 
   app.use('/api/auth/proxy', async (req, res, next) => {
     try {
-      const supabaseUrlVal = options.supabaseUrl || process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+      const supabaseUrlVal = supabaseUrl;
       const anonKeyVal = anonKey;
       if (!supabaseUrlVal || !anonKeyVal) fail(503, 'auth_proxy_unavailable', 'Auth service is not configured');
       const targetUrl = `${supabaseUrlVal}/auth/v1${req.url}`;
@@ -973,7 +997,14 @@ export function createApp(options = {}) {
         email: data.user.email || email,
         name: data.user.user_metadata?.name || data.user.email || email
       };
-      const token = await createUserToken(auth.supabase, user, 'Anki Add-on login');
+      const rawDeckId = req.body.deckId || req.body.deck_id || req.body.deck_uuid;
+      const requestedDeckId = typeof rawDeckId === 'string' && rawDeckId.trim()
+        ? assertValidDeckId(rawDeckId.trim())
+        : null;
+      if (requestedDeckId) await repository.getDeckState(user, requestedDeckId);
+      const token = await createUserToken(auth.supabase, user, 'Anki Add-on login', {
+        deckId: requestedDeckId || undefined
+      });
       const decks = typeof repository.listDecks === 'function' ? await repository.listDecks(user) : [];
       res.json({ user, token, decks });
     } catch (error) {

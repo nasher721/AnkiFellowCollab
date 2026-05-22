@@ -14,6 +14,14 @@ function getBearerToken(req) {
   return match?.[1] || null;
 }
 
+function deckScopeFromRequest(req) {
+  if (req.params?.deckId) return req.params.deckId;
+  if (req.method === 'POST' && req.path === '/api/tokens') {
+    return req.body?.deckId || req.body?.deck_id || req.body?.deck_uuid;
+  }
+  return undefined;
+}
+
 export function createAuth(options = {}) {
   const supabaseUrl = options.supabaseUrl || process.env.SUPABASE_URL;
   const serviceKey = options.supabaseServiceRoleKey || process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -26,7 +34,9 @@ export function createAuth(options = {}) {
     const token = getBearerToken(req);
     if (supabase && token) {
       // Try DeckBridge API token first (db_ prefix)
-      const tokenUser = await resolveTokenUser(supabase, token);
+      const tokenUser = await resolveTokenUser(supabase, token, {
+        deckId: deckScopeFromRequest(req)
+      });
       if (tokenUser) return tokenUser;
       if (token.startsWith('db_')) fail(401, 'unauthorized', 'Invalid or expired session');
       // Fall back to Supabase JWT
