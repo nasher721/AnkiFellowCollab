@@ -1,7 +1,14 @@
 import { spawn } from 'node:child_process';
 
-const ANKISKILL_PYTHON = process.env.ANKISKILL_PYTHON || '/Users/Nash/.local/share/uv/tools/ankiskill/bin/python';
 const COMMAND_TIMEOUT_MS = Number(process.env.APKG_TOOL_TIMEOUT_MS || 30000);
+
+function pythonCandidates() {
+  if (process.env.ANKISKILL_PYTHON) return [process.env.ANKISKILL_PYTHON];
+  const launchers = process.platform === 'win32'
+    ? ['python3', 'python', 'py']
+    : ['python3', 'python'];
+  return [...launchers, '/Users/Nash/.local/share/uv/tools/ankiskill/bin/python'];
+}
 
 export function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -29,7 +36,15 @@ export function runCommand(command, args, options = {}) {
 }
 
 async function runPython(script, args = []) {
-  return runCommand(ANKISKILL_PYTHON, ['-c', script, ...args]);
+  const errors = [];
+  for (const command of pythonCandidates()) {
+    try {
+      return await runCommand(command, ['-c', script, ...args]);
+    } catch (error) {
+      errors.push(`${command}: ${error.message}`);
+    }
+  }
+  throw new Error(`No Python runtime could parse the APKG fallback. Tried ${errors.join('; ')}`);
 }
 
 export async function parseApkg(apkgPath) {

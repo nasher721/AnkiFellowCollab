@@ -106,6 +106,7 @@ export function normalizeSuggestionInput(body, card) {
 export function normalizeParsedDeck(parsed, sourceName = 'Imported Deck') {
   const cards = Array.isArray(parsed?.cards) ? parsed.cards : [];
   const deckName = parsed?.deck_name || parsed?.name || sourceName.replace(/\.apkg$/i, '') || 'Imported Deck';
+  const deckId = `deck-${randomUUID()}`;
   const normalizedCards = cards.map((card, index) => {
     const fields = card.fields && typeof card.fields === 'object'
       ? Object.fromEntries(Object.entries(card.fields).map(([key, value]) => [key, String(value ?? '')]))
@@ -120,9 +121,10 @@ export function normalizeParsedDeck(parsed, sourceName = 'Imported Deck') {
       ? card.fieldOrder.map(String).filter((field) => field in fields)
       : Object.keys(fields);
     const noteType = String(card.type || card.noteType || card.modelName || 'Basic');
+    const sourceCardId = String(card.id || card.noteId || card.guid || `card-${index + 1}`);
 
     return {
-      id: String(card.id || card.noteId || card.guid || `card-${index + 1}-${randomUUID()}`),
+      id: importedCardId(deckId, sourceCardId, index),
       ankiNoteId: card.noteId || card.ankiNoteId || null,
       type: noteType,
       modelName: String(card.modelName || card.noteType || noteType),
@@ -147,7 +149,7 @@ export function normalizeParsedDeck(parsed, sourceName = 'Imported Deck') {
   });
 
   return {
-    id: `deck-${randomUUID()}`,
+    id: deckId,
     name: deckName,
     description: parsed?.description || `${deckName} imported from Anki package`,
     owner: 'You',
@@ -163,6 +165,16 @@ export function normalizeParsedDeck(parsed, sourceName = 'Imported Deck') {
       deckPath: parsed?.deck_path || deckName
     }
   };
+}
+
+function importedCardId(deckId, sourceCardId, index) {
+  const source = cleanText(sourceCardId, `card-${index + 1}`, 160) || `card-${index + 1}`;
+  const slug = source
+    .replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || `card-${index + 1}`;
+  const hash = createHash('sha256').update(`${source}:${index}`).digest('hex').slice(0, 10);
+  return `${deckId}-${slug}-${hash}`;
 }
 
 function cleanFields(fields) {

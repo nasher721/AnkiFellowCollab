@@ -548,15 +548,19 @@ class TestMediaSync(unittest.TestCase):
             http_error(502, {'detail': 'Bad Gateway'}),
             FakeResponse({'ok': True}),
         ]
-        with tempfile.NamedTemporaryFile() as media_file:
+        with tempfile.NamedTemporaryFile(delete=False) as media_file:
             media_file.write(b'png-bytes')
             media_file.flush()
+            media_path = media_file.name
 
+        try:
             upload_media_file('https://storage.example/signed-upload', {
                 'filename': 'large.png',
                 'mimeType': 'image/png',
-                'path': media_file.name,
+                'path': media_path,
             })
+        finally:
+            os.unlink(media_path)
 
         self.assertEqual(mock_urlopen.call_count, 2)
         mock_sleep.assert_called_once()

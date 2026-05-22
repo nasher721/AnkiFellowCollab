@@ -73,7 +73,8 @@ test('fallback APKG parser emits one DeckBridge card per Anki card ordinal', asy
     const deck = normalizeParsedDeck(parsed, 'multi-template.apkg');
 
     assert.equal(deck.cards.length, 2);
-    assert.deepEqual(deck.cards.map((card) => card.id), ['1777777777000-0', '1777777777000-1']);
+    assert.equal(new Set(deck.cards.map((card) => card.id)).size, 2);
+    assert.ok(deck.cards.every((card) => card.id.startsWith(`${deck.id}-1777777777000-`)));
     assert.deepEqual(deck.cards.map((card) => card.ankiNoteId), [1777777777000, 1777777777000]);
     assert.deepEqual(deck.cards.map((card) => card.clozeOrd), [0, 1]);
     assert.deepEqual(deck.cards.map((card) => card.templateFront), ['{{Front}}', '{{Back}}']);

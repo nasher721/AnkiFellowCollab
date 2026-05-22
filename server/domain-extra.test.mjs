@@ -35,7 +35,7 @@ test('normalizeParsedDeck handles empty cards', () => {
 test('normalizeParsedDeck generates IDs for cards without them', () => {
   const deck = normalizeParsedDeck({ cards: [{ front: 'Q', back: 'A' }] });
   assert.ok(deck.cards[0].id);
-  assert.ok(deck.cards[0].id.startsWith('card-'));
+  assert.ok(deck.cards[0].id.startsWith(`${deck.id}-card-1-`));
 });
 
 test('normalizeAddonSyncInput validates card count', () => {
