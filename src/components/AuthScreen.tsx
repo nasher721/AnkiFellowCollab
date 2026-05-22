@@ -82,6 +82,8 @@ export function AuthScreen({
             <input
               aria-label="Email"
               autoComplete="email"
+              id="deckbridge-auth-email"
+              name="email"
               placeholder="you@example.com"
               type="email"
               value={authEmail}
@@ -94,6 +96,8 @@ export function AuthScreen({
             <input
               aria-label="Password"
               autoComplete={isSignIn ? 'current-password' : 'new-password'}
+              id="deckbridge-auth-password"
+              name="password"
               placeholder="Enter your password"
               type="password"
               minLength={6}
