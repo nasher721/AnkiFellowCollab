@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .deckbridge/
+.deckbridge-backups/
 .env
 .env.*
 !.env.example

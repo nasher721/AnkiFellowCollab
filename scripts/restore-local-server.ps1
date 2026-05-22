@@ -6,19 +6,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Invoke-NativeCommand {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$FilePath,
-        [Parameter(ValueFromRemainingArguments = $true)]
-        [string[]]$Arguments
-    )
-
-    & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Command failed with exit code ${LASTEXITCODE}: $FilePath $($Arguments -join ' ')"
-    }
-}
+. (Join-Path $PSScriptRoot "native-command.ps1")
+. (Join-Path $PSScriptRoot "supabase-storage-path.ps1")
 
 $resolvedBackupPath = Resolve-Path -LiteralPath $BackupPath
 $backupRoot = $resolvedBackupPath.Path
@@ -42,8 +31,9 @@ Invoke-NativeCommand docker exec $dbContainer pg_restore -U postgres --clean --i
 Invoke-NativeCommand docker exec $dbContainer rm -f /tmp/deckbridge-postgres.dump
 
 Write-Host "Restoring storage into container: $storageContainer"
-Invoke-NativeCommand docker exec $storageContainer find /var/lib/storage -mindepth 1 -exec rm -rf "{}" "+"
-Invoke-NativeCommand docker cp "$storagePath/." "${storageContainer}:/var/lib/storage"
+$containerStoragePath = Resolve-SupabaseStorageContainerPath -Container $storageContainer
+Invoke-NativeCommand docker exec $storageContainer find $containerStoragePath -mindepth 1 -exec rm -rf "{}" "+"
+Invoke-NativeCommand docker cp "$storagePath/." "${storageContainer}:$containerStoragePath"
 
 if (Test-Path -LiteralPath $appStateArchive -PathType Leaf) {
     if (Test-Path -LiteralPath ".deckbridge" -PathType Container) {

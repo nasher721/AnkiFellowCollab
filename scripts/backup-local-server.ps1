@@ -6,19 +6,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Invoke-NativeCommand {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$FilePath,
-        [Parameter(ValueFromRemainingArguments = $true)]
-        [string[]]$Arguments
-    )
-
-    & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Command failed with exit code ${LASTEXITCODE}: $FilePath $($Arguments -join ' ')"
-    }
-}
+. (Join-Path $PSScriptRoot "native-command.ps1")
+. (Join-Path $PSScriptRoot "supabase-storage-path.ps1")
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $backupDir = Join-Path $Destination "$ProjectId-$timestamp"
@@ -50,8 +39,9 @@ Invoke-NativeCommand docker exec $dbContainer pg_dump -U postgres -Fc -f /tmp/de
 Invoke-NativeCommand docker cp "${dbContainer}:/tmp/deckbridge-postgres.dump" $postgresDump
 Invoke-NativeCommand docker exec $dbContainer rm -f /tmp/deckbridge-postgres.dump
 
-Write-Host "Copying storage from: ${storageContainer}:/var/lib/storage"
-Invoke-NativeCommand docker cp "${storageContainer}:/var/lib/storage" $storagePath
+$containerStoragePath = Resolve-SupabaseStorageContainerPath -Container $storageContainer
+Write-Host "Copying storage from: ${storageContainer}:$containerStoragePath"
+Invoke-NativeCommand docker cp "${storageContainer}:$containerStoragePath" $storagePath
 
 $manifestAppStateArchive = $null
 if (Test-Path -LiteralPath ".deckbridge" -PathType Container) {

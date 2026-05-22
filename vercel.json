@@ -4,7 +4,12 @@
   "framework": "vite",
   "functions": {
     "api/index.mjs": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": [
+        "addons/deckbridge_sync/manifest.json",
+        "dist/deckbridge-sync.ankiaddon",
+        "openapi.yaml"
+      ]
     }
   },
   "rewrites": [

@@ -34,6 +34,14 @@ DECKBRIDGE_REPOSITORY=supabase
 
 For Vercel, set these in the project environment for Production (and Preview if you use preview deployments). `SUPABASE_URL` and `VITE_SUPABASE_URL` must be the Supabase project URL, not the Vercel app URL.
 
+The repository includes `vercel.json` for Vite static hosting plus one Node serverless function at `api/index.mjs`. Vercel builds with:
+
+```bash
+npm run build && npm run package:anki-addon
+```
+
+The generated frontend is served from `dist/`, `/api/*` and `/downloads/*` are routed to the Express API function, and the function bundle explicitly includes the add-on manifest, packaged `.ankiaddon`, and OpenAPI document used at runtime.
+
 4. Build and start the app:
 
 ```bash
