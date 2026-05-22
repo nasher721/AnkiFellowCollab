@@ -68,11 +68,45 @@ export const TOAST_ICONS: Record<Toast['type'], string> = {
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 
+export function normalizeSupabaseProjectUrl(value: string | undefined): string {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return '';
+  try {
+    const url = new URL(trimmed);
+    if (!['http:', 'https:'].includes(url.protocol)) return '';
+    url.hash = '';
+    url.search = '';
+    url.pathname = url.pathname.replace(/\/+$/, '');
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
+}
+
+export function authProxyPathForSupabaseRequest(inputUrl: string, configuredSupabaseUrl = supabaseUrl): string | null {
+  const projectUrl = normalizeSupabaseProjectUrl(configuredSupabaseUrl);
+  if (!projectUrl) return null;
+  try {
+    const requestUrl = new URL(inputUrl);
+    const baseUrl = new URL(projectUrl);
+    if (requestUrl.origin !== baseUrl.origin) return null;
+
+    const basePath = baseUrl.pathname.replace(/\/+$/, '');
+    const authPrefix = `${basePath}/auth/v1`.replace(/\/{2,}/g, '/');
+    const requestPath = requestUrl.pathname.replace(/\/{2,}/g, '/');
+    if (requestPath !== authPrefix && !requestPath.startsWith(`${authPrefix}/`)) return null;
+
+    return `/api/auth/proxy${requestPath.slice(authPrefix.length)}${requestUrl.search}`;
+  } catch {
+    return null;
+  }
+}
+
 function supabaseAuthFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
-  if (supabaseUrl && urlStr.startsWith(supabaseUrl + '/auth/v1/')) {
-    const suffix = urlStr.slice(supabaseUrl.length + '/auth/v1'.length);
-    return fetch('/api/auth/proxy' + suffix, init);
+  const proxyPath = authProxyPathForSupabaseRequest(urlStr);
+  if (proxyPath) {
+    return fetch(proxyPath, init);
   }
   return fetch(input, init);
 }

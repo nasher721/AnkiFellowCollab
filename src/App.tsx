@@ -34,7 +34,7 @@ import {
   type ReviewRiskLabel
 } from './reviewModel';
 export { deriveOwnerReviewQueue, deriveReviewBucketCounts, reviewItemMatchesBucket, selectCardForReview, selectSuggestionForReview } from './reviewModel';
-export { authMessage, deriveOwnerAttentionItems, deriveSyncHealth, deriveWorkbenchRail, mergeHydratedDeckState, stateFromMeResponse, withAuthTimeout } from './hooks/common';
+export { authMessage, authProxyPathForSupabaseRequest, deriveOwnerAttentionItems, deriveSyncHealth, deriveWorkbenchRail, mergeHydratedDeckState, normalizeSupabaseProjectUrl, stateFromMeResponse, withAuthTimeout } from './hooks/common';
 export type { OwnerAttentionItem, OwnerReviewQueueItem, SyncHealth, WorkbenchRailKind, WorkbenchTab } from './hooks/common';
 import { Icon } from './components/Icon';
 import { AuthScreen } from './components/AuthScreen';

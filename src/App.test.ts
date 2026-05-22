@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { authMessage, deriveOwnerReviewQueue, deriveReviewBucketCounts, deriveSyncHealth, deriveWorkbenchRail, mergeHydratedDeckState, reviewItemMatchesBucket, selectCardForReview, selectSuggestionForReview, stateFromMeResponse, withAuthTimeout } from './App';
+import { authMessage, authProxyPathForSupabaseRequest, deriveOwnerReviewQueue, deriveReviewBucketCounts, deriveSyncHealth, deriveWorkbenchRail, mergeHydratedDeckState, normalizeSupabaseProjectUrl, reviewItemMatchesBucket, selectCardForReview, selectSuggestionForReview, stateFromMeResponse, withAuthTimeout } from './App';
 import type { AiQualityPulse, AppState, DeckCard, Suggestion } from './types';
 
 const NOW = new Date('2026-05-09T12:00:00.000Z').getTime();
@@ -177,6 +177,18 @@ describe('auth helpers', () => {
     const message = authMessage({ name: 'AuthRetryableFetchError', message: '{}', status: 0 }, 'sign-in');
 
     expect(message).toContain('could not reach the auth provider');
+  });
+
+  it('normalizes Supabase project URLs before routing auth through the proxy', () => {
+    expect(normalizeSupabaseProjectUrl(' https://project.supabase.co/ ')).toBe('https://project.supabase.co');
+    expect(authProxyPathForSupabaseRequest(
+      'https://project.supabase.co/auth/v1/token?grant_type=password',
+      ' https://project.supabase.co/ '
+    )).toBe('/api/auth/proxy/token?grant_type=password');
+    expect(authProxyPathForSupabaseRequest(
+      'https://project.supabase.co//auth/v1/token?grant_type=password',
+      'https://project.supabase.co/'
+    )).toBe('/api/auth/proxy/token?grant_type=password');
   });
 
   it('rejects auth requests that hang beyond the timeout', async () => {
