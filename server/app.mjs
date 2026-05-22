@@ -931,7 +931,17 @@ export function createApp(options = {}) {
       const label = typeof req.body.label === 'string' && req.body.label.trim()
         ? req.body.label.trim()
         : 'Anki Add-on';
-      const token = await createUserToken(auth.supabase, req.user, label);
+      const rawDeckId = req.body.deckId || req.body.deck_id || req.body.deck_uuid;
+      const requestedDeckId = typeof rawDeckId === 'string' && rawDeckId.trim()
+        ? assertValidDeckId(rawDeckId.trim())
+        : null;
+      const tokenDeckId = req.user.token?.deckId || null;
+      if (tokenDeckId && !requestedDeckId) fail(403, 'forbidden', 'Deck-scoped tokens can only create deck-scoped replacement tokens');
+      if (tokenDeckId && requestedDeckId !== tokenDeckId) fail(403, 'forbidden', 'Deck-scoped tokens cannot create tokens for another deck');
+      if (requestedDeckId) await repository.getDeckState(req.user, requestedDeckId);
+      const token = await createUserToken(auth.supabase, req.user, label, {
+        deckId: requestedDeckId || undefined
+      });
       res.status(201).json(token);
     } catch (error) {
       next(error);
@@ -976,7 +986,14 @@ export function createApp(options = {}) {
         email: data.user.email || email,
         name: data.user.user_metadata?.name || data.user.email || email
       };
-      const token = await createUserToken(auth.supabase, user, 'Anki Add-on login');
+      const rawDeckId = req.body.deckId || req.body.deck_id || req.body.deck_uuid;
+      const requestedDeckId = typeof rawDeckId === 'string' && rawDeckId.trim()
+        ? assertValidDeckId(rawDeckId.trim())
+        : null;
+      if (requestedDeckId) await repository.getDeckState(user, requestedDeckId);
+      const token = await createUserToken(auth.supabase, user, 'Anki Add-on login', {
+        deckId: requestedDeckId || undefined
+      });
       const decks = typeof repository.listDecks === 'function' ? await repository.listDecks(user) : [];
       res.json({ user, token, decks });
     } catch (error) {
