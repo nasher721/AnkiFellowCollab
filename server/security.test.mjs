@@ -227,16 +227,24 @@ test('trusted proxy parser accepts explicit values only', () => {
 });
 
 test('buildSecurityHeaders enables hsts only when https is required', () => {
-  const headers = buildSecurityHeaders({ requireHttps: true });
+  const headers = buildSecurityHeaders({ requireHttps: true, supabaseUrl: 'https://supabase.example.test' });
   assert.equal(headers['X-Content-Type-Options'], 'nosniff');
   assert.equal(headers['Referrer-Policy'], 'no-referrer');
   assert.match(headers['Permissions-Policy'], /camera=\(\)/);
   assert.match(headers['Content-Security-Policy'], /default-src 'self'/);
+  assert.match(headers['Content-Security-Policy'], /connect-src 'self' https:\/\/supabase\.example\.test wss:\/\/supabase\.example\.test/);
   assert.equal(headers['Cache-Control'], 'no-store');
   assert.match(headers['Strict-Transport-Security'], /max-age=31536000/);
 
   const localHeaders = buildSecurityHeaders({ requireHttps: false });
   assert.equal(Object.hasOwn(localHeaders, 'Strict-Transport-Security'), false);
+});
+
+test('buildSecurityHeaders allows local Supabase REST and Realtime origins', () => {
+  const headers = buildSecurityHeaders({ supabaseUrl: 'http://192.168.1.211:54321' });
+  const csp = headers['Content-Security-Policy'];
+
+  assert.match(csp, /connect-src 'self' http:\/\/192\.168\.1\.211:54321 ws:\/\/192\.168\.1\.211:54321/);
 });
 
 test('comment resolution migration limits client updates to resolution fields', async () => {

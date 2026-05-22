@@ -861,7 +861,7 @@ export function createApp(options = {}) {
   });
   const corsOrigin = selfHostSecurity.corsOrigin ?? options.corsOrigin ?? env.CORS_ORIGIN ?? (production ? false : true);
   const rateLimiters = createRateLimiters(options.rateLimits);
-  const securityHeaders = buildSecurityHeaders({ requireHttps: selfHostSecurity.requireHttps });
+  const securityHeaders = buildSecurityHeaders({ requireHttps: selfHostSecurity.requireHttps, supabaseUrl });
 
   app.disable('x-powered-by');
   app.use((req, res, next) => {

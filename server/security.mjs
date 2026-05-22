@@ -74,7 +74,43 @@ export function parseTrustedProxy(value) {
   configError(TRUSTED_PROXY_ERROR);
 }
 
-export function buildSecurityHeaders({ requireHttps = false } = {}) {
+function cspOrigin(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)) return null;
+    if (url.username || url.password) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+function websocketOriginFor(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'http:') url.protocol = 'ws:';
+    else if (url.protocol === 'https:') url.protocol = 'wss:';
+    else if (!['ws:', 'wss:'].includes(url.protocol)) return null;
+    url.pathname = '/';
+    url.search = '';
+    url.hash = '';
+    url.username = '';
+    url.password = '';
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+export function buildSecurityHeaders({ requireHttps = false, supabaseUrl = '' } = {}) {
+  const connectSources = [
+    "'self'",
+    cspOrigin(supabaseUrl),
+    websocketOriginFor(supabaseUrl)
+  ].filter(Boolean);
+
   const csp = [
     "default-src 'self'",
     "base-uri 'self'",
@@ -85,7 +121,7 @@ export function buildSecurityHeaders({ requireHttps = false } = {}) {
     "font-src 'self' data:",
     "style-src 'self' 'unsafe-inline'",
     "script-src 'self'",
-    "connect-src 'self'"
+    `connect-src ${[...new Set(connectSources)].join(' ')}`
   ];
   if (requireHttps) csp.push('upgrade-insecure-requests');
 
