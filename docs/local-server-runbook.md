@@ -17,7 +17,7 @@ For self-hosted access, publish only the TLS reverse proxy on ports `80` and `44
 Use Caddy to terminate TLS and proxy to DeckBridge:
 
 ```powershell
-Copy-Item .\deploy\Caddyfile C:\Caddy\Caddyfile
+Copy-Item .\ops\caddy\Caddyfile C:\Caddy\Caddyfile
 caddy validate --config C:\Caddy\Caddyfile
 caddy reload --config C:\Caddy\Caddyfile
 ```
