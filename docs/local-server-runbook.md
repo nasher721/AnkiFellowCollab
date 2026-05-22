@@ -81,6 +81,41 @@ npm run start:local-server
 
 ## Data and backups
 
-- Local Postgres and Storage live in Docker volumes managed by Supabase CLI.
-- Local JSON source data remains in `.deckbridge/state.json`.
-- Back up both the Supabase database and storage volumes before treating this machine as the canonical server.
+Local Postgres and Storage live in Docker volumes managed by Supabase CLI. Local DeckBridge app state, when present, lives in `.deckbridge/`.
+
+Create a local backup before migrations, machine moves, or any change that could affect canonical server data:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-local-server.ps1
+```
+
+The backup script writes timestamped folders under `.deckbridge-backups/` by default. Each backup contains:
+
+- `postgres.dump`: a custom-format Postgres dump from `supabase_db_anki-collab`.
+- `storage/`: a copy of `/var/lib/storage` from `supabase_storage_anki-collab`.
+- `deckbridge-state.zip`: an archive of `.deckbridge/`, if that directory exists.
+- `manifest.json`: backup metadata and the matching restore command.
+
+To preview backup work without creating files:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-local-server.ps1 -DryRun
+```
+
+To use a different Supabase project id or backup destination:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-local-server.ps1 -ProjectId anki-collab -Destination D:\DeckBridgeBackups
+```
+
+Restore from a backup only after confirming the target Supabase local stack is the one you intend to overwrite. The restore process cleans and reloads Postgres, clears and restores Storage, and restores `.deckbridge/` when the backup includes `deckbridge-state.zip`. If `.deckbridge/` already exists, it is renamed before the archived state is expanded.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restore-local-server.ps1 -BackupPath .deckbridge-backups\anki-collab-YYYYMMDD-HHMMSS
+```
+
+For a custom project id:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restore-local-server.ps1 -BackupPath .deckbridge-backups\anki-collab-YYYYMMDD-HHMMSS -ProjectId anki-collab
+```
