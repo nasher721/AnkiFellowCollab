@@ -346,8 +346,6 @@ export default function App() {
             </button>
           </div>
 
-          <SyncHealthStrip health={syncHealth} onAction={handleSyncAction} />
-
           <div className="right-actions">
             {isDevDemo ? (
               <div className="role-toggle" aria-label="Role selector">
@@ -409,6 +407,17 @@ export default function App() {
 
         <WorkbenchLayout railKind={activeRail} rail={contextRail}>
             <div className="breadcrumb">Decks <span>/</span> {activeDeck.name}</div>
+            <div className="deck-titlebar">
+              <div>
+                <h1>{activeDeck.name}</h1>
+                <p>{activeSummary?.cardCount.toLocaleString()} cards - {activeDeck.description}</p>
+              </div>
+              <div className="deck-title-status">
+                <span>{membershipRole}</span>
+                <span>{activeDeckVisibility}</span>
+              </div>
+            </div>
+            <SyncHealthStrip health={syncHealth} onAction={handleSyncAction} />
             <div className="tabs">
               <button ref={overviewTabRef} className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
               <button className={activeTab === 'review' ? 'active' : ''} onClick={() => setActiveTab('review')}>Review</button>
@@ -681,7 +690,13 @@ export default function App() {
                 </div>
               )}
 
-              <CardVirtualList deckId={activeDeck.id} onCardSelect={setSelectedCardId} selectedCardId={selectedCardId ?? undefined} />
+              <CardVirtualList
+                key={`${activeDeck.id}:${queryInput}:${tagFilter}:${cardStateFilter}:${filteredCards.length}`}
+                deckId={activeDeck.id}
+                initialCards={filteredCards}
+                onCardSelect={setSelectedCardId}
+                selectedCardId={selectedCardId ?? undefined}
+              />
             </div>
             </>) : null}
         </WorkbenchLayout>

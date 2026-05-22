@@ -16,6 +16,26 @@ const PRE_FETCH_THRESHOLD = 200;
 const SCROLL_DEBOUNCE = 150;
 const PAGE_LIMIT = 200;
 
+function primaryField(card: DeckCard) {
+  const ordered = card.fieldOrder?.map((field) => card.fields[field]).find(Boolean);
+  return ordered || card.fields?.Front || Object.values(card.fields || {})[0] || card.id;
+}
+
+function secondaryField(card: DeckCard) {
+  const ordered = card.fieldOrder?.map((field) => card.fields[field]).filter(Boolean);
+  return ordered?.[1] || card.fields?.Back || Object.values(card.fields || {})[1] || card.modelName || card.type;
+}
+
+function compactDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
+}
+
+function statusClass(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'neutral';
+}
+
 export function CardVirtualList({ deckId, initialCards = [], onCardSelect, selectedCardId, initialCursor = null }: CardVirtualListProps) {
   const [cards, setCards] = useState<DeckCard[]>(initialCards);
   const [cursor, setCursor] = useState<string | null>(initialCursor);
@@ -89,8 +109,15 @@ export function CardVirtualList({ deckId, initialCards = [], onCardSelect, selec
   const containerStyle = { height: cards.length * ROW_HEIGHT, position: 'relative' as const };
 
   return (
-    <div ref={scrollRef} className="card-virtual-list" style={{ overflow: 'auto', height: '100%', maxHeight: 'calc(100vh - 300px)' }}>
-      <div style={containerStyle}>
+    <div className="card-virtual-shell">
+      <div className="virtual-table-header" role="row">
+        <span>Card</span>
+        <span>Tags</span>
+        <span>Status</span>
+        <span>Updated</span>
+      </div>
+      <div ref={scrollRef} className="card-virtual-list">
+        <div style={containerStyle}>
         {cards.map((card, index) => {
           const top = index * ROW_HEIGHT;
           return (
@@ -103,25 +130,33 @@ export function CardVirtualList({ deckId, initialCards = [], onCardSelect, selec
                 height: ROW_HEIGHT,
                 left: 0,
                 right: 0,
-                display: 'flex',
-                alignItems: 'center',
-                padding: '0 12px',
                 cursor: 'pointer'
               }}
               onClick={() => onCardSelect(card.id)}
               role="row"
               tabIndex={0}
             >
-              <span style={{ flex: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {card.fields?.Front || Object.values(card.fields || {})[0] || card.id}
+              <span className="virtual-card-copy">
+                <strong>{primaryField(card)}</strong>
+                <small>{secondaryField(card)}</small>
               </span>
-              <span style={{ flex: 1, textAlign: 'center' }}>{card.state}</span>
-              <span style={{ flex: 1, textAlign: 'right' }}>{card.due ?? '-'}</span>
+              <span className="virtual-card-tags">
+                {card.tags.slice(0, 2).map((tag) => <em key={tag}>{tag}</em>)}
+                {card.tags.length > 2 ? <em>+{card.tags.length - 2}</em> : null}
+              </span>
+              <span>
+                <b className={`state-chip state-chip--${statusClass(card.state)}`}>{card.state}</b>
+              </span>
+              <span className="virtual-card-updated">
+                <strong>{compactDate(card.modifiedAt)}</strong>
+                <small>{card.modifiedBy}</small>
+              </span>
             </div>
           );
         })}
+        </div>
+        {loading && <div className="loading-more">Loading more cards...</div>}
       </div>
-      {loading && <div className="loading-more">Loading more cards...</div>}
     </div>
   );
 }
