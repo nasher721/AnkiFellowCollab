@@ -89,6 +89,7 @@ with tempfile.TemporaryDirectory() as tempdir:
                 'modelCss': model.get('css', ''),
                 'clozeOrd': tmpl_idx,
             })
+    con.close()
     print(json.dumps({'deck_name': deck_name, 'cards': cards}))
 `, [apkgPath]);
     try {
