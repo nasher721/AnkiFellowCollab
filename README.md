@@ -22,15 +22,17 @@ DeckBridge now has a shared-web production path for Vercel + Supabase:
 3. Set production environment variables:
 
 ```bash
-SUPABASE_URL=...
+SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_ANON_KEY=...
-VITE_SUPABASE_URL=...
+VITE_SUPABASE_URL=https://<project-ref>.supabase.co
 VITE_SUPABASE_ANON_KEY=...
 SUPABASE_SERVICE_ROLE_KEY=...
 SUPABASE_EXPORTS_BUCKET=deckbridge-exports
 SUPABASE_MEDIA_BUCKET=deckbridge-media
 DECKBRIDGE_REPOSITORY=supabase
 ```
+
+For Vercel, set these in the project environment for Production (and Preview if you use preview deployments). `SUPABASE_URL` and `VITE_SUPABASE_URL` must be the Supabase project URL, not the Vercel app URL.
 
 4. Build and start the app:
 

@@ -23,9 +23,10 @@ function deckScopeFromRequest(req) {
 }
 
 export function createAuth(options = {}) {
-  const supabaseUrl = options.supabaseUrl || process.env.SUPABASE_URL;
-  const serviceKey = options.supabaseServiceRoleKey || process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const production = options.production ?? process.env.NODE_ENV === 'production';
+  const env = options.env || process.env;
+  const supabaseUrl = options.supabaseUrl || env.SUPABASE_URL;
+  const serviceKey = options.supabaseServiceRoleKey || env.SUPABASE_SERVICE_ROLE_KEY;
+  const production = options.production ?? env.NODE_ENV === 'production';
   const supabase = supabaseUrl && serviceKey ? createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false }
   }) : null;

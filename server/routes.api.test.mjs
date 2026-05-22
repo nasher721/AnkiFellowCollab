@@ -339,6 +339,90 @@ test('self-hosted app sends hsts csp and canonical cors behind tls proxy', async
   assert.equal(response.headers['access-control-allow-origin'], 'https://cards.example');
 });
 
+test('auth proxy forwards password auth to normalized Supabase project URL', async () => {
+  const originalFetch = globalThis.fetch;
+  let observed = null;
+  globalThis.fetch = async (url, options) => {
+    observed = { url, options };
+    return new Response(JSON.stringify({
+      access_token: 'access-token',
+      refresh_token: 'refresh-token',
+      expires_in: 3600,
+      token_type: 'bearer',
+      user: { id: 'user-1', email: 'nash@example.com' }
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  try {
+    const { app } = await createTestApp({
+      env: {
+        SUPABASE_URL: 'https://project.supabase.co/',
+        SUPABASE_ANON_KEY: 'anon-key'
+      }
+    });
+
+    await request(app)
+      .post('/api/auth/proxy/token?grant_type=password')
+      .send({ email: 'nash@example.com', password: 'secret' })
+      .expect(200);
+
+    assert.equal(observed.url, 'https://project.supabase.co/auth/v1/token?grant_type=password');
+    assert.equal(observed.options.method, 'POST');
+    assert.equal(observed.options.headers.apikey, 'anon-key');
+    assert.equal(JSON.parse(observed.options.body).email, 'nash@example.com');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('auth proxy reports app-origin Supabase config as deployment misconfiguration', async () => {
+  const { app } = await createTestApp({
+    env: {
+      VITE_SUPABASE_URL: 'https://cards.example',
+      VITE_SUPABASE_ANON_KEY: 'anon-key',
+      VERCEL: '1'
+    }
+  });
+
+  const response = await request(app)
+    .post('/api/auth/proxy/token?grant_type=password')
+    .set('host', 'cards.example')
+    .set('x-forwarded-proto', 'https')
+    .send({ email: 'nash@example.com', password: 'secret' })
+    .expect(424);
+
+  assert.equal(response.body.code, 'auth_proxy_misconfigured');
+  assert.match(response.body.message, /pointed at this app instead of Supabase/);
+});
+
+test('auth proxy rejects successful non-json upstream responses before auth-js treats them as network failures', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('<!doctype html><title>DeckBridge</title>', {
+    status: 200,
+    headers: { 'content-type': 'text/html; charset=utf-8' }
+  });
+  try {
+    const { app } = await createTestApp({
+      env: {
+        SUPABASE_URL: 'https://project.supabase.co',
+        SUPABASE_ANON_KEY: 'anon-key'
+      }
+    });
+
+    const response = await request(app)
+      .post('/api/auth/proxy/token?grant_type=password')
+      .send({ email: 'nash@example.com', password: 'secret' })
+      .expect(424);
+
+    assert.equal(response.body.code, 'auth_proxy_misconfigured');
+    assert.match(response.body.message, /non-JSON response/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('authenticated API returns current user and visible decks', async () => {
   const { app } = await createTestApp();
 

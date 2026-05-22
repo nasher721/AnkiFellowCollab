@@ -52,6 +52,31 @@ function legacyErrorMessage(body) {
   return body.error?.message || body.error || 'Unexpected server error';
 }
 
+function cleanEnvValue(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeHttpOrigin(value) {
+  const raw = cleanEnvValue(value);
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    if (!['http:', 'https:'].includes(url.protocol)) return '';
+    url.hash = '';
+    url.search = '';
+    url.pathname = url.pathname.replace(/\/+$/, '');
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function requestOrigin(req) {
+  const host = req.get('host');
+  if (!host) return '';
+  return `${req.protocol}://${host}`;
+}
+
 function paginateArray(items, limit) {
   const page = items.slice(0, limit);
   const hasMore = items.length > limit;
@@ -810,16 +835,17 @@ export function createApp(options = {}) {
   const env = options.env || process.env;
   const selfHostSecurity = assertSelfHostedSecurityConfig(env);
   const production = options.production ?? env.NODE_ENV === 'production';
+  const anonKey = cleanEnvValue(options.supabaseAnonKey || env.SUPABASE_ANON_KEY || env.VITE_SUPABASE_ANON_KEY);
+  const supabaseUrl = normalizeHttpOrigin(options.supabaseUrl || env.SUPABASE_URL || env.VITE_SUPABASE_URL);
+  const serviceRoleKey = cleanEnvValue(options.supabaseServiceRoleKey || env.SUPABASE_SERVICE_ROLE_KEY);
   const app = express();
   const trustProxy = options.trustProxy ?? selfHostSecurity.trustProxy ?? (env.VERCEL ? 1 : false);
   app.set('trust proxy', trustProxy);
-  const repository = options.repository || createRepository(options);
-  const auth = options.auth || createAuth({ ...options, production });
+  const repository = options.repository || createRepository({ ...options, supabaseUrl, supabaseServiceRoleKey: serviceRoleKey });
+  const auth = options.auth || createAuth({ ...options, production, supabaseUrl, supabaseServiceRoleKey: serviceRoleKey });
   const parsePackage = options.parseApkg || parseApkg;
   const createPackage = options.createApkg || createApkg;
   const aiGateway = options.aiGateway || createAiGateway(options.aiGatewayOptions || {});
-  const anonKey = options.supabaseAnonKey || env.SUPABASE_ANON_KEY || env.VITE_SUPABASE_ANON_KEY;
-  const supabaseUrl = options.supabaseUrl || env.SUPABASE_URL || env.VITE_SUPABASE_URL;
   const loginClient = options.authLoginClient || (supabaseUrl && anonKey
     ? createClient(supabaseUrl, anonKey, {
       auth: { persistSession: false, autoRefreshToken: false }
@@ -963,7 +989,12 @@ export function createApp(options = {}) {
     try {
       const supabaseUrlVal = supabaseUrl;
       const anonKeyVal = anonKey;
-      if (!supabaseUrlVal || !anonKeyVal) fail(503, 'auth_proxy_unavailable', 'Auth service is not configured');
+      if (!supabaseUrlVal || !anonKeyVal) {
+        fail(424, 'auth_proxy_misconfigured', 'DeckBridge authentication is missing SUPABASE_URL or SUPABASE_ANON_KEY on the server.');
+      }
+      if (normalizeHttpOrigin(supabaseUrlVal) === normalizeHttpOrigin(requestOrigin(req))) {
+        fail(424, 'auth_proxy_misconfigured', 'DeckBridge authentication is pointed at this app instead of Supabase. Set SUPABASE_URL to the Supabase project URL in Vercel.');
+      }
       const targetUrl = `${supabaseUrlVal}/auth/v1${req.url}`;
       const headers = { apikey: anonKeyVal, 'content-type': 'application/json' };
       if (req.headers.authorization) headers.authorization = req.headers.authorization;
@@ -976,7 +1007,15 @@ export function createApp(options = {}) {
       if (contentType.includes('application/json')) {
         res.status(upstream.status).json(await upstream.json());
       } else {
-        res.status(upstream.status).set('content-type', contentType).send(await upstream.text());
+        const upstreamText = await upstream.text();
+        if (upstream.ok) {
+          fail(424, 'auth_proxy_misconfigured', 'DeckBridge auth proxy received a non-JSON response. Check that SUPABASE_URL points to the Supabase project URL, not the Vercel app URL.', {
+            upstreamStatus: upstream.status,
+            upstreamContentType: contentType,
+            upstreamPreview: upstreamText.slice(0, 120)
+          });
+        }
+        res.status(upstream.status).set('content-type', contentType).send(upstreamText);
       }
     } catch (error) {
       next(error);

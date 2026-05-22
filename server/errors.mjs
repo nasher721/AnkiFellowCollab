@@ -24,6 +24,7 @@ const CODE_TO_TITLE = {
   invite_used: 'Invite Already Used',
   invite_expired: 'Invite Expired',
   rate_limited: 'Rate Limit Exceeded',
+  auth_proxy_misconfigured: 'Auth Proxy Misconfigured',
   invalid_deck_id: 'Invalid Deck ID',
   invalid_decision: 'Invalid Decision',
   invalid_cursor: 'Invalid Cursor',
