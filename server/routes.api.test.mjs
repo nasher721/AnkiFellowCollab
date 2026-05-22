@@ -267,6 +267,21 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+function selfHostedEnv(overrides = {}) {
+  return {
+    DECKBRIDGE_SELF_HOSTED: 'true',
+    DECKBRIDGE_REQUIRE_HTTPS: 'true',
+    DECKBRIDGE_TRUST_PROXY: '1',
+    APP_PUBLIC_URL: 'https://cards.example',
+    CORS_ORIGIN: 'https://cards.example',
+    SUPABASE_URL: 'https://supabase.example',
+    SUPABASE_ANON_KEY: 'anon-key',
+    VITE_SUPABASE_ANON_KEY: 'anon-key',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
+    ...overrides
+  };
+}
+
 async function seedLocalState(dataDir, mutator) {
   const state = createSeedState();
   mutator(state);
@@ -274,6 +289,37 @@ async function seedLocalState(dataDir, mutator) {
   await fs.writeFile(path.join(dataDir, 'state.json'), `${JSON.stringify(state, null, 2)}\n`, 'utf8');
   return state;
 }
+
+test('self-hosted app redirects plain http to canonical https origin', async () => {
+  const { app } = await createTestApp({
+    env: selfHostedEnv()
+  });
+
+  const response = await request(app)
+    .get('/api/health?probe=redirect')
+    .expect(308);
+
+  assert.equal(response.headers.location, 'https://cards.example/api/health?probe=redirect');
+});
+
+test('self-hosted app sends hsts csp and canonical cors behind tls proxy', async () => {
+  const { app } = await createTestApp({
+    env: selfHostedEnv(),
+    corsOrigin: 'https://option.example'
+  });
+
+  const response = await request(app)
+    .get('/api/health')
+    .set('origin', 'https://cards.example')
+    .set('x-forwarded-proto', 'https')
+    .expect(200);
+
+  assert.equal(response.headers['strict-transport-security'], 'max-age=31536000; includeSubDomains');
+  assert.match(response.headers['content-security-policy'], /default-src 'self'/);
+  assert.match(response.headers['content-security-policy'], /upgrade-insecure-requests/);
+  assert.equal(response.headers['x-content-type-options'], 'nosniff');
+  assert.equal(response.headers['access-control-allow-origin'], 'https://cards.example');
+});
 
 test('authenticated API returns current user and visible decks', async () => {
   const { app } = await createTestApp();
